@@ -1,0 +1,237 @@
+import {useMemo, useState, type ReactNode} from 'react';
+import type * as React from 'react';
+import {
+  BadgeCheck, BriefcaseBusiness, Building2, Check, ChevronLeft, CircleAlert,
+  Copy, Eye, GitBranch, KeyRound, Network, Pencil, Plus, Power, Search, ShieldCheck, Trash2, UserCheck, UsersRound, UserX, X,
+  type LucideIcon,
+} from 'lucide-react';
+import {can} from './authorization';
+import {FormValidationSummary, OptionalLabel, RequiredLabel, validateRequired} from './FormValidation';
+import {SortHeader, useSortableRows, type SortColumn} from './Sorting';
+import type {FoundationState, LocalUser, OrganizationalPosition, OrganizationalUnit, PermissionCode, ScopeType, SecurityRole} from './model';
+import {PERMISSION_CATALOG} from './seed';
+import type {LocalFoundationService, PositionInput, RoleInput, UnitInput} from './service';
+import {formatPersianDate} from './PersianDate';
+
+export type FoundationExecutor = (label: string, work: () => Promise<FoundationState>, success: string) => Promise<void>;
+
+interface PageProps {state: FoundationState; service: LocalFoundationService; execute: FoundationExecutor;}
+
+export function OrganizationOverviewPage({state}: Pick<PageProps, 'state'>) {
+  const organizationalUnits = state.units.filter((unit) => unit.type !== 'شعبه');
+  const activeUnits = organizationalUnits.filter((unit) => unit.status === 'active');
+  const assignedUsers = state.users.filter((user) => user.unitId && user.positionId).length;
+  const usersWithUnit = state.users.filter((user) => user.unitId).length;
+  const usersWithPosition = state.users.filter((user) => user.positionId).length;
+  return <div className="page-stack">
+    <OrgIntro icon={Network} eyebrow="سازمان / نمای سازمان" title="ساختار شرکت در یک نگاه" description="شرکت جاری به‌صورت ضمنی فعال است؛ واحدها، مسئولان و افراد بدون پیچیدگی چندشرکتی در یک نمای واحد دیده می‌شوند." />
+    <section className="org-metrics">
+      <OrgMetric icon={GitBranch} value={activeUnits.length} label="واحد فعال" detail={`${organizationalUnits.length - activeUnits.length} واحد غیرفعال`} />
+      <OrgMetric icon={UsersRound} value={state.users.filter((user) => user.status === 'active').length} label="کاربر فعال" detail={`${usersWithUnit.toLocaleString('en-US')} دارای واحد · ${usersWithPosition.toLocaleString('en-US')} دارای سمت`} />
+      <OrgMetric icon={BriefcaseBusiness} value={state.positions.filter((item) => item.status === 'active').length} label="سمت سازمانی" detail="مستقل از نقش دسترسی" />
+      <OrgMetric icon={KeyRound} value={state.roles.filter((item) => item.status === 'active').length} label="نقش دسترسی" detail="منبع مجوزهای مؤثر" />
+    </section>
+    <div className="org-overview-grid">
+      <section className="org-panel org-panel--wide">
+        <OrgPanelHeading eyebrow="ساختار زنده" title="درخت سازمانی" text="هر شاخه یک واحد قابل‌ویرایش است و تعداد اعضا و مسئول آن را نشان می‌دهد." />
+        <div className="org-tree">{organizationalUnits.filter((unit) => !unit.parentId).map((unit) => <OrgTreeBranch key={unit.id} unit={unit} state={state} depth={0} />)}</div>
+      </section>
+      <section className="org-panel">
+        <OrgPanelHeading eyebrow="کیفیت ساختار" title="پوشش اطلاعات سازمانی" text="رکوردهای ناقص به‌وضوح مشخص می‌شوند تا اصلاح ساختار ساده بماند." />
+        <div className="coverage-ring" style={{'--coverage': `${Math.round((assignedUsers / Math.max(state.users.length, 1)) * 100)}%`} as React.CSSProperties}><strong>{Math.round((assignedUsers / Math.max(state.users.length, 1)) * 100).toLocaleString('en-US')}٪</strong><span>پوشش انتساب</span></div>
+        <div className="coverage-list"><span><i className="dot dot--green" /> واحد سازمانی ثبت‌شده <b>{usersWithUnit.toLocaleString('en-US')}</b></span><span><i className="dot dot--violet" /> سمت سازمانی ثبت‌شده <b>{usersWithPosition.toLocaleString('en-US')}</b></span><span><i className="dot dot--amber" /> هر دو مورد کامل <b>{assignedUsers.toLocaleString('en-US')}</b></span></div>
+      </section>
+    </div>
+    <section className="org-principle"><ShieldCheck size={24} /><div><strong>سمت سازمانی با نقش دسترسی یکی نیست</strong><p>واحد سازمانی و سمت سازمانی دو مفهوم مستقل برای توصیف جایگاه فرد هستند؛ نقش‌ها مجوز، محدوده و دسترسی مؤثر او را می‌سازند.</p></div></section>
+  </div>;
+}
+
+export function UnitsPage({state, service, execute}: PageProps) {
+  const organizationalUnits = state.units.filter((unit) => unit.type !== 'شعبه');
+  const [query, setQuery] = useState('');
+  const [editing, setEditing] = useState<OrganizationalUnit | 'new' | null>(null);
+  const [selectedId, setSelectedId] = useState(organizationalUnits[0]?.id ?? '');
+  const [confirmUnit, setConfirmUnit] = useState<OrganizationalUnit | null>(null);
+  const selected = organizationalUnits.find((unit) => unit.id === selectedId);
+  const mayManage = can(state.activeUser, 'organization.units.manage');
+  const members = selected ? state.users.filter((user) => user.unitId === selected.id) : [];
+  const unitSortColumns = useMemo<SortColumn<OrganizationalUnit>[]>(() => [
+    {key: 'name', kind: 'text', value: (unit) => unit.name},
+    {key: 'type', kind: 'text', value: (unit) => unit.type},
+    {key: 'manager', kind: 'text', value: (unit) => state.users.find((user) => user.id === unit.managerUserId)?.name},
+    {key: 'members', kind: 'number', value: (unit) => state.personnel.filter((person) => person.unitId === unit.id).length + state.users.filter((user) => user.unitId === unit.id && !user.personnelId).length},
+    {key: 'status', kind: 'text', value: (unit) => unit.status === 'active' ? 'فعال' : 'غیرفعال'},
+  ], [state.personnel, state.users]);
+  const filteredUnits = useMemo(() => organizationalUnits.filter((unit) => {const manager = state.users.find((user) => user.id === unit.managerUserId); return `${unit.name} ${unit.type} ${unit.description} ${manager?.name ?? ''}`.toLocaleLowerCase('fa').includes(query.trim().toLocaleLowerCase('fa'));}), [organizationalUnits, state.users, query]);
+  const {sortedRows: sortedUnits, sort: unitSort, requestSort: requestUnitSort} = useSortableRows(filteredUnits, unitSortColumns, 'name', 'asc');
+  return <div className="page-stack">
+    <OrgIntro icon={GitBranch} eyebrow="سازمان / واحدهای سازمانی" title="واحدهای سازمانی" description="ساختار سلسله‌مراتبی شرکت را بدون ایجاد چرخه مدیریت کنید و مسئول و اعضای هر واحد را ببینید." action={mayManage ? <button className="org-primary-action" onClick={() => setEditing('new')}><Plus size={18} /> واحد جدید</button> : undefined} />
+    <section className="unit-layout">
+      <div className="org-panel unit-list-panel">
+        <div className="list-header"><div><strong>ساختار واحدها</strong><span>{organizationalUnits.length.toLocaleString('en-US')} واحد ثبت‌شده</span></div><span className="status-badge status-badge--active">تک‌شرکتی</span></div>
+        <div className="unit-list-tools"><label className="search-box"><Search size={17}/><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="جست‌وجوی نام، نوع، مسئول یا توضیحات واحد"/></label><div className="compact-sort-bar" aria-label="مرتب‌سازی واحدها"><SortHeader columnKey="name" label="نام" sort={unitSort} onSort={requestUnitSort}/><SortHeader columnKey="type" label="نوع" sort={unitSort} onSort={requestUnitSort}/><SortHeader columnKey="manager" label="مسئول" sort={unitSort} onSort={requestUnitSort}/><SortHeader columnKey="members" label="اعضا" sort={unitSort} onSort={requestUnitSort}/><SortHeader columnKey="status" label="وضعیت" sort={unitSort} onSort={requestUnitSort}/></div></div>
+        <div className="unit-list">{sortedUnits.map((unit) => {
+          const manager = state.users.find((user) => user.id === unit.managerUserId);
+          const memberCount = state.personnel.filter((person) => person.unitId === unit.id).length + state.users.filter((user) => user.unitId === unit.id && !user.personnelId).length;
+          return <article key={unit.id} className={`unit-row ${selectedId === unit.id ? 'unit-row--selected' : ''}`}>
+            <button className="unit-main" onClick={() => setSelectedId(unit.id)}><span className="unit-type-icon"><Building2 size={18} /></span><span><strong>{unit.name}</strong><small>{unit.type} · {manager?.name ?? 'بدون مسئول'} · {memberCount.toLocaleString('en-US')} عضو</small></span></button>
+            <span className={`status-badge status-badge--${unit.status}`}>{unit.status === 'active' ? 'فعال' : 'غیرفعال'}</span>
+            {mayManage && <div className="user-actions">
+              <OrgIconAction label="ویرایش واحد" tone="primary" onClick={() => setEditing(unit)}><Pencil size={17} /></OrgIconAction>
+              <OrgIconAction label={unit.status === 'active' ? 'غیرفعال‌سازی واحد' : 'فعال‌سازی واحد'} tone={unit.status === 'active' ? 'danger' : 'success'} onClick={() => unit.status === 'active' ? setConfirmUnit(unit) : execute('unit-status', () => service.setUnitStatus(unit.id, 'active'), 'واحد فعال شد.')}><Power size={17} /></OrgIconAction>
+            </div>}
+          </article>;
+        })}{!sortedUnits.length && <div className="empty-state unit-search-empty"><Search size={24}/><strong>واحدی پیدا نشد</strong><span>عبارت جست‌وجو را تغییر دهید.</span></div>}</div>
+      </div>
+      <aside className="org-panel unit-inspector">
+        {selected ? <><div className="unit-inspector-head"><span className="unit-type-icon unit-type-icon--large"><Building2 size={22} /></span><div><small>{selected.type}</small><h3>{selected.name}</h3><p>{selected.description || 'توضیحی ثبت نشده است.'}</p></div></div><div className="inspector-data"><span>واحد بالادست<strong>{state.units.find((unit) => unit.id === selected.parentId)?.name ?? 'سطح اصلی'}</strong></span><span>مسئول واحد<strong>{state.users.find((user) => user.id === selected.managerUserId)?.name ?? 'تعیین نشده'}</strong></span><span>تعداد اعضا<strong>{members.length.toLocaleString('en-US')} نفر</strong></span></div><div className="member-mini-list"><strong>اعضای این واحد</strong>{members.length ? members.map((user) => <div key={user.id}><span className="persona-avatar" style={{background: user.accent}}>{user.initials}</span><span><b>{user.name}</b><small>{state.positions.find((position) => position.id === user.positionId)?.title ?? 'بدون سمت'}</small></span></div>) : <p>هنوز کاربری به این واحد اختصاص داده نشده است.</p>}</div></> : <div className="empty-state"><CircleAlert size={25} /><strong>یک واحد را انتخاب کنید</strong></div>}
+      </aside>
+    </section>
+    {editing && <UnitDialog unit={editing === 'new' ? undefined : editing} state={state} onClose={() => setEditing(null)} onSubmit={(input) => execute('unit-save', () => editing === 'new' ? service.createUnit(input) : service.updateUnit(editing.id, input), editing === 'new' ? 'واحد سازمانی ایجاد شد.' : 'واحد سازمانی ویرایش شد.').then(() => setEditing(null))} />}
+    {confirmUnit && <ConfirmDialog icon={Power} title="غیرفعال‌سازی واحد" text={`واحد «${confirmUnit.name}» فقط زمانی غیرفعال می‌شود که عضو فعال یا زیرواحد فعال نداشته باشد.`} confirm="تأیید غیرفعال‌سازی" onClose={() => setConfirmUnit(null)} onConfirm={() => execute('unit-status', () => service.setUnitStatus(confirmUnit.id, 'inactive'), 'واحد غیرفعال شد.').then(() => setConfirmUnit(null))} />}
+  </div>;
+}
+
+export function PositionsPage({state, service, execute}: PageProps) {
+  const [query, setQuery] = useState('');
+  const [editing, setEditing] = useState<OrganizationalPosition | 'new' | null>(null);
+  const [confirmPosition, setConfirmPosition] = useState<OrganizationalPosition | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<OrganizationalPosition | null>(null);
+  const mayManage = can(state.activeUser, 'organization.positions.manage');
+  const positionSortColumns = useMemo<SortColumn<OrganizationalPosition>[]>(() => [
+    {key: 'position', kind: 'text', value: (item) => item.title},
+    {key: 'description', kind: 'text', value: (item) => item.description},
+    {key: 'status', kind: 'text', value: (item) => item.status === 'active' ? 'فعال' : 'غیرفعال'},
+    {key: 'assignments', kind: 'number', value: (item) => state.personnel.filter((person) => person.positionId === item.id).length + state.users.filter((user) => user.positionId === item.id && !user.personnelId).length},
+    {key: 'updated', kind: 'date', value: (item) => item.updatedAt},
+  ], [state.personnel, state.users]);
+  const filteredPositions = useMemo(() => {
+    const search = query.trim().toLocaleLowerCase('fa-IR');
+    if (!search) return state.positions;
+    return state.positions.filter((position) => {
+      const assignedNames = state.personnel.filter((person) => person.positionId === position.id).map((person) => `${person.firstName} ${person.lastName}`).concat(state.users.filter((user) => user.positionId === position.id).map((user) => user.name));
+      return `${position.title} ${position.description} ${position.status === 'active' ? 'فعال' : 'غیرفعال'} ${assignedNames.join(' ')}`.toLocaleLowerCase('fa-IR').includes(search);
+    });
+  }, [query, state.personnel, state.positions, state.users]);
+  const {sortedRows: sortedPositions, sort: positionSort, requestSort: requestPositionSort} = useSortableRows(filteredPositions, positionSortColumns, 'position', 'asc');
+  return <div className="page-stack">
+    <OrgIntro icon={BriefcaseBusiness} eyebrow="سازمان / سمت‌ها" title="سمت‌های سازمانی" description="سمت جایگاه فرد در ساختار سازمان است و هیچ مجوز امنیتی را به‌تنهایی ایجاد نمی‌کند." action={mayManage ? <button className="org-primary-action" onClick={() => setEditing('new')}><Plus size={18} /> سمت جدید</button> : undefined} />
+    <section className="position-list-panel"><ListSearchToolbar value={query} onChange={setQuery} placeholder="جست‌وجوی نام، شرح، وضعیت یا افراد دارای سمت" count={filteredPositions.length} unit="سمت"/><div className="position-list-head"><span><SortHeader columnKey="position" label="سمت سازمانی" sort={positionSort} onSort={requestPositionSort}/></span><span><SortHeader columnKey="description" label="شرح سمت" sort={positionSort} onSort={requestPositionSort}/></span><span><SortHeader columnKey="status" label="وضعیت" sort={positionSort} onSort={requestPositionSort}/></span><span><SortHeader columnKey="assignments" label="افراد دارای این سمت" sort={positionSort} onSort={requestPositionSort}/></span><span><SortHeader columnKey="updated" label="آخرین تغییر" sort={positionSort} onSort={requestPositionSort}/></span><span>عملیات</span></div><div className="position-list">{sortedPositions.map((position) => {
+      const personnel = state.personnel.filter((person) => person.positionId === position.id);
+      const standaloneUsers = state.users.filter((user) => user.positionId === position.id && !user.personnelId);
+      const assignmentCount = personnel.length + standaloneUsers.length;
+      return <article className="position-row" key={position.id}><button className="position-row-identity" onClick={() => setEditing(position)}><span><BriefcaseBusiness size={15}/></span><strong>{position.title}</strong></button><p>{position.description || 'شرحی برای این سمت ثبت نشده است.'}</p><span><i className={`status-badge status-badge--${position.status}`}>{position.status === 'active' ? 'فعال' : 'غیرفعال'}</i></span><span className="position-assignment-count"><UsersRound size={15}/><strong>{assignmentCount.toLocaleString('en-US')}</strong><small>نفر</small></span><time>{formatPersianDate(position.updatedAt)}</time>{mayManage ? <div className="position-row-actions"><OrgIconAction label="ویرایش سمت" tone="primary" onClick={() => setEditing(position)}><Pencil size={16} /></OrgIconAction><OrgIconAction label={position.status === 'active' ? 'غیرفعال‌سازی سمت' : 'فعال‌سازی سمت'} tone={position.status === 'active' ? 'danger' : 'success'} onClick={() => position.status === 'active' ? setConfirmPosition(position) : execute('position-status', () => service.setPositionStatus(position.id, 'active'), 'سمت فعال شد.')}><Power size={16} /></OrgIconAction><OrgIconAction label={assignmentCount ? `حذف ممکن نیست؛ سمت به ${assignmentCount.toLocaleString('en-US')} نفر تخصیص دارد` : 'حذف سمت'} tone="danger" onClick={() => setDeleteTarget(position)}><Trash2 size={16}/></OrgIconAction></div> : <span className="read-only-label">فقط مشاهده</span>}</article>;
+    })}{!sortedPositions.length && <SearchEmpty text="سمتی با این جست‌وجو پیدا نشد."/>}</div></section>
+    {editing && <PositionDialog position={editing === 'new' ? undefined : editing} onClose={() => setEditing(null)} onSubmit={(input) => execute('position-save', () => editing === 'new' ? service.createPosition(input) : service.updatePosition(editing.id, input), editing === 'new' ? 'سمت سازمانی ایجاد شد.' : 'سمت سازمانی ویرایش شد.').then(() => setEditing(null))} />}
+    {confirmPosition && <ConfirmDialog icon={Power} title="غیرفعال‌سازی سمت" text={`سمت «${confirmPosition.title}» در صورت نداشتن کاربر فعال، غیرفعال خواهد شد.`} confirm="تأیید غیرفعال‌سازی" onClose={() => setConfirmPosition(null)} onConfirm={() => execute('position-status', () => service.setPositionStatus(confirmPosition.id, 'inactive'), 'سمت غیرفعال شد.').then(() => setConfirmPosition(null))} />}
+    {deleteTarget && <PositionDeleteDialog position={deleteTarget} assignedPeople={state.personnel.filter((person)=>person.positionId===deleteTarget.id).map((person)=>`${person.firstName} ${person.lastName}`).concat(state.users.filter((user)=>user.positionId===deleteTarget.id&&!user.personnelId).map((user)=>user.name))} onClose={()=>setDeleteTarget(null)} onConfirm={()=>execute('position-delete',()=>service.deletePosition(deleteTarget.id),'سمت حذف شد و سابقه آن در ممیزی باقی ماند.').then(()=>setDeleteTarget(null))}/>} 
+  </div>;
+}
+
+export function RolesPage({state, service, execute}: PageProps) {
+  const [query, setQuery] = useState('');
+  const [editing, setEditing] = useState<SecurityRole | 'new' | null>(null);
+  const [viewing, setViewing] = useState<SecurityRole | null>(null);
+  const [assigning, setAssigning] = useState<SecurityRole | null>(null);
+  const [confirmRole, setConfirmRole] = useState<SecurityRole | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<SecurityRole | null>(null);
+  const mayManage = can(state.activeUser, 'organization.roles.manage');
+  const roleSortColumns = useMemo<SortColumn<SecurityRole>[]>(() => [
+    {key: 'role', kind: 'text', value: (item) => item.name},
+    {key: 'description', kind: 'text', value: (item) => item.description},
+    {key: 'status', kind: 'text', value: (item) => item.status === 'active' ? 'فعال' : 'غیرفعال'},
+    {key: 'access', kind: 'number', value: (item) => item.permissions.length},
+    {key: 'users', kind: 'number', value: (item) => state.users.filter((user) => user.roleIds.includes(item.id)).length},
+  ], [state.users]);
+  const filteredRoles = useMemo(() => {
+    const search = query.trim().toLocaleLowerCase('fa-IR');
+    if (!search) return state.roles;
+    return state.roles.filter((role) => {
+      const permissionText = role.permissions.map(permissionLabel).join(' ');
+      return `${role.name} ${role.description} ${scopeLabel(role.scope)} ${role.status === 'active' ? 'فعال' : 'غیرفعال'} ${permissionText} ${role.permissions.join(' ')}`.toLocaleLowerCase('fa-IR').includes(search);
+    });
+  }, [query, state.roles]);
+  const {sortedRows: sortedRoles, sort: roleSort, requestSort: requestRoleSort} = useSortableRows(filteredRoles, roleSortColumns, 'role', 'asc');
+  return <div className="page-stack">
+    <OrgIntro icon={KeyRound} eyebrow="سازمان / نقش‌ها و دسترسی‌ها" title="نقش‌ها و دسترسی‌ها" description="نام نقش به‌تنهایی هیچ اختیاری نمی‌دهد؛ مجوز، محدوده، سیاست رکورد و گارد گردش‌کار با هم دسترسی مؤثر را می‌سازند." action={mayManage ? <button className="org-primary-action" onClick={() => setEditing('new')}><Plus size={18} /> نقش جدید</button> : undefined} />
+    <section className="access-formula"><span>نقش</span><ChevronLeft size={17} /><span>مجوز</span><ChevronLeft size={17} /><span>محدوده</span><ChevronLeft size={17} /><span>سیاست رکورد</span><ChevronLeft size={17} /><span>گارد گردش‌کار</span></section>
+    <section className="role-list-panel">
+      <ListSearchToolbar value={query} onChange={setQuery} placeholder="جست‌وجوی نام نقش، شرح، محدوده، وضعیت یا مجوز" count={filteredRoles.length} unit="نقش"/>
+      <div className="role-list-head"><span><SortHeader columnKey="role" label="نقش" sort={roleSort} onSort={requestRoleSort}/></span><span><SortHeader columnKey="description" label="شرح نقش" sort={roleSort} onSort={requestRoleSort}/></span><span><SortHeader columnKey="status" label="وضعیت" sort={roleSort} onSort={requestRoleSort}/></span><span><SortHeader columnKey="access" label="محدوده و مجوز" sort={roleSort} onSort={requestRoleSort}/></span><span><SortHeader columnKey="users" label="کاربران" sort={roleSort} onSort={requestRoleSort}/></span><span>عملیات</span></div>
+      <div className="role-list">{sortedRoles.map((role) => {
+      const users = state.users.filter((user) => user.roleIds.includes(role.id));
+      return <article className="role-row" key={role.id}>
+        <button className="role-row-identity" onClick={() => setViewing(role)} aria-label={`مشاهده نقش ${role.name}`}><span className="role-row-icon"><KeyRound size={15} /></span><span><strong>{role.name}</strong>{role.protected && <small>پایه محافظت‌شده</small>}</span></button>
+        <p className="role-row-description">{role.description || 'شرحی برای این نقش ثبت نشده است.'}</p>
+        <span><i className={`status-badge status-badge--${role.status}`}>{role.status === 'active' ? 'فعال' : 'غیرفعال'}</i></span>
+        <span className="role-row-access"><strong>{scopeLabel(role.scope)}</strong><small>{role.permissions.length.toLocaleString('en-US')} مجوز</small></span>
+        <button className="role-row-users" onClick={() => setAssigning(role)} aria-label={`کاربران نقش ${role.name}`}><UsersRound size={15}/><strong>{users.length.toLocaleString('en-US')}</strong><small>کاربر</small></button>
+        <div className="role-row-actions">
+          <OrgIconAction label="ورود و مشاهده نقش" onClick={() => setViewing(role)}><Eye size={16}/></OrgIconAction>
+          {mayManage && <><OrgIconAction label="ویرایش نقش و مجوزها" tone="primary" onClick={() => setEditing(role)}><Pencil size={16}/></OrgIconAction><OrgIconAction label="مدیریت کاربران این نقش" tone="qa" onClick={() => setAssigning(role)}><UsersRound size={16}/></OrgIconAction><OrgIconAction label="کپی نقش" onClick={() => execute('role-clone', () => service.cloneRole(role.id), 'یک کپی قابل‌ویرایش از نقش ساخته شد.')}><Copy size={16}/></OrgIconAction><OrgIconAction label={role.status === 'active' ? 'غیرفعال‌سازی نقش' : 'فعال‌سازی نقش'} tone={role.status === 'active' ? 'danger' : 'success'} disabled={role.id === 'role-admin' && role.status === 'active'} onClick={() => role.status === 'active' ? setConfirmRole(role) : execute('role-status', () => service.setRoleStatus(role.id, 'active'), 'نقش فعال شد.')}><Power size={16}/></OrgIconAction><OrgIconAction label={role.protected ? 'نقش محافظت‌شده قابل حذف نیست' : users.length ? `حذف ممکن نیست؛ نقش به ${users.length.toLocaleString('en-US')} کاربر تخصیص دارد` : 'حذف نقش'} tone="danger" onClick={() => setDeleteTarget(role)}><Trash2 size={16}/></OrgIconAction></>}
+        </div>
+      </article>;
+    })}{!sortedRoles.length && <SearchEmpty text="نقشی با این جست‌وجو پیدا نشد."/>}</div></section>
+    {editing && <RoleDialog role={editing === 'new' ? undefined : editing} onClose={() => setEditing(null)} onSubmit={(input) => execute('role-save', () => editing === 'new' ? service.createRole(input) : service.updateRole(editing.id, input), editing === 'new' ? 'نقش دسترسی ایجاد شد.' : 'نقش و مجوزهای آن ویرایش شد.').then(() => setEditing(null))} />}
+    {viewing && <RoleDetailsDialog role={viewing} state={state} onClose={() => setViewing(null)} onEdit={mayManage ? () => {setViewing(null);setEditing(viewing);} : undefined}/>} 
+    {assigning && <RoleAssignmentsDialog role={assigning} state={state} onClose={() => setAssigning(null)} onToggle={(user, checked) => {const roleIds = checked ? [...user.roleIds, assigning.id] : user.roleIds.filter((id) => id !== assigning.id); return execute('role-assignment', () => service.updateUser(user.id, {name: user.name, username: user.username, unitId: user.unitId, positionId: user.positionId, managerUserId: user.managerUserId, roleIds}), checked ? 'نقش به کاربر اضافه شد.' : 'نقش از کاربر حذف شد.');}} />}
+    {confirmRole && <ConfirmDialog icon={Power} title="غیرفعال‌سازی نقش" text={`نقش «${confirmRole.name}» غیرفعال می‌شود و مجوزهای آن از دسترسی مؤثر کاربران حذف خواهد شد.`} confirm="تأیید غیرفعال‌سازی" onClose={() => setConfirmRole(null)} onConfirm={() => execute('role-status', () => service.setRoleStatus(confirmRole.id, 'inactive'), 'نقش غیرفعال شد.').then(() => setConfirmRole(null))} />}
+    {deleteTarget && <RoleDeleteDialog role={deleteTarget} assignedUsers={state.users.filter((user)=>user.roleIds.includes(deleteTarget.id))} onClose={()=>setDeleteTarget(null)} onConfirm={()=>execute('role-delete',()=>service.deleteRole(deleteTarget.id),'نقش حذف شد و سابقه آن در ممیزی باقی ماند.').then(()=>setDeleteTarget(null))}/>} 
+  </div>;
+}
+
+function UnitDialog({unit, state, onClose, onSubmit}: {unit?: OrganizationalUnit; state: FoundationState; onClose: () => void; onSubmit: (input: UnitInput) => void}) {
+  const [name, setName] = useState(unit?.name ?? ''); const [type, setType] = useState(unit?.type ?? 'واحد'); const [parentId, setParentId] = useState(unit?.parentId ?? ''); const [managerUserId, setManagerUserId] = useState(unit?.managerUserId ?? ''); const [description, setDescription] = useState(unit?.description ?? '');
+  const [errors, setErrors] = useState<string[]>([]);
+  const submit = () => {const next = validateRequired([{label:'نام واحد', value:name, valid:(value)=>String(value).trim().length>=2, message:'فیلد «نام واحد» الزامی است و باید حداقل ۲ نویسه داشته باشد.'},{label:'نوع واحد', value:type, valid:(value)=>String(value).trim().length>=2, message:'فیلد «نوع واحد» الزامی است و باید حداقل ۲ نویسه داشته باشد.'}]); if(type.trim()==='شعبه')next.push('شعبه واحد سازمانی محسوب نمی‌شود؛ آن را از منوی «شعبه» ایجاد کنید.'); setErrors(next); if (!next.length) onSubmit({name, type, parentId: parentId || undefined, managerUserId: managerUserId || undefined, description});};
+  const unitTypeOptions = [...new Set(['مدیریت', 'معاونت', 'واحد', 'دپارتمان', 'تیم', type].filter(Boolean))];
+  return <OrgModal onClose={onClose}><DialogHeading eyebrow="واحد سازمانی" title={unit ? 'ویرایش واحد' : 'ایجاد واحد جدید'} text="واحد سازمانی مستقل از شعبه محل استقرار است؛ شعبه‌ها فقط از منوی شعبه مدیریت می‌شوند." onClose={onClose} /><div className="org-form-grid"><FormValidationSummary errors={errors}/><Field label="نام واحد" required><input aria-required="true" aria-invalid={Boolean(errors.length)&&name.trim().length<2} autoFocus value={name} onChange={(event) => setName(event.target.value)} /></Field><Field label="نوع واحد" required><select aria-required="true" aria-invalid={Boolean(errors.length)&&type.trim().length<2} value={type} onChange={(event) => setType(event.target.value)}><option value="">انتخاب کنید</option>{unitTypeOptions.map((item) => <option value={item} key={item}>{item}</option>)}</select></Field><Field label="واحد بالادست"><select value={parentId} onChange={(event) => setParentId(event.target.value)}><option value="">سطح اصلی</option>{state.units.filter((item) => item.id !== unit?.id && item.status === 'active' && item.type !== 'شعبه').map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></Field><Field label="مسئول واحد"><select value={managerUserId} onChange={(event) => setManagerUserId(event.target.value)}><option value="">تعیین نشده</option>{state.users.filter((user) => user.status === 'active').map((user) => <option key={user.id} value={user.id}>{user.name}</option>)}</select></Field><Field label="توضیحات" full><textarea value={description} onChange={(event) => setDescription(event.target.value)} /></Field></div><DialogActions onClose={onClose} submit={unit ? 'ذخیره تغییرات' : 'ایجاد واحد'} onSubmit={submit} /></OrgModal>;
+}
+
+function PositionDialog({position, onClose, onSubmit}: {position?: OrganizationalPosition; onClose: () => void; onSubmit: (input: PositionInput) => void}) { const [title, setTitle] = useState(position?.title ?? ''); const [description, setDescription] = useState(position?.description ?? ''); const [errors,setErrors]=useState<string[]>([]); const submit=()=>{const next=validateRequired([{label:'عنوان سمت',value:title,valid:(value)=>String(value).trim().length>=2,message:'فیلد «عنوان سمت» الزامی است و باید حداقل ۲ نویسه داشته باشد.'}]);setErrors(next);if(!next.length)onSubmit({title,description});}; return <OrgModal onClose={onClose}><DialogHeading eyebrow="سمت سازمانی" title={position ? 'ویرایش سمت' : 'ایجاد سمت جدید'} text="سمت فقط جایگاه سازمانی است و هیچ مجوز امنیتی ایجاد نمی‌کند." onClose={onClose} /><div className="org-form-grid"><FormValidationSummary errors={errors}/><Field label="عنوان سمت" full required><input aria-required="true" aria-invalid={Boolean(errors.length)&&title.trim().length<2} autoFocus value={title} onChange={(event) => setTitle(event.target.value)} placeholder="برای نمونه: سرپرست عملیات" /></Field><Field label="شرح سمت" full><textarea value={description} onChange={(event) => setDescription(event.target.value)} /></Field></div><DialogActions onClose={onClose} submit={position ? 'ذخیره تغییرات' : 'ایجاد سمت'} onSubmit={submit} /></OrgModal>; }
+
+function PositionDeleteDialog({position,assignedPeople,onClose,onConfirm}:{position:OrganizationalPosition;assignedPeople:string[];onClose:()=>void;onConfirm:()=>void}) {const blocked=assignedPeople.length>0;return <OrgModal onClose={onClose}><div className="danger-symbol"><Trash2 size={24}/></div><div className="centered-modal"><h2>{blocked?'حذف این سمت ممکن نیست':'حذف سمت سازمانی'}</h2>{blocked?<><p>سمت «{position.title}» اکنون به {assignedPeople.length.toLocaleString('en-US')} نفر تخصیص دارد. ابتدا سمت فعلی آن‌ها را تغییر دهید.</p><div className="blocked-role-users">{assignedPeople.slice(0,6).map((name)=><span key={name}>{name}</span>)}</div></>:<p>سمت «{position.title}» حذف می‌شود. رخداد حذف و سوابق تغییرات قبلی برای گزارش‌گیری و ممیزی باقی می‌مانند.</p>}<div className="modal-actions modal-actions--center"><button className="button button--secondary" onClick={onClose}>{blocked?'متوجه شدم':'انصراف'}</button>{!blocked&&<button className="button button--danger" onClick={onConfirm}>تأیید حذف سمت</button>}</div></div></OrgModal>}
+
+function RoleDialog({role, onClose, onSubmit}: {role?: SecurityRole; onClose: () => void; onSubmit: (input: RoleInput) => void}) {
+  const [name, setName] = useState(role?.name ?? ''); const [description, setDescription] = useState(role?.description ?? ''); const [scope, setScope] = useState<ScopeType>(role?.scope ?? 'SELF'); const [permissions, setPermissions] = useState<PermissionCode[]>(role?.permissions ?? []); const [domain, setDomain] = useState<(typeof PERMISSION_CATALOG)[number]['domain']>('organization');
+  const [permissionQuery, setPermissionQuery] = useState('');
+  const [errors,setErrors]=useState<string[]>([]);
+  const domainLabels: Record<string,string> = {organization:'سازمان',hr:'منابع انسانی',crm:'مشتری و CRM',sales:'فروش',marketing:'بازاریابی',catalog:'کاتالوگ',procurement:'تدارکات',supplier:'تأمین‌کننده',finance:'مالی',treasury:'خزانه',accounting:'حسابداری',warehouse:'انبار',logistics:'لجستیک',service:'خدمات',support:'پشتیبانی',contract:'قرارداد',asset:'دارایی',task:'وظایف',communications:'ارتباطات',letter:'نامه',document:'اسناد',management:'مدیریت'};
+  const domains = [...new Set(PERMISSION_CATALOG.map((item)=>item.domain))].map((id)=>({id,label:domainLabels[id]??id}));
+  const normalizedPermissionQuery = permissionQuery.trim().toLocaleLowerCase('fa-IR');
+  const visible = PERMISSION_CATALOG.filter((item) => (!normalizedPermissionQuery ? item.domain === domain : true) && `${item.label} ${item.description} ${item.code} ${domainLabels[item.domain] ?? item.domain}`.toLocaleLowerCase('fa-IR').includes(normalizedPermissionQuery));
+  const submit=()=>{const next=validateRequired([{label:'نام نقش',value:name,valid:(value)=>String(value).trim().length>=2,message:'فیلد «نام نقش» الزامی است و باید حداقل ۲ نویسه داشته باشد.'}]);setErrors(next);if(!next.length)onSubmit({name,description,scope,permissions});};
+  return <OrgModal onClose={onClose} wide><DialogHeading eyebrow="نقش دسترسی" title={role ? 'ویرایش نقش و مجوزها' : 'ایجاد نقش جدید'} text="مجوزهای تمام حوزه‌های ERP قابل تنظیم‌اند؛ هر اقدام همچنان از Scope، Resource Policy و Workflow Guard عبور می‌کند." onClose={onClose} /><div className="org-form-grid"><FormValidationSummary errors={errors}/><Field label="نام نقش" required><input aria-required="true" aria-invalid={Boolean(errors.length)&&name.trim().length<2} autoFocus value={name} onChange={(event) => setName(event.target.value)} /></Field><Field label="محدوده پیش‌فرض" required><select aria-required="true" value={scope} onChange={(event) => setScope(event.target.value as ScopeType)}><option value="COMPANY">کل شرکت</option><option value="UNIT">واحد سازمانی</option><option value="TEAM">تیم کاری</option><option value="SELF">فقط خود</option><option value="RECORD">رکورد مشخص</option></select></Field><Field label="شرح نقش" full><textarea value={description} onChange={(event) => setDescription(event.target.value)} /></Field></div><section className="permission-editor"><div className="permission-editor-head"><div><strong>مجوزهای نقش</strong><span>{permissions.length.toLocaleString('en-US')} مجوز انتخاب‌شده</span></div><ShieldCheck size={22} /></div><div className="permission-search"><label className="search-box"><Search size={17}/><input type="search" aria-label="جست‌وجوی مجوزهای نقش" value={permissionQuery} onChange={(event) => setPermissionQuery(event.target.value)} placeholder="جست‌وجوی نام، شرح، کد یا حوزه مجوز"/></label><span>{visible.length.toLocaleString('en-US')} نتیجه</span></div><div className="permission-domains">{domains.map((item) => <button key={item.id} className={domain === item.id ? 'active' : ''} onClick={() => {setDomain(item.id); setPermissionQuery('');}}>{item.label}</button>)}</div><div className="permission-options">{visible.map((permission) => {const checked = permissions.includes(permission.code as PermissionCode); return <label key={permission.code} className={`permission-option ${!permission.available ? 'permission-option--future' : ''}`}><input type="checkbox" checked={checked} disabled={!permission.available} onChange={(event) => setPermissions((current) => event.target.checked ? [...current, permission.code as PermissionCode] : current.filter((item) => item !== permission.code))} /><span className="permission-check">{checked && <Check size={14} />}</span><span><strong>{permission.label}</strong><small>{permission.description}</small></span>{!permission.available && <em>آینده</em>}</label>;})}{!visible.length && <SearchEmpty text="مجوزی با این جست‌وجو پیدا نشد."/>}</div></section><DialogActions onClose={onClose} submit={role ? 'ذخیره نقش و مجوزها' : 'ایجاد نقش'} onSubmit={submit} /></OrgModal>;
+}
+
+function RoleDetailsDialog({role,state,onClose,onEdit}:{role:SecurityRole;state:FoundationState;onClose:()=>void;onEdit?:()=>void}) {
+  const users=state.users.filter((user)=>user.roleIds.includes(role.id));
+  return <OrgModal onClose={onClose} wide><DialogHeading eyebrow="مشاهده نقش" title={role.name} text={role.description||'شرحی برای این نقش ثبت نشده است.'} onClose={onClose}/><div className="role-detail-summary"><span><small>وضعیت</small><i className={`status-badge status-badge--${role.status}`}>{role.status==='active'?'فعال':'غیرفعال'}</i></span><span><small>محدوده</small><strong>{scopeLabel(role.scope)}</strong></span><span><small>کاربران جاری</small><strong>{users.length.toLocaleString('en-US')} کاربر</strong></span><span><small>نسخه</small><strong>{(role.version??1).toLocaleString('en-US')}</strong></span></div><section className="role-detail-permissions"><div><strong>مجوزهای نقش</strong><span>{role.permissions.length.toLocaleString('en-US')} مجوز مؤثر</span></div><div>{role.permissions.map((permission)=><span key={permission}>{permissionLabel(permission)}</span>)}</div></section><div className="dialog-actions"><button className="button button--secondary" onClick={onClose}>بستن</button>{onEdit&&<button className="button button--primary" onClick={onEdit}><Pencil size={17}/> ویرایش نقش</button>}</div></OrgModal>;
+}
+
+function RoleDeleteDialog({role,assignedUsers,onClose,onConfirm}:{role:SecurityRole;assignedUsers:LocalUser[];onClose:()=>void;onConfirm:()=>void}) {
+  const blocked=role.protected||assignedUsers.length>0;
+  return <OrgModal onClose={onClose}><div className="danger-symbol"><Trash2 size={24}/></div><div className="centered-modal"><h2>{blocked?'حذف این نقش ممکن نیست':'حذف نقش'}</h2>{role.protected?<p>نقش «{role.name}» یک نقش پایه محافظت‌شده است و برای سلامت دسترسی‌های سیستم حذف نمی‌شود.</p>:assignedUsers.length?<><p>نقش «{role.name}» اکنون به {assignedUsers.length.toLocaleString('en-US')} کاربر تخصیص دارد. ابتدا تخصیص جاری را از همه کاربران بردارید.</p><div className="blocked-role-users">{assignedUsers.slice(0,5).map((user)=><span key={user.id}>{user.name}</span>)}</div></>:<p>نقش «{role.name}» از فهرست فعال حذف می‌شود. نسخه‌های قبلی، رخداد حذف و سابقه تخصیص‌های گذشته برای گزارش‌گیری و ممیزی باقی می‌مانند.</p>}<div className="modal-actions modal-actions--center"><button className="button button--secondary" onClick={onClose}>{blocked?'متوجه شدم':'انصراف'}</button>{!blocked&&<button className="button button--danger" onClick={onConfirm}>تأیید حذف نقش</button>}</div></div></OrgModal>;
+}
+
+function RoleAssignmentsDialog({role, state, onClose, onToggle}: {role: SecurityRole; state: FoundationState; onClose: () => void; onToggle: (user: LocalUser, checked: boolean) => Promise<void>}) {
+  const [query, setQuery] = useState('');
+  const users = useMemo(() => {const search = query.trim().toLocaleLowerCase('fa-IR'); if (!search) return state.users; return state.users.filter((user) => `${user.name} ${user.username} ${user.roles.join(' ')} ${state.units.find((unit) => unit.id === user.unitId)?.name ?? ''} ${state.positions.find((position) => position.id === user.positionId)?.title ?? ''}`.toLocaleLowerCase('fa-IR').includes(search));}, [query, state.positions, state.units, state.users]);
+  return <OrgModal onClose={onClose}><DialogHeading eyebrow="انتساب نقش" title={`کاربران نقش «${role.name}»`} text="هر کاربر می‌تواند هم‌زمان یک یا چند نقش داشته باشد. حذف آخرین نقش مجاز نیست." onClose={onClose} /><ListSearchToolbar value={query} onChange={setQuery} placeholder="جست‌وجوی نام، نام کاربری، نقش، واحد یا سمت" count={users.length} unit="کاربر" compact/><div className="assignment-list">{users.map((user) => {const checked = user.roleIds.includes(role.id); const disabled = checked && user.roleIds.length === 1; return <label key={user.id}><span className="persona-avatar" style={{background: user.accent}}>{user.initials}</span><span><strong>{user.name}</strong><small>{user.roles.join('، ')}</small></span><input type="checkbox" checked={checked} disabled={disabled || user.isAdmin} onChange={(event) => void onToggle(user, event.target.checked)} /><i /></label>;})}{!users.length && <SearchEmpty text="کاربری با این جست‌وجو پیدا نشد."/>}</div><div className="dialog-actions"><button className="button button--primary" onClick={onClose}>پایان</button></div></OrgModal>;
+}
+
+function OrgTreeBranch({unit, state, depth}: {unit: OrganizationalUnit; state: FoundationState; depth: number}) { const children = state.units.filter((item) => item.parentId === unit.id && item.type !== 'شعبه'); const manager = state.users.find((user) => user.id === unit.managerUserId); const memberCount = state.users.filter((user) => user.unitId === unit.id).length; return <div className="org-tree-branch" style={{'--tree-depth': depth} as React.CSSProperties}><article><span className="tree-connector" /><span className="unit-type-icon"><Building2 size={17} /></span><div><strong>{unit.name}</strong><small>{unit.type} · {manager?.name ?? 'بدون مسئول'}</small></div><span>{memberCount.toLocaleString('en-US')} نفر</span><span className={`status-badge status-badge--${unit.status}`}>{unit.status === 'active' ? 'فعال' : 'غیرفعال'}</span></article>{children.map((child) => <OrgTreeBranch key={child.id} unit={child} state={state} depth={depth + 1} />)}</div>; }
+function flattenUnits(units: OrganizationalUnit[]) { const result: {unit: OrganizationalUnit; depth: number}[] = []; const visit = (parentId: string | undefined, depth: number) => units.filter((unit) => unit.parentId === parentId).sort((a, b) => a.order - b.order).forEach((unit) => {result.push({unit, depth}); visit(unit.id, depth + 1);}); visit(undefined, 0); return result; }
+function OrgIntro({icon: Icon, eyebrow, title, description, action}: {icon: LucideIcon; eyebrow: string; title: string; description: string; action?: ReactNode}) { return <section className="page-intro org-page-intro"><span className="page-intro-icon"><Icon size={24} /></span><div><span>{eyebrow}</span><h2>{title}</h2><p>{description}</p></div>{action && <div className="page-intro-action">{action}</div>}</section>; }
+function OrgMetric({icon: Icon, value, label, detail}: {icon: LucideIcon; value: number; label: string; detail: string}) { return <article><span><Icon size={20} /></span><div><strong>{value.toLocaleString('en-US')}</strong><b>{label}</b><small>{detail}</small></div></article>; }
+function OrgPanelHeading({eyebrow, title, text}: {eyebrow: string; title: string; text: string}) { return <div className="org-panel-heading"><span>{eyebrow}</span><h3>{title}</h3><p>{text}</p></div>; }
+function ListSearchToolbar({value, onChange, placeholder, count, unit, compact = false}: {value: string; onChange: (value: string) => void; placeholder: string; count: number; unit: string; compact?: boolean}) { return <div className={`data-search-toolbar ${compact ? 'data-search-toolbar--compact' : ''}`}><label className="search-box"><Search size={18}/><input type="search" value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} aria-label={placeholder}/></label><span>{count.toLocaleString('en-US')} {unit}</span></div>; }
+function SearchEmpty({text}: {text: string}) { return <div className="empty-state data-search-empty"><Search size={25}/><strong>{text}</strong><span>عبارت جست‌وجو را تغییر دهید.</span></div>; }
+function OrgIconAction({label, tone = 'neutral', disabled = false, onClick, children}: {label: string; tone?: 'neutral' | 'primary' | 'success' | 'danger' | 'qa'; disabled?: boolean; onClick: () => void; children: ReactNode}) { return <button type="button" className={`icon-action icon-action--${tone}`} aria-label={label} data-tooltip={label} disabled={disabled} onClick={onClick}>{children}</button>; }
+function OrgModal({children, onClose, wide = false}: {children: ReactNode; onClose: () => void; wide?: boolean}) { return <div className="modal-layer" role="dialog" aria-modal="true"><button className="modal-scrim" onClick={onClose} aria-label="بستن" /><section className={`modal-card ${wide ? 'modal-card--wide' : ''}`}>{children}</section></div>; }
+function DialogHeading({eyebrow, title, text, onClose}: {eyebrow: string; title: string; text: string; onClose: () => void}) { return <div className="modal-heading"><div><span>{eyebrow}</span><h2>{title}</h2><p>{text}</p></div><button className="icon-button" aria-label="بستن پنجره" onClick={onClose}><X size={20} /></button></div>; }
+function Field({label, full = false, required = false, children}: {label: string; full?: boolean; required?: boolean; children: ReactNode}) { return <label className={`field-label ${full ? 'field-label--full' : ''}`}>{required ? <RequiredLabel>{label}</RequiredLabel> : <OptionalLabel>{label}</OptionalLabel>}{children}</label>; }
+function DialogActions({onClose, submit, onSubmit}: {onClose: () => void; submit: string; onSubmit: () => void}) { return <div className="dialog-actions"><button className="button button--secondary" onClick={onClose}>انصراف</button><button className="button button--primary" onClick={onSubmit}>{submit}</button></div>; }
+function ConfirmDialog({icon: Icon, title, text, confirm, onClose, onConfirm}: {icon: LucideIcon; title: string; text: string; confirm: string; onClose: () => void; onConfirm: () => void}) { return <OrgModal onClose={onClose}><div className="danger-symbol"><Icon size={27} /></div><div className="centered-modal"><h2>{title}</h2><p>{text}</p><div className="modal-actions modal-actions--center"><button className="button button--secondary" onClick={onClose}>انصراف</button><button className="button button--danger" onClick={onConfirm}>{confirm}</button></div></div></OrgModal>; }
+function scopeLabel(scope: ScopeType) { return ({COMPANY: 'کل شرکت', UNIT: 'واحد', TEAM: 'تیم', SELF: 'فقط خود', RECORD: 'رکورد'} as const)[scope]; }
+function permissionLabel(code: PermissionCode) { return PERMISSION_CATALOG.find((item) => item.code === code)?.label ?? code.split('.').slice(-2).join('.'); }

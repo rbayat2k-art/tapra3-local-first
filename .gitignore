@@ -1,0 +1,12 @@
+node_modules/
+dist/
+build/
+coverage/
+outputs/
+.artifact-work/
+*.log
+.env*
+!.env.example
+.DS_Store
+Thumbs.db
+
