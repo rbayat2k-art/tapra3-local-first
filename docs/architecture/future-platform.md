@@ -1,5 +1,7 @@
 # معماری آینده Platform و Backend
 
+> **Deprecated as current / Planned as reference:** این طرح وضعیت جاری نیست. مرجع runtime فعال: [`../README.md`](../README.md).
+
 > Status: DRAFT
 > Source of truth: این سند برای جهت معماری platform/backend آینده و مرز آن با سیستم فعلی است.
 > Owner: Architecture Owner

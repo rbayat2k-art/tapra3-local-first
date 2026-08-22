@@ -1,5 +1,7 @@
 # معماری فعلی سیستم
 
+> **Deprecated / Conflict:** این سند معماری Server-backed شاخه/نسخه تاریخی را شرح می‌دهد و مرجع runtime جاری نیست. مرجع فعال: [`../README.md`](../README.md) و [`../03-ARCHITECTURE.md`](../03-ARCHITECTURE.md).
+
 > Status: CURRENT
 > Source of truth: This document for current system architecture and technology stack
 > Owner: Architecture Owner

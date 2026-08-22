@@ -11,5 +11,4 @@
 
 - [مدل داده فعلی](data/current-data-model.md)
 - [Persistence فعلی](data/persistence.md)
-- [Migration traceability](archive/migration-traceability.md)
-- [Pre-migration copy](archive/pre-migration-snapshot/2026-08-10-stable-f271cca7/docs/DATABASE_DOCUMENTATION.md)
+- Migration traceability و pre-migration copy در snapshot فعلی موجود نیستند (`Deprecated` links removed).

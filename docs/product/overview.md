@@ -1,5 +1,7 @@
 # نمای کلی فعلی محصول
 
+> **Deprecated / Conflict:** این نمای کلی مربوط به نسخه Server-backed تاریخی است. نمای جاری در [`../01-PROJECT-OVERVIEW.md`](../01-PROJECT-OVERVIEW.md) قرار دارد.
+
 > Status: CURRENT
 > Source of truth: This document for current product purpose and scope
 > Owner: Product Owner

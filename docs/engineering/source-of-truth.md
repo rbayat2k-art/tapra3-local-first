@@ -1,5 +1,7 @@
 # منبع Canonical توسعه Tapra2
 
+> **Deprecated / Conflict:** این سند snapshot تاریخی شاخه دیگری است و canonical وضعیت جاری نیست. ورودی معتبر فعلی: [`../README.md`](../README.md).
+
 > Status: CURRENT
 > Source of truth: این سند برای Git lineage، محل شروع توسعه و سیاست بازسازی Tapra2 است.
 > Owner: Engineering Owner
@@ -29,7 +31,7 @@
 
 - `C:\Users\iLia\tapra2.zip` و forensic extraction فقط archive/recovery evidence هستند.
 - هیچ فایل legacy مستقیماً روی canonical overwrite نمی‌شود.
-- بازیابی احتمالی ابتدا با [Preservation Matrix](../archive/legacy-product-preservation-matrix.md) تطبیق داده شده و از مسیر branch/PR مستقل انجام می‌شود.
+- Preservation Matrix اشاره‌شده در نسخه قدیمی در snapshot فعلی وجود ندارد؛ بازیابی آینده باید منبع تازه و قابل دسترس تعریف کند.
 
 ## Branch protection
 

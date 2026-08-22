@@ -1,5 +1,7 @@
 # بنیاد فعلی انبار و موجودی
 
+> **Deprecated / Conflict:** این سند پیاده‌سازی Server-backed تاریخی را شرح می‌دهد؛ انبار جاری فقط Foundation عمومی Registry است. مرجع: [`../../_meta/FEATURE-MATRIX.md`](../../_meta/FEATURE-MATRIX.md).
+
 > Status: CURRENT
 > Source of truth: این سند برای رفتار اجراشده Warehouse Foundation و مرزهای آن است.
 > Owner: Warehouse Domain Owner

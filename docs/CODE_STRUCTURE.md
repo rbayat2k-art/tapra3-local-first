@@ -1,7 +1,7 @@
 # 📁 ساختار کد و سازماندهی فایل‌ها (Code Structure & Organization)
 
 > Migration classification: RETIRE_LATER
-> Authority replacements: [current system](architecture/current-system.md) و [module catalog](product/module-catalog.md)
+> **Deprecated / Conflict:** این سند ساختار تاریخی است. Authority فعال: [ساختار پوشه‌ها](04-DIRECTORY-STRUCTURE.md) و [معماری جاری](03-ARCHITECTURE.md).
 
 این محتوای legacy در Step 7 فقط برای review انتقالی نگهداری شده و authoritative نیست. بازنشستگی فیزیکی آن به تأیید جداگانه نیاز دارد.
 

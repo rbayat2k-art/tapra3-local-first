@@ -1,5 +1,7 @@
 # Persistence فعلی
 
+> **Deprecated / Conflict:** عبارت «فعلی» در این سند مربوط به نسخه Server-backed قدیمی است. مرجع فعال: [`../06-DATABASE.md`](../06-DATABASE.md).
+
 > Status: CURRENT
 > Source of truth: This document for current persistence model
 > Owner: Data Owner

@@ -1,5 +1,7 @@
 # عملیات فعلی Lead، صف و زمینه بازاریابی فروش
 
+> **Deprecated / Conflict:** این سند عملیات Server-backed شاخه تاریخی است؛ در runtime جاری این دامنه Foundation عمومی دارد.
+
 > Status: CURRENT
 > Source of truth: این سند برای رفتار پیاده‌سازی‌شده Lead، Sales Queue، Assignment، Call Log و اتصال Campaign/Promotion است.
 > Owner: Sales Domain Owner

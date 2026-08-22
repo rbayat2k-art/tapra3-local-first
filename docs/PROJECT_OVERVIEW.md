@@ -11,4 +11,4 @@
 
 - [نمای کلی فعلی محصول](product/overview.md)
 - [فهرست ماژول‌ها](product/module-catalog.md)
-- [Pre-migration copy](archive/pre-migration-snapshot/2026-08-10-stable-f271cca7/docs/PROJECT_OVERVIEW.md)
+- Pre-migration copy در snapshot فعلی موجود نیست (`Deprecated` link removed).

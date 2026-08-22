@@ -14,4 +14,4 @@
 - [قواعد پشتیبانی](domains/support/business-rules.md)
 - [Customer فعلی](domains/sales/current-customer.md)
 - [طراحی آینده فروش](domains/sales/approved-design.md)
-- [Pre-migration copy](archive/pre-migration-snapshot/2026-08-10-stable-f271cca7/docs/BUSINESS_RULES.md)
+- Pre-migration copy در snapshot فعلی موجود نیست (`Deprecated` link removed).

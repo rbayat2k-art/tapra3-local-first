@@ -1,5 +1,7 @@
 # Architecture Decision Records
 
+> **Deprecated for current runtime:** ADRهای این پوشه طراحی Server/PostgreSQL تاریخی‌اند. تصمیم‌های فعال Local-first در [`../../17-DECISIONS.md`](../../17-DECISIONS.md) ثبت شده‌اند.
+
 > Status: CURRENT
 > Source of truth: این فایل برای مسیریابی تصمیم‌های معماری بنیاد SaaS است.
 > Owner: Architecture Owner

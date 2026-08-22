@@ -9,7 +9,7 @@
 
 ## ترتیب خواندن
 
-1. قواعد اجباری و محدودیت‌ها: [AGENTS.md](../../AGENTS.md)
+1. قواعد اجباری و محدودیت‌ها: فایل `AGENTS.md` در snapshot فعلی وجود ندارد؛ از [مرکز مستندات](../README.md) شروع کنید.
 2. انتخاب authority موضوع: [docs/README.md](../README.md)
 3. فقط سندهای مرتبط با task و سپس code شاهد همان موضوع.
 
@@ -34,4 +34,4 @@
 
 ## قاعده context
 
-اسناد legacy و Snapshot را فقط برای traceability یا حل تعارض تاریخی باز کنید. برای recovery از [preservation matrix](../archive/legacy-product-preservation-matrix.md) شروع کنید و ZIP evidence را فقط در صورت نیاز forensic بخوانید. این فایل جزئیات دامنه را تکرار نمی‌کند و وجود متن future در repository هرگز اثبات پیاده‌سازی نیست.
+اسناد legacy را فقط برای traceability یا حل تعارض تاریخی باز کنید. preservation matrix اشاره‌شده در نسخه قدیمی در snapshot فعلی موجود نیست. این فایل جزئیات دامنه را تکرار نمی‌کند و وجود متن future در repository هرگز اثبات پیاده‌سازی نیست.
