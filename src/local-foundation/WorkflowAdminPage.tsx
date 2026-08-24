@@ -1,0 +1,124 @@
+import {useEffect, useMemo, useState} from 'react';
+import {ArrowDown, ArrowLeft, ArrowUp, CircleHelp, GitBranch, LockKeyhole, Pencil, Plus, Search, ShieldCheck, Trash2, Workflow, X} from 'lucide-react';
+import type {
+  FoundationState,
+  WorkflowApprovalStageDefinition,
+  WorkflowDefinition,
+  WorkflowRouteVariantDefinition,
+  WorkflowStageAssignmentMode,
+  WorkflowStageDecision,
+  WorkflowStageScope,
+} from './model';
+import type {LocalFoundationService} from './service';
+import {ERP_MODULES} from './erpCatalog';
+import {approvalStagesFor, assignmentModeForStage, validateWorkflowPolicy} from './workflowPolicy';
+import {FormValidationSummary, OptionalLabel, RequiredLabel, validateRequired} from './FormValidation';
+
+type Execute = (label:string, work:()=>Promise<FoundationState>, success:string)=>Promise<boolean>;
+interface Props {state:FoundationState;execute:Execute;service?:LocalFoundationService}
+
+const queueLabels:Record<string,string>={owner:'مالک پرونده',assignee:'یک کاربر مشخص',unit:'کارتابل مشترک واحد',company:'کارتابل مشترک شرکت'};
+const queueDescriptions:Record<string,string>={
+  owner:'پرونده همیشه در کارتابل مالک یا ثبت‌کننده همان پرونده قرار می‌گیرد.',
+  assignee:'هنگام ارجاع، یک کاربر مشخص انتخاب می‌شود و فقط همان شخص مسئول اقدام است.',
+  unit:'پرونده در کارتابل مشترک واحد سازمانی قرار می‌گیرد و افراد مجاز آن واحد می‌توانند اقدام کنند.',
+  company:'پرونده در کارتابل مشترک کل شرکت قرار می‌گیرد و همه نقش‌های مجاز شرکت آن را می‌بینند.',
+};
+const scopeLabels:Record<WorkflowStageScope,string>={COMPANY:'کل شرکت',UNIT:'واحد سازمانی',BRANCH:'شعبه',SELF:'خود کاربر'};
+const assignmentModeLabels:Record<WorkflowStageAssignmentMode,string>={role_queue:'یکی از کاربران دارای نقش',specific_user:'یک کاربر مشخص',branch_manager:'مدیر ثبت‌شده همان شعبه'};
+const decisionLabels:Record<WorkflowStageDecision,string>={approve:'تأیید',reject:'رد',needs_correction:'نیازمند اصلاح',return_previous:'بازگشت به مرحله قبل',handoff:'ارجاع به مرحله بعد'};
+const decisions=Object.keys(decisionLabels) as WorkflowStageDecision[];
+const hasLatinText=(value:string)=>/[A-Za-z]/.test(value);
+const persianNumber=(value:number)=>value.toLocaleString('fa-IR');
+const moduleTitle=(moduleId:string)=>ERP_MODULES.find((item)=>item.id===moduleId)?.title??'فرایند سازمانی';
+const workflowTitle=(workflow:WorkflowDefinition)=>hasLatinText(workflow.title)?`گردش‌کار ${moduleTitle(workflow.moduleId)}`:workflow.title;
+const approvalPolicyTitle=(workflow:WorkflowDefinition)=>workflow.approvalPolicyId&&!hasLatinText(workflow.approvalPolicyId)?workflow.approvalPolicyId:`سیاست تأیید ${moduleTitle(workflow.moduleId)}`;
+const cloneStages=(stages:WorkflowApprovalStageDefinition[])=>stages.map((stage)=>({...stage,roleIds:[...stage.roleIds],decisions:[...stage.decisions]}));
+const newStage=(workflow:WorkflowDefinition,index:number):WorkflowApprovalStageDefinition=>({
+  id:`${workflow.moduleId}-stage-${crypto.randomUUID()}`,
+  title:'مرحله جدید',
+  stateId:Object.keys(workflow.stateLabels)[index]??Object.keys(workflow.stateLabels)[0]??workflow.initialState,
+  roleIds:[],scope:'COMPANY',decisions:['approve'],required:true,allowSelfApproval:false,
+  assignmentMode:'role_queue',
+});
+
+export function WorkflowAdminPage({state,execute,service}:Props){
+  const [selected,setSelected]=useState(state.workflows[0]?.moduleId??'');
+  const [editing,setEditing]=useState(false);
+  const [query,setQuery]=useState('');
+  const workflow=state.workflows.find((item)=>item.moduleId===selected)??state.workflows[0];
+  const visible=useMemo(()=>{
+    const q=query.trim().toLocaleLowerCase('fa-IR');
+    return q?state.workflows.filter((item)=>`${item.title} ${item.moduleId} ${item.assignmentPolicy} ${item.approvalPolicyId??''}`.toLocaleLowerCase('fa-IR').includes(q)):state.workflows;
+  },[query,state.workflows]);
+  useEffect(()=>{if(visible.length&&!visible.some((item)=>item.moduleId===selected))setSelected(visible[0].moduleId);},[selected,visible]);
+  if(!workflow)return <div className="empty-state empty-state--page"><Workflow/><strong>گردش‌کاری پیدا نشد.</strong></div>;
+  const stages=approvalStagesFor(workflow,state.roles);
+  return <div className="page-stack workflow-manager">
+    <section className="page-intro"><div className="page-intro__icon"><Workflow size={24}/></div><div><span className="eyebrow">طراح کنترل‌شده و نسخه‌دار</span><h2>مدیریت گردش‌کار</h2><p>مسیر پایه شرکت و مسیرهای استثنایی شعب را تنظیم کنید. هر پرونده هنگام ثبت به همان نسخه و مسیر قفل می‌شود.</p></div></section>
+    <div className="workflow-admin-grid">
+      <section className="panel workflow-directory"><h3>گردش‌کارها</h3><label className="search-field"><Search size={17}/><input value={query} onChange={(event)=>setQuery(event.target.value)} placeholder="جست‌وجوی نام یا سیاست…"/></label>{visible.map((item)=><button type="button" key={item.id} className={item.moduleId===workflow.moduleId?'active':''} onClick={()=>setSelected(item.moduleId)}><span><strong>{workflowTitle(item)}</strong><small>{moduleTitle(item.moduleId)}</small></span><b>نسخه {persianNumber(item.version)}</b></button>)}</section>
+      <section className="panel workflow-detail">
+        <div className="panel-heading"><div><span className="eyebrow">نسخه فعال {persianNumber(workflow.version)}</span><h3>{workflowTitle(workflow)}</h3><p>{workflow.assignmentPolicy}</p></div><button className="button button--primary" onClick={()=>setEditing(true)}><Pencil size={17}/> ایجاد نسخه جدید</button></div>
+        <div className="workflow-version-rule"><LockKeyhole size={20}/><div><strong>نسخه فعال فقط خواندنی است</strong><p>نسخه جدید فقط بر پرونده‌های بعدی اثر دارد؛ پرونده‌های جاری مسیر و نسخه قبلی خود را ادامه می‌دهند.</p></div></div>
+        <div className="record-facts"><div><span>روش تعیین مسئول پرونده<strong>{queueLabels[workflow.queueStrategy]}</strong></span></div><div><span>مسیر تأیید<strong>{approvalPolicyTitle(workflow)}</strong></span></div><div><span>مسیرهای استثنایی فعال<strong>{persianNumber((workflow.routeVariants??[]).filter((item)=>item.status==='active').length)}</strong></span></div></div>
+        <RoutePreview title="مسیر پایه شرکت" subtitle={workflow.moduleId==='employee-advance'?(workflow.allowSelfSubmission??true?'ثبت مستقیم پرسنل مجاز است':'فقط ثبت نیابتی مجاز است'):undefined} stages={stages} workflow={workflow} state={state}/>
+        {(workflow.routeVariants??[]).map((variant)=><RoutePreview key={variant.id} title={variant.title} subtitle={`${variant.branchUnitIds.map((id)=>state.units.find((unit)=>unit.id===id)?.name??'شعبه حذف‌شده').join('، ')} · ${variant.status==='active'?'فعال':'غیرفعال'}${workflow.moduleId==='employee-advance'?` · ${(variant.allowSelfSubmission??true)?'ثبت مستقیم مجاز':'فقط ثبت نیابتی'}`:''}`} stages={variant.approvalStages} workflow={workflow} state={state}/>)}
+        <details className="workflow-locked-map"><summary><ShieldCheck size={18}/> نمایش ماشین وضعیت محافظت‌شده</summary><div className="workflow-state-map">{Object.entries(workflow.stateLabels).map(([id,label])=><span key={id}>{label}</span>)}</div><div className="transition-map">{workflow.transitions.map((item)=><article key={item.id}><span>{item.from.map((from)=>workflow.stateLabels[from]??'وضعیت تعریف‌شده').join(' / ')}</span><ArrowLeft size={17}/><strong>{workflow.stateLabels[item.to]??'وضعیت تعریف‌شده'}</strong><small>{item.label}</small></article>)}</div></details>
+      </section>
+    </div>
+    {editing&&<WorkflowPolicyDialog state={state} workflow={workflow} onClose={()=>setEditing(false)} onSave={(input)=>{if(!service)throw new Error('سرویس گردش‌کار در دسترس نیست.');return execute('workflow-policy',()=>service.updateWorkflowPolicy(workflow.moduleId,workflow.version,input),'نسخه جدید گردش‌کار منتشر شد.').then((succeeded)=>{if(succeeded)setEditing(false);return succeeded;});}}/>}
+  </div>;
+}
+
+function RoutePreview({title,subtitle,stages,workflow,state}:{title:string;subtitle?:string;stages:WorkflowApprovalStageDefinition[];workflow:WorkflowDefinition;state:FoundationState}){
+  return <div className="workflow-route"><header><div><GitBranch size={19}/><strong>{title}</strong>{subtitle&&<small>{subtitle}</small>}</div><span>{persianNumber(stages.length)} مرحله</span></header>{stages.length?stages.map((stage,index)=><article key={stage.id}><i>{persianNumber(index+1)}</i><div><strong>{stage.title}</strong><small>{workflow.stateLabels[stage.stateId]??'وضعیت تعریف‌شده'}</small></div><div className="workflow-role-chips"><span className="workflow-assignment-chip">{assignmentModeForStage(stage)==='specific_user'?(state.users.find((user)=>user.id===stage.assigneeUserId)?.name??'کاربر تعیین نشده'):assignmentModeLabels[assignmentModeForStage(stage)]}</span>{stage.roleIds.map((roleId)=><span key={roleId}>{state.roles.find((role)=>role.id===roleId)?.name??'نقش سازمانی'}</span>)}</div><b>{scopeLabels[stage.scope]}</b><div className="workflow-decision-chips">{stage.decisions.map((item)=><span key={item}>{decisionLabels[item]}</span>)}</div></article>):<div className="quiet-state">مرحله‌ای تعریف نشده است.</div>}</div>;
+}
+
+interface PolicyInput {queueStrategy:WorkflowDefinition['queueStrategy'];assignmentPolicy:string;approvalPolicyId?:string;allowSelfSubmission?:boolean;approvalStages:WorkflowApprovalStageDefinition[];routeVariants:WorkflowRouteVariantDefinition[];changeSummary:string}
+
+function WorkflowPolicyDialog({state,workflow,onClose,onSave}:{state:FoundationState;workflow:WorkflowDefinition;onClose:()=>void;onSave:(input:PolicyInput)=>Promise<boolean>}){
+  const [queueStrategy,setQueue]=useState(workflow.queueStrategy);
+  const [assignmentPolicy,setAssignment]=useState(workflow.assignmentPolicy);
+  const [approvalPolicyId,setApproval]=useState(approvalPolicyTitle(workflow));
+  const [allowSelfSubmission,setAllowSelfSubmission]=useState(workflow.allowSelfSubmission??true);
+  const [changeSummary,setChangeSummary]=useState('');
+  const [stages,setStages]=useState(()=>approvalStagesFor(workflow,state.roles));
+  const [routes,setRoutes]=useState(()=>workflow.routeVariants?.map((route)=>({...route,branchUnitIds:[...route.branchUnitIds],approvalStages:cloneStages(route.approvalStages)}))??[]);
+  const [errors,setErrors]=useState<string[]>([]);
+  const [versionRuleAccepted,setVersionRuleAccepted]=useState(false);
+  const branches=state.units.filter((unit)=>unit.type==='شعبه'&&unit.status==='active');
+  const addRoute=()=>setRoutes((current)=>[...current,{
+    id:`route-${crypto.randomUUID()}`,title:'مسیر استثنایی شعبه',description:'',branchUnitIds:[],priority:current.length+1,status:'active',allowSelfSubmission:true,approvalStages:cloneStages(stages).map((stage)=>({...stage,id:`${stage.id}-${crypto.randomUUID()}`})),
+  }]);
+  const updateRoute=(index:number,patch:Partial<WorkflowRouteVariantDefinition>)=>setRoutes((current)=>current.map((route,row)=>row===index?{...route,...patch}:route));
+  const submit=()=>{
+    const next=[...validateRequired([{label:'توضیح قانون تعیین مسئول',value:assignmentPolicy},{label:'دلیل انتشار نسخه',value:changeSummary}]),...validateWorkflowPolicy(workflow,stages,state.roles,routes,state.users),...(!versionRuleAccepted?['برای انتشار، قانون نسخه‌گذاری را تأیید کنید.']:[])];
+    setErrors(next);
+    if(!next.length)void onSave({queueStrategy,assignmentPolicy,approvalPolicyId,allowSelfSubmission,approvalStages:stages,routeVariants:routes,changeSummary});
+  };
+  return <div className="modal-scrim"><form noValidate className="dialog workflow-policy-dialog" onSubmit={(event)=>{event.preventDefault();submit();}}>
+    <header><div><span className="eyebrow">پیش‌نویس نسخه {persianNumber(workflow.version+1)}</span><h2>{workflowTitle(workflow)}</h2><p>نسخه فعال {persianNumber(workflow.version)} بدون تغییر باقی می‌ماند.</p></div><button type="button" className="icon-button" onClick={onClose} aria-label="بستن"><X size={20}/></button></header>
+    <div className="dialog-body"><FormValidationSummary errors={errors}/>
+      <section className="workflow-draft-rule"><LockKeyhole size={21}/><div><strong>قانون امن ویرایش</strong><p>نسخه منتشرشده و پرونده‌های در جریان مستقیم تغییر نمی‌کنند. انتشار، یک نسخه جدید برای پرونده‌های آینده می‌سازد.</p></div></section>
+      <section className="workflow-builder-help"><CircleHelp size={22}/><div><strong>روش استفاده</strong><ol><li>مسیر پایه برای تمام شعبی است که استثنا ندارند.</li><li>برای شعب متفاوت، «مسیر استثنایی شعبه» بسازید و شعبه‌های مشمول را انتخاب کنید.</li><li>مراحل را از بالا به پایین بچینید؛ وضعیت‌های اصلی محافظت‌شده‌اند.</li><li>در زمان ثبت، سیستم مسیر منطبق را انتخاب و روی پرونده قفل می‌کند.</li></ol></div></section>
+      <div className="form-grid"><label className="field"><RequiredLabel>مسئول هر پرونده چگونه تعیین شود؟</RequiredLabel><select value={queueStrategy} onChange={(event)=>setQueue(event.target.value as WorkflowDefinition['queueStrategy'])}>{Object.entries(queueLabels).map(([value,label])=><option key={value} value={value}>{label}</option>)}</select><small className="field-help">{queueDescriptions[queueStrategy]}</small></label><label className="field"><OptionalLabel>نام سیاست تأیید</OptionalLabel><input value={approvalPolicyId} onChange={(event)=>setApproval(event.target.value)}/></label><label className="field field--wide"><RequiredLabel>توضیح قانون تعیین مسئول</RequiredLabel><textarea rows={3} value={assignmentPolicy} onChange={(event)=>setAssignment(event.target.value)}/></label>{workflow.moduleId==='employee-advance'&&<label className="switch-row field--wide"><input type="checkbox" checked={allowSelfSubmission} onChange={(event)=>setAllowSelfSubmission(event.target.checked)}/><span><strong>ثبت مستقیم مساعده توسط پرسنل مجاز باشد</strong><small>این قانون برای تمام شعب فاقد مسیر استثنایی اجرا می‌شود.</small></span></label>}</div>
+      <StageEditor title="مسیر پایه شرکت" description="اگر برای شعبه مسیر استثنایی فعال نباشد، این مسیر اجرا می‌شود." state={state} workflow={workflow} stages={stages} onChange={setStages}/>
+      {workflow.moduleId==='employee-advance'&&<section className="workflow-branch-routes"><header><div><strong>مسیرهای استثنایی شعب</strong><small>برای یک یا چند شعبه، مراحل متفاوت تعریف کنید. هر شعبه فقط در یک مسیر فعال باشد.</small></div><button type="button" className="button button--secondary" onClick={addRoute}><Plus size={16}/> افزودن مسیر شعبه‌ای</button></header>
+        {routes.map((route,index)=><details key={route.id} className="workflow-branch-route" open><summary><GitBranch size={17}/><strong>{route.title||'مسیر بدون نام'}</strong><span>{route.branchUnitIds.length?`${persianNumber(route.branchUnitIds.length)} شعبه`:'شعبه انتخاب نشده'}</span></summary><div className="workflow-branch-route__body"><div className="form-grid"><label className="field"><RequiredLabel>نام مسیر</RequiredLabel><input value={route.title} onChange={(event)=>updateRoute(index,{title:event.target.value})}/></label><label className="field"><RequiredLabel>وضعیت مسیر</RequiredLabel><select value={route.status} onChange={(event)=>updateRoute(index,{status:event.target.value as WorkflowRouteVariantDefinition['status']})}><option value="active">فعال</option><option value="inactive">غیرفعال</option></select></label><label className="field"><RequiredLabel>اولویت تطبیق</RequiredLabel><input type="number" min="0" value={route.priority} onChange={(event)=>updateRoute(index,{priority:Number(event.target.value)})}/></label><label className="field field--wide"><OptionalLabel>توضیح مسیر</OptionalLabel><input value={route.description??''} onChange={(event)=>updateRoute(index,{description:event.target.value})}/></label><label className="switch-row field--wide"><input type="checkbox" checked={route.allowSelfSubmission??true} onChange={(event)=>updateRoute(index,{allowSelfSubmission:event.target.checked})}/><span><strong>پرسنل این شعبه بتوانند مستقیم درخواست مساعده ثبت کنند</strong><small>در صورت غیرفعال بودن، فقط ثبت نیابتی توسط نقش مجاز امکان‌پذیر است.</small></span></label></div><div className="field"><RequiredLabel>شعبه‌های مشمول</RequiredLabel><div className="workflow-branch-options">{branches.map((branch)=><label key={branch.id}><input type="checkbox" checked={route.branchUnitIds.includes(branch.id)} onChange={(event)=>updateRoute(index,{branchUnitIds:event.target.checked?[...route.branchUnitIds,branch.id]:route.branchUnitIds.filter((id)=>id!==branch.id)})}/><span>{branch.name}</span></label>)}</div></div><StageEditor title={`مراحل ${route.title}`} description="می‌توانید مرحله مدیر شعبه یا تأییدکننده اصلی را حذف کنید؛ حسابداری و خزانه باید باقی بمانند." state={state} workflow={workflow} stages={route.approvalStages} onChange={(approvalStages)=>updateRoute(index,{approvalStages})}/><button type="button" className="button button--danger" onClick={()=>setRoutes((current)=>current.filter((_,row)=>row!==index))}><Trash2 size={16}/> حذف این مسیر استثنایی</button></div></details>)}
+        {!routes.length&&<div className="quiet-state">هنوز مسیر استثنایی ساخته نشده است؛ همه شعب از مسیر پایه استفاده می‌کنند.</div>}
+      </section>}
+      <label className="field"><RequiredLabel>دلیل انتشار نسخه جدید</RequiredLabel><textarea rows={3} value={changeSummary} onChange={(event)=>setChangeSummary(event.target.value)} placeholder="مثلاً افزودن مسیر ویژه شعبه سعادت‌آباد…"/></label>
+      <label className="workflow-version-confirm"><input type="checkbox" checked={versionRuleAccepted} onChange={(event)=>setVersionRuleAccepted(event.target.checked)}/><span><strong>قانون نسخه‌گذاری را تأیید می‌کنم</strong><small>نسخه جدید فقط برای پرونده‌های جدید فعال شود و پرونده‌های جاری با مسیر قبلی ادامه پیدا کنند.</small></span></label>
+    </div><footer><button type="button" className="button button--ghost" onClick={onClose}>انصراف</button><button className="button button--primary">انتشار نسخه {persianNumber(workflow.version+1)}</button></footer>
+  </form></div>;
+}
+
+function StageEditor({title,description,state,workflow,stages,onChange}:{title:string;description:string;state:FoundationState;workflow:WorkflowDefinition;stages:WorkflowApprovalStageDefinition[];onChange:(stages:WorkflowApprovalStageDefinition[])=>void}){
+  const [roleSearch,setRoleSearch]=useState<Record<string,string>>({});
+  const activeRoles=state.roles.filter((role)=>role.status==='active');
+  const activeUsers=state.users.filter((user)=>user.status==='active');
+  const update=(index:number,patch:Partial<WorkflowApprovalStageDefinition>)=>onChange(stages.map((stage,row)=>row===index?{...stage,...patch}:stage));
+  const move=(index:number,delta:number)=>{const target=index+delta;if(target<0||target>=stages.length)return;const copy=[...stages];[copy[index],copy[target]]=[copy[target],copy[index]];onChange(copy);};
+  return <section className="workflow-stage-editor"><header><div><strong>{title}</strong><small>{description}</small></div><button type="button" className="button button--secondary" onClick={()=>onChange([...stages,newStage(workflow,stages.length)])}><Plus size={16}/> افزودن مرحله</button></header>{stages.map((stage,index)=>{const assignmentMode=assignmentModeForStage(stage);const eligibleUsers=activeUsers.filter((user)=>!stage.roleIds.length||user.roleIds.some((roleId)=>stage.roleIds.includes(roleId)));return <article key={stage.id}><div className="workflow-stage-order"><b>مرحله {persianNumber(index+1)}</b><span>{persianNumber(index+1)}</span><button type="button" className="icon-button" onClick={()=>move(index,-1)} disabled={index===0} aria-label="انتقال مرحله به بالا"><ArrowUp size={16}/></button><button type="button" className="icon-button" onClick={()=>move(index,1)} disabled={index===stages.length-1} aria-label="انتقال مرحله به پایین"><ArrowDown size={16}/></button><button type="button" className="icon-button icon-button--danger" onClick={()=>onChange(stages.filter((_,row)=>row!==index))} aria-label="حذف مرحله"><Trash2 size={16}/></button></div><div className="workflow-stage-fields"><label className="field"><RequiredLabel>نام این مرحله</RequiredLabel><input value={stage.title} onChange={(event)=>update(index,{title:event.target.value})}/></label><label className="field"><RequiredLabel>وضعیت پرونده</RequiredLabel><select value={stage.stateId} onChange={(event)=>update(index,{stateId:event.target.value})}>{Object.entries(workflow.stateLabels).map(([id,label])=><option key={id} value={id}>{label}</option>)}</select></label><label className="field"><RequiredLabel>محدوده مسئولیت</RequiredLabel><select value={stage.scope} onChange={(event)=>update(index,{scope:event.target.value as WorkflowStageScope})}>{Object.entries(scopeLabels).map(([id,label])=><option key={id} value={id}>{label}</option>)}</select></label><label className="field"><RequiredLabel>روش تعیین مسئول مرحله</RequiredLabel><select value={assignmentMode} onChange={(event)=>update(index,{assignmentMode:event.target.value as WorkflowStageAssignmentMode,assigneeUserId:undefined,scope:event.target.value==='branch_manager'?'BRANCH':stage.scope})}>{Object.entries(assignmentModeLabels).map(([id,label])=><option key={id} value={id}>{label}</option>)}</select><small className="field-help">{assignmentMode==='branch_manager'?'مدیر از فیلد «مدیر شعبه» در ساختار سازمان خوانده می‌شود.':assignmentMode==='specific_user'?'پرونده فقط به کاربر انتخاب‌شده ارجاع می‌شود.':'سیستم یک کاربر فعال دارای نقش و محدوده مجاز را انتخاب می‌کند.'}</small></label>{assignmentMode==='specific_user'&&<label className="field"><RequiredLabel>کاربر مسئول</RequiredLabel><select value={stage.assigneeUserId??''} onChange={(event)=>update(index,{assigneeUserId:event.target.value||undefined})}><option value="">انتخاب کاربر…</option>{eligibleUsers.map((user)=><option key={user.id} value={user.id}>{user.name} — {user.roleTitle}</option>)}</select></label>}<label className="field field--wide"><RequiredLabel>نقش‌های مسئول</RequiredLabel><span className="workflow-role-search"><Search size={15}/><input value={roleSearch[stage.id]??''} onChange={(event)=>setRoleSearch((current)=>({...current,[stage.id]:event.target.value}))} placeholder="جست‌وجوی نقش…"/></span><div className="workflow-role-options">{activeRoles.filter((role)=>`${role.name} ${role.description}`.toLocaleLowerCase('fa-IR').includes((roleSearch[stage.id]??'').trim().toLocaleLowerCase('fa-IR'))).map((role)=><label key={role.id}><input type="checkbox" checked={stage.roleIds.includes(role.id)} onChange={(event)=>update(index,{roleIds:event.target.checked?[...stage.roleIds,role.id]:stage.roleIds.filter((id)=>id!==role.id),assigneeUserId:undefined})}/><span>{role.name}</span></label>)}</div></label><div className="field field--wide"><RequiredLabel>تصمیم‌های مجاز</RequiredLabel><div className="workflow-decision-options">{decisions.map((decision)=><label key={decision}><input type="checkbox" checked={stage.decisions.includes(decision)} onChange={(event)=>update(index,{decisions:event.target.checked?[...stage.decisions,decision]:stage.decisions.filter((item)=>item!==decision)})}/><span>{decisionLabels[decision]}</span></label>)}</div></div><label className="switch-row"><input type="checkbox" checked={stage.required} onChange={(event)=>update(index,{required:event.target.checked})}/><span>عبور از این مرحله الزامی است</span></label><label className="switch-row"><input type="checkbox" checked={stage.allowSelfApproval} onChange={(event)=>update(index,{allowSelfApproval:event.target.checked})}/><span>تأیید درخواست خود مجاز است</span></label></div></article>;})}</section>;
+}

@@ -1,4 +1,5 @@
-import type {FoundationState, LocalUser, OperationalPayloadValue, OperationalRecord, PersonnelRecord} from './model';
+import type {FoundationState, LocalUser, OperationalPayloadValue, OperationalRecord, PersonnelRecord, WorkflowApprovalStageDefinition} from './model';
+import {approvalStagesForRoute, assignmentModeForStage, roleIdsForWorkflowState, routeVariantForBranch} from './workflowPolicy';
 
 export type AdvanceStage = 'draft' | 'branch_review' | 'accounting_review' | 'final_review' | 'needs_correction' | 'sent_to_treasury' | 'rejected' | 'paid';
 export type AdvanceDecision = 'approve' | 'needs_correction' | 'reject' | 'accounting_recheck' | 'approve_to_treasury';
@@ -78,16 +79,70 @@ export function readEmployeeAdvancePayload(recordOrPayload: OperationalRecord | 
 
 export function advanceBranchIds(user: LocalUser, state: Pick<FoundationState, 'units'>): string[] {
   if (user.isAdmin || user.advanceBranchIds?.includes('*')) return state.units.filter((unit) => unit.type === 'شعبه' && unit.status === 'active').map((unit) => unit.id);
-  return user.advanceBranchIds?.length ? user.advanceBranchIds : user.branchUnitId ? [user.branchUnitId] : [];
+  const explicit = user.advanceBranchIds?.length ? user.advanceBranchIds : user.branchUnitId ? [user.branchUnitId] : [];
+  const managed = state.units.filter((unit) => unit.type === 'شعبه' && unit.status === 'active' && unit.managerUserId === user.id).map((unit) => unit.id);
+  return [...new Set([...explicit, ...managed])];
 }
 
-export function canSelfSubmitAdvance(branchUnitId: string): boolean {
-  // V1 policy seed: all active branches allow employee self-service. This boundary is ready for a branch policy editor.
-  return Boolean(branchUnitId);
+export function canSelfSubmitAdvance(branchUnitId: string, state?: Pick<FoundationState, 'workflows' | 'roles'>): boolean {
+  if (!branchUnitId) return false;
+  const workflow = state?.workflows.find((item) => item.moduleId === 'employee-advance');
+  if (!workflow || !state) return true;
+  const variant = routeVariantForBranch(workflow, branchUnitId);
+  return variant?.allowSelfSubmission ?? workflow.allowSelfSubmission ?? true;
 }
 
-export function canProxyAdvance(user: LocalUser, beneficiary: PersonnelRecord, state: Pick<FoundationState, 'units'>): boolean {
-  return user.roleIds.includes('role-sales-advance-approver') && advanceBranchIds(user, state).includes(beneficiary.branchUnitId ?? beneficiary.salesBranchUnitId ?? '');
+interface AdvanceStageAssignmentContext {
+  branchUnitId: string;
+  unitId?: string;
+  beneficiaryUserId?: string;
+}
+
+export function canUserTakeAdvanceStage(
+  user: LocalUser,
+  stage: WorkflowApprovalStageDefinition,
+  state: Pick<FoundationState, 'units'>,
+  context: AdvanceStageAssignmentContext,
+): boolean {
+  if (user.status !== 'active') return false;
+  const mode = assignmentModeForStage(stage);
+  if (mode === 'specific_user' && user.id !== stage.assigneeUserId) return false;
+  if (mode === 'branch_manager') {
+    const branch = state.units.find((unit) => unit.id === context.branchUnitId && unit.status === 'active');
+    if (!branch?.managerUserId || branch.managerUserId !== user.id) return false;
+  }
+  if (stage.roleIds.length && !user.roleIds.some((roleId) => stage.roleIds.includes(roleId))) return false;
+  if (stage.scope === 'SELF' && user.id !== context.beneficiaryUserId) return false;
+  if (stage.scope === 'UNIT' && user.unitId !== context.unitId) return false;
+  if (stage.scope === 'BRANCH' && !advanceBranchIds(user, state).includes(context.branchUnitId)) return false;
+  return true;
+}
+
+export function resolveAdvanceStageAssignee(
+  state: Pick<FoundationState, 'users' | 'units' | 'roles'>,
+  workflow: Parameters<typeof approvalStagesForRoute>[0],
+  routeId: string | undefined,
+  stateId: string,
+  context: AdvanceStageAssignmentContext,
+): LocalUser | undefined {
+  const stage = approvalStagesForRoute(workflow, state.roles, routeId).find((item) => item.stateId === stateId);
+  if (!stage) return undefined;
+  const candidates = state.users.filter((user) => canUserTakeAdvanceStage(user, stage, state, context));
+  if (assignmentModeForStage(stage) === 'specific_user') return candidates.find((user) => user.id === stage.assigneeUserId);
+  if (assignmentModeForStage(stage) === 'branch_manager') return candidates[0];
+  return [...candidates].sort((a, b) => a.name.localeCompare(b.name, 'fa') || a.id.localeCompare(b.id))[0];
+}
+
+export function canProxyAdvance(user: LocalUser, beneficiary: PersonnelRecord, state: FoundationState): boolean {
+  const branchId = beneficiary.salesBranchUnitId ?? beneficiary.branchUnitId ?? '';
+  const workflow = state.workflows.find((item) => item.moduleId === 'employee-advance');
+  const routeId = workflow ? routeVariantForBranch(workflow, branchId)?.id : undefined;
+  const stage = workflow && approvalStagesForRoute(workflow, state.roles, routeId).find((item) => item.stateId === 'final_review');
+  return Boolean(stage && canUserTakeAdvanceStage(user, stage, state, {
+    branchUnitId: branchId,
+    unitId: beneficiary.unitId,
+    beneficiaryUserId: beneficiary.linkedUserId,
+  }));
 }
 
 export function isEmployeeAdvanceVisible(record: OperationalRecord, state: FoundationState): boolean {
@@ -95,8 +150,11 @@ export function isEmployeeAdvanceVisible(record: OperationalRecord, state: Found
   const payload = readEmployeeAdvancePayload(record);
   const user = state.activeUser;
   if (payload.beneficiaryUserId === user.id || record.createdByUserId === user.id || record.assigneeUserId === user.id) return true;
-  if (user.roleIds.includes('role-advance-accounting-reviewer')) return true;
-  if (user.roleIds.includes('role-advance-branch-manager') || user.roleIds.includes('role-sales-advance-approver')) return advanceBranchIds(user, state).includes(payload.branchUnitId);
+  const accountingRoles = roleIdsForWorkflowState(state, 'employee-advance', 'accounting_review', ['role-advance-accounting-reviewer'], record.workflowVersion, record.workflowRouteId);
+  const branchRoles = roleIdsForWorkflowState(state, 'employee-advance', 'branch_review', ['role-advance-branch-manager'], record.workflowVersion, record.workflowRouteId);
+  const finalRoles = roleIdsForWorkflowState(state, 'employee-advance', 'final_review', ['role-sales-advance-approver'], record.workflowVersion, record.workflowRouteId);
+  if (user.roleIds.some((roleId) => accountingRoles.includes(roleId))) return true;
+  if (user.roleIds.some((roleId) => branchRoles.includes(roleId) || finalRoles.includes(roleId))) return advanceBranchIds(user, state).includes(payload.branchUnitId);
   return false;
 }
 
@@ -105,23 +163,21 @@ export function canBranchManagerDecideAdvance(record: OperationalRecord, state: 
   const user = state.activeUser;
   if (user.isAdmin) return true;
   const payload = readEmployeeAdvancePayload(record);
-  return user.status === 'active'
-    && user.roleIds.includes('role-advance-branch-manager')
-    && advanceBranchIds(user, state).includes(payload.branchUnitId);
+  const workflow = state.workflows.find((item) => item.moduleId === 'employee-advance' && (!record.workflowVersion || item.version === record.workflowVersion))
+    ?? state.workflowVersions.find((item) => item.moduleId === 'employee-advance' && item.version === record.workflowVersion);
+  const stage = workflow && approvalStagesForRoute(workflow, state.roles, record.workflowRouteId).find((item) => item.stateId === 'branch_review');
+  return Boolean(stage && canUserTakeAdvanceStage(user, stage, state, {branchUnitId: payload.branchUnitId, unitId: payload.unitId, beneficiaryUserId: payload.beneficiaryUserId}));
 }
 
 export function canEmployeeAdvanceReviewerDecide(record: OperationalRecord, state: FoundationState): boolean {
   const user = state.activeUser;
   if (user.isAdmin) return ['branch_review', 'accounting_review', 'final_review'].includes(record.status);
-  if (canBranchManagerDecideAdvance(record, state)) return true;
-  if (record.status === 'accounting_review') return user.status === 'active' && user.roleIds.includes('role-advance-accounting-reviewer');
-  if (record.status === 'final_review') {
-    const payload = readEmployeeAdvancePayload(record);
-    return user.status === 'active'
-      && user.roleIds.includes('role-sales-advance-approver')
-      && advanceBranchIds(user, state).includes(payload.branchUnitId);
-  }
-  return false;
+  if (!['branch_review', 'accounting_review', 'final_review'].includes(record.status)) return false;
+  const payload = readEmployeeAdvancePayload(record);
+  const workflow = state.workflows.find((item) => item.moduleId === 'employee-advance' && (!record.workflowVersion || item.version === record.workflowVersion))
+    ?? state.workflowVersions.find((item) => item.moduleId === 'employee-advance' && item.version === record.workflowVersion);
+  const stage = workflow && approvalStagesForRoute(workflow, state.roles, record.workflowRouteId).find((item) => item.stateId === record.status);
+  return Boolean(stage && canUserTakeAdvanceStage(user, stage, state, {branchUnitId: payload.branchUnitId, unitId: payload.unitId, beneficiaryUserId: payload.beneficiaryUserId}));
 }
 
 export function advanceBeneficiaryName(record: OperationalRecord): string {

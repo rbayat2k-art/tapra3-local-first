@@ -6,7 +6,7 @@ import {formatPersianDateTime} from './PersianDate';
 import {digitsOnly, normalizeBankCard, normalizeIranianMobile} from '../utils/operationalFormat';
 import {FormValidationSummary, OptionalLabel, RequiredLabel} from './FormValidation';
 
-interface ReviewProps {state: FoundationState; service: LocalFoundationService; execute: (label: string, work: () => Promise<FoundationState>, success: string) => Promise<void>}
+interface ReviewProps {state: FoundationState; service: LocalFoundationService; execute: (label: string, work: () => Promise<FoundationState>, success: string) => Promise<boolean>}
 
 export function RegistrationPage({state, service, execute}: ReviewProps) {
   const [query, setQuery] = useState('');
@@ -16,7 +16,7 @@ export function RegistrationPage({state, service, execute}: ReviewProps) {
   return <div className="page-stack">
     <section className="page-intro"><div className="page-intro__icon"><ClipboardCheck size={24}/></div><div><span className="eyebrow">گردش ثبت‌نام</span><h2>درخواست‌های ثبت‌نام</h2><p>هویت، کد ملی، موبایل و نام کاربری پیش از ثبت و دوباره هنگام فعال‌سازی کنترل می‌شوند.</p></div></section>
     <section className="panel"><div className="operational-toolbar"><div><span className="eyebrow">صف بررسی</span><h3>{rows.length.toLocaleString('en-US')} درخواست</h3></div><label className="search-field"><Search size={17}/><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="نام، موبایل، کد ملی، نام کاربری یا کد پیگیری…"/></label></div><div className="registration-list">{rows.map((item) => <button key={item.id} onClick={() => setSelected(item)}><span className={`state-badge state-badge--${item.status === 'rejected' ? 'danger' : item.status === 'activated' ? 'good' : 'progress'}`}>{registrationLabel(item.status)}</span><div><strong>{item.fullName}</strong><small>{item.trackingCode} · {item.mobile} · @{item.requestedUsername}</small><time>ثبت در {formatPersianDateTime(item.createdAt)}</time></div><ArrowLeft size={17}/></button>)}{!rows.length && <div className="empty-state"><UserPlus size={28}/><strong>درخواستی مطابق جست‌وجو پیدا نشد.</strong></div>}</div></section>
-    {selected && <ReviewDialog request={selected} state={state} onClose={() => setSelected(null)} onReview={(decision, reason, roleIds, initialPassword) => execute('registration-review', () => service.reviewRegistration(selected.id, decision, reason, roleIds, initialPassword), 'تصمیم ثبت‌نام ذخیره شد.').then(() => setSelected(null))}/>} 
+    {selected && <ReviewDialog request={selected} state={state} onClose={() => setSelected(null)} onReview={(decision, reason, roleIds, initialPassword) => execute('registration-review', () => service.reviewRegistration(selected.id, decision, reason, roleIds, initialPassword), 'تصمیم ثبت‌نام ذخیره شد.').then((succeeded) => {if (succeeded) setSelected(null);})}/>}
   </div>;
 }
 
@@ -57,7 +57,7 @@ export function RegistrationDialog({service, onClose, onDone}: {service: LocalFo
   </form></div>;
 }
 
-function ReviewDialog({request, state, onClose, onReview}: {request: RegistrationRequest; state: FoundationState; onClose: () => void; onReview: (decision: 'in_review'|'needs_correction'|'rejected'|'approved', reason: string, roles: string[], initialPassword: string) => Promise<void>}) {
+function ReviewDialog({request, state, onClose, onReview}: {request: RegistrationRequest; state: FoundationState; onClose: () => void; onReview: (decision: 'in_review'|'needs_correction'|'rejected'|'approved', reason: string, roles: string[], initialPassword: string) => Promise<unknown>}) {
   const [reason, setReason] = useState(request.reviewReason ?? '');
   const [roles, setRoles] = useState<string[]>([]);
   const [roleQuery, setRoleQuery] = useState('');

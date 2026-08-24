@@ -13,7 +13,7 @@ import {formatPortalAmount} from '../utils/operationalFormat';
 import {EmployeeAdvanceDetails} from './EmployeeAdvanceUi';
 import {advanceBeneficiaryName, maskCard, readEmployeeAdvancePayload} from './employeeAdvance';
 
-type Execute = (label: string, work: () => Promise<FoundationState>, success: string) => Promise<void>;
+type Execute = (label: string, work: () => Promise<FoundationState>, success: string) => Promise<boolean>;
 type ReceiptFile = NonNullable<TreasuryPaymentInput['receipt']>;
 const MAX_RECEIPT_SIZE = 5 * 1024 * 1024;
 const ACCEPTED_RECEIPTS = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
@@ -101,17 +101,17 @@ export function TreasuryExecutionDrawer({state, record, module, service, execute
   const submitPayment = () => {
     const next = !paidAt ? ['تاریخ پرداخت الزامی است.'] : [];
     setErrors(next); if (next.length) return;
-    void execute('treasury-payment', () => service.recordTreasuryPayment(record.id, {paidAt, paymentReference, note, receipt}), 'پرداخت ثبت و برای راستی‌آزمایی ارسال شد.').then(() => setErrors([]));
+    void execute('treasury-payment', () => service.recordTreasuryPayment(record.id, {paidAt, paymentReference, note, receipt}), 'پرداخت ثبت و برای راستی‌آزمایی ارسال شد.').then((succeeded) => {if (succeeded) setErrors([]);});
   };
   const savePaymentRevision = () => {
     const next = [...(!paidAt ? ['تاریخ پرداخت الزامی است.'] : []), ...(revisionReason.trim().length < 3 ? ['دلیل اصلاح اطلاعات پرداخت را وارد کنید.'] : [])];
     setErrors(next); if (next.length) return;
-    void execute('treasury-payment-revision', () => service.reviseTreasuryPayment(record.id, {paidAt, paymentReference, note, receipt}, revisionReason), 'اصلاحات پرداخت با حفظ نسخه قبلی ثبت شد.').then(() => {setEditingPayment(false); setRevisionReason(''); setErrors([]);});
+    void execute('treasury-payment-revision', () => service.reviseTreasuryPayment(record.id, {paidAt, paymentReference, note, receipt}, revisionReason), 'اصلاحات پرداخت با حفظ نسخه قبلی ثبت شد.').then((succeeded) => {if (succeeded) {setEditingPayment(false); setRevisionReason(''); setErrors([]);}});
   };
   const revertPayment = () => {
     const next = revertReason.trim().length < 3 ? ['دلیل بازگشت از پرداخت را وارد کنید.'] : [];
     setErrors(next); if (next.length) return;
-    void execute('treasury-payment-revert', () => service.revertTreasuryPayment(record.id, revertReason), 'پرداخت با حفظ سابقه به وضعیت «در اختیار مجری پرداخت» بازگشت.').then(() => {setConfirmingRevert(false); setRevertReason(''); setErrors([]);});
+    void execute('treasury-payment-revert', () => service.revertTreasuryPayment(record.id, revertReason), 'پرداخت با حفظ سابقه به وضعیت «در اختیار مجری پرداخت» بازگشت.').then((succeeded) => {if (succeeded) {setConfirmingRevert(false); setRevertReason(''); setErrors([]);}});
   };
   const cancelPaymentRevision = () => {
     setPaidAt(payment?.paidAt ?? today());

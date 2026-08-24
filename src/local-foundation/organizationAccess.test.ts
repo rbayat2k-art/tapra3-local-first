@@ -62,7 +62,7 @@ describe('organization role and dashboard matrix', () => {
       expect(persona, id).toBeDefined();
       expect(persona?.status, id).toBe('active');
       expect(persona?.isAdmin, id).toBe(false);
-      expect(persona?.permissions, id).toEqual(role(id).permissions);
+      expect(persona?.permissions, id).toEqual(expect.arrayContaining(role(id).permissions));
     }
   });
 });

@@ -15,6 +15,7 @@ import type {
 import {FOUNDATION_SCHEMA_VERSION} from './model';
 import {PERMISSION_CATALOG, ROLE_TEMPLATES} from './seed';
 import {LocalFoundationService, isEncryptedSnapshot, type SelfCredentialChangeInput, type UserInput} from './service';
+import {positionSupportsUnit, positionsForUnit} from './unitPosition';
 import {OrganizationOverviewPage, PositionsPage, RolesPage, UnitsPage} from './OrganizationPages';
 import {PersonnelPage} from './PersonnelPages';
 import {CustomersPage} from './CustomerPages';
@@ -32,6 +33,8 @@ import {MyAccountPage} from './MyAccountPage';
 import {dashboardCapabilitiesFor, type DashboardCapability} from './organizationAccess';
 import {digitsOnly, normalizeIranianMobile} from '../utils/operationalFormat';
 import {pageFromUrl, pageRouteUrl} from './navigationUrl';
+import {WorkflowAdminPage} from './WorkflowAdminPage';
+import {RecruitmentPage} from './RecruitmentPage';
 
 type PageId = string;
 type ThemePreference = 'light' | 'dark' | 'system';
@@ -67,6 +70,7 @@ const NAVIGATION: NavigationItem[] = [
   {id: 'users', title: 'کاربران', subtitle: 'سازمان · کاربران', icon: UsersRound, anyPermissions: ['foundation.users.view'], group: 'سازمان'},
   {id: 'roles', title: 'نقش‌ها و دسترسی‌ها', subtitle: 'مجوز و محدوده مؤثر', icon: KeyRound, anyPermissions: ['organization.roles.view'], group: 'سازمان'},
   {id: 'registrations', title: 'درخواست‌های ثبت‌نام', subtitle: 'بررسی، اتصال و فعال‌سازی', icon: UserCheck, anyPermissions: ['organization.registrations.view'], group: 'سازمان'},
+  {id: 'recruitment', title: 'جذب و شروع همکاری', subtitle: 'اعلام نیاز تا حساب و قرارداد', icon: UserPlus, anyPermissions: [permissionFor('recruitment-case','view'), permissionFor('recruitment-case','create')], group: 'عملیات سازمان'},
   {id: 'hcm', title: 'منابع انسانی', subtitle: 'قرارداد تا خروج و عملکرد', icon: ContactRound, anyPermissions: modulePermissions('hcm'), group: 'عملیات سازمان'},
   {id: 'customers', title: 'مشتریان', subtitle: 'فهرست و نمای ۳۶۰ مشتری', icon: UsersRound, anyPermissions: ['crm.customers.view'], group: 'مشتری و CRM'},
   {id: 'crm', title: 'CRM و سرنخ‌ها', subtitle: 'Lead، تماس، پیگیری و فرصت', icon: UserRound, anyPermissions: modulePermissions('crm'), group: 'مشتری و درآمد'},
@@ -89,7 +93,7 @@ const NAVIGATION: NavigationItem[] = [
   {id: 'letters', title: 'نامه‌ها', subtitle: 'ثبت، ارجاع و مجوز ارسال', icon: ScrollText, anyPermissions: modulePermissions('letters'), group: 'همکاری'},
   {id: 'documents', title: 'اسناد و آرشیو', subtitle: 'هش، نسخه و سهمیه', icon: FileJson, anyPermissions: modulePermissions('documents'), group: 'همکاری'},
   {id: 'reports', title: 'گزارش‌ها و KPI', subtitle: 'صف‌ها و سلامت عملیات', icon: Activity, anyPermissions: ['foundation.reports.view'], group: 'کنترل و راهبری'},
-  {id: 'workflow-admin', title: 'مدیریت گردش‌کار', subtitle: 'صف، تخصیص و Policy محدود', icon: Workflow, anyPermissions: ['foundation.workflow.manage'], group: 'کنترل و راهبری'},
+  {id: 'workflow-admin', title: 'مدیریت گردش‌کار', subtitle: 'صف، تخصیص و سیاست تأیید محدود', icon: Workflow, anyPermissions: ['foundation.workflow.manage'], group: 'کنترل و راهبری'},
   {id: 'policy', title: 'آزمایش دسترسی', subtitle: 'مجوز، محدوده و گارد', icon: ShieldCheck, anyPermissions: ['foundation.policy.inspect'], group: 'مدیریت'},
   {id: 'audit', title: 'رویدادها و ممیزی', subtitle: 'ردپای همه اقدام‌ها', icon: ScrollText, anyPermissions: ['foundation.audit.view'], group: 'مدیریت'},
   {id: 'data', title: 'پشتیبان داده', subtitle: 'خروجی، بازیابی و بازنشانی', icon: Database, anyPermissions: ['foundation.data.export', 'foundation.data.manage'], group: 'مدیریت'},
@@ -147,7 +151,11 @@ export function LocalFoundationApp() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const visibleNavigation = useMemo(() => foundation
-    ? NAVIGATION.filter((item) => item.id === 'my-account' || item.anyPermissions.some((permission) => can(foundation.activeUser, permission)))
+    ? NAVIGATION.filter((item) => {
+      if (item.id === 'my-account' || item.anyPermissions.some((permission) => can(foundation.activeUser, permission))) return true;
+      if (item.id !== 'personnel' || !foundation.activeUser.personnelId) return false;
+      return foundation.personnel.some((person) => person.employmentStatus === 'active' && (person.managerPersonnelId === foundation.activeUser.personnelId || person.salesSupervisorPersonnelId === foundation.activeUser.personnelId));
+    })
     : [], [foundation]);
   const groupedNavigation = useMemo(() => {
     const groups = new Map<string, NavigationItem[]>();
@@ -230,20 +238,22 @@ export function LocalFoundationApp() {
       const next = await work();
       setFoundation(next);
       setToast(success);
+      return true;
     } catch (cause) {
       setError(messageOf(cause));
+      return false;
     } finally {
       setBusy(null);
     }
   }
 
   async function loginAsUser(user: LocalUser) {
-    await run('qa-login', () => service.loginAsUser(user.id), `اکنون محیط را با دسترسی واقعی «${user.name}» می‌بینید.`);
+    if (!await run('qa-login', () => service.loginAsUser(user.id), `اکنون محیط را با دسترسی واقعی «${user.name}» می‌بینید.`)) return;
     setEditUser(null); setPage('dashboard'); setMobileOpen(false);
   }
 
   async function endQaSession() {
-    await run('qa-return', () => service.endQaSession(), 'به حساب ادمین بازگشتید.');
+    if (!await run('qa-return', () => service.endQaSession(), 'به حساب ادمین بازگشتید.')) return;
     setAccountOpen(false); setNotificationOpen(false); setPage('users');
   }
 
@@ -431,10 +441,11 @@ export function LocalFoundationApp() {
           {page === 'users' && <UsersPage state={foundation} onEdit={setEditUser} onLogin={loginAsUser} onStatus={(target, status) => run('user-status', () => service.setUserStatus(target.id, status), `وضعیت «${target.name}» به‌روزرسانی شد.`)} />}
           {page === 'roles' && <RolesPage state={foundation} service={service} execute={run} />}
           {page === 'registrations' && <RegistrationPage state={foundation} service={service} execute={run} />}
+          {page === 'recruitment' && <RecruitmentPage state={foundation} service={service} execute={run} />}
           {page === 'customers' && <CustomersPage state={foundation} service={service} execute={run} />}
           {DOMAIN_PAGE_MODULES[page] && <ErpWorkspacePage key={page} state={foundation} moduleIds={DOMAIN_PAGE_MODULES[page]} service={service} execute={run} />}
           {page === 'reports' && <ReportsPage state={foundation} />}
-          {page === 'workflow-admin' && <WorkflowAdminPage state={foundation} execute={run} />}
+          {page === 'workflow-admin' && <WorkflowAdminPage state={foundation} execute={run} service={service} />}
           {page === 'my-account' && <MyAccountPage state={foundation} service={service} execute={run} />}
           {page === 'account-security' && <AccountSecurityPage user={user} busy={busy === 'own-credentials'} onSubmit={(input) => run('own-credentials', () => service.changeOwnCredentials(input), 'نام کاربری و تنظیمات امنیتی حساب ذخیره شد.')} />}
           {page === 'appearance' && <AppearancePage preferences={preferences} onChange={setPreferences} />}
@@ -459,12 +470,12 @@ export function LocalFoundationApp() {
 
       <input ref={fileInputRef} hidden type="file" accept="application/json,.json" onChange={chooseRestore} />
 
-      {editUser && <UserDialog user={editUser === 'new' ? undefined : editUser} state={foundation} onClose={() => setEditUser(null)} onSave={(input) => run('user-save', () => editUser === 'new' ? service.createUser(input) : service.updateUser(editUser.id, input), editUser === 'new' ? 'کاربر جدید ایجاد شد.' : 'اطلاعات کاربر ذخیره شد.').then(() => setEditUser(null))} onPassword={editUser === 'new' ? undefined : (password) => run('user-password', () => service.setUserPassword(editUser.id, password), 'رمز عبور کاربر با موفقیت تنظیم شد.')} onLogin={editUser === 'new' ? undefined : () => loginAsUser(editUser)} />}
+      {editUser && <UserDialog user={editUser === 'new' ? undefined : editUser} state={foundation} onClose={() => setEditUser(null)} onSave={(input) => run('user-save', () => editUser === 'new' ? service.createUser(input) : service.updateUser(editUser.id, input), editUser === 'new' ? 'کاربر جدید ایجاد شد.' : 'اطلاعات کاربر ذخیره شد.').then((succeeded) => {if (succeeded) setEditUser(null);})} onPassword={editUser === 'new' ? undefined : (password) => run('user-password', () => service.setUserPassword(editUser.id, password), 'رمز عبور کاربر با موفقیت تنظیم شد.')} onLogin={editUser === 'new' ? undefined : () => loginAsUser(editUser)} />}
       {registrationOpen && <RegistrationDialog service={service} onClose={() => setRegistrationOpen(false)} onDone={(state) => {setFoundation(state);setRegistrationOpen(false);setToast('درخواست ثبت‌نام با کد پیگیری ثبت شد.');}} />}
       {logoutOpen && <ConfirmLogoutDialog busy={busy === 'sign-out'} user={foundation.activeUser} onClose={() => setLogoutOpen(false)} onConfirm={signOut} />}
-      {resetOpen && <ResetDialog busy={busy === 'reset'} onClose={() => setResetOpen(false)} onConfirm={() => run('reset', () => service.reset(), 'داده‌ها به سناریوی اولیه بازگشتند.').then(() => setResetOpen(false))} />}
+      {resetOpen && <ResetDialog busy={busy === 'reset'} onClose={() => setResetOpen(false)} onConfirm={() => run('reset', () => service.reset(), 'داده‌ها به سناریوی اولیه بازگشتند.').then((succeeded) => {if (succeeded) setResetOpen(false);})} />}
       {backupOpen && <PasswordDialog title="پشتیبان رمزگذاری‌شده" description="یک رمز حداقل ۸ نویسه‌ای انتخاب کنید. این رمز در تپرا ذخیره نمی‌شود." actionLabel="ساخت پشتیبان" busy={busy === 'backup'} onClose={() => setBackupOpen(false)} onSubmit={exportBackup} />}
-      {restoreInput && <RestoreDialog input={restoreInput} busy={busy === 'restore'} onClose={() => setRestoreInput(null)} onSubmit={(password) => run('restore', () => service.importSnapshot(restoreInput, password), 'پشتیبان با موفقیت بازیابی شد.').then(() => setRestoreInput(null))} />}
+      {restoreInput && <RestoreDialog input={restoreInput} busy={busy === 'restore'} onClose={() => setRestoreInput(null)} onSubmit={(password) => run('restore', () => service.importSnapshot(restoreInput, password), 'پشتیبان با موفقیت بازیابی شد.').then((succeeded) => {if (succeeded) setRestoreInput(null);})} />}
       {busy && busy !== 'initializing' && <div className="busy-indicator"><span /><b>در حال ثبت امن تغییرات…</b></div>}
       {toast && <div className="toast"><BadgeCheck size={20} /><span>{toast}</span></div>}
     </div>
@@ -536,7 +547,7 @@ function Dashboard({state, navigate}: {state: FoundationState; navigate: (page: 
             <div><span>واحد</span><strong>{unitLabel(user.unitId)}</strong></div>
             <div><span>سطح داده</span><strong>{dataVisible ? 'پشتیبان مجاز' : 'بدون مدیریت داده'}</strong></div>
           </div>
-          <div className="permission-cloud">{user.permissions.map((permission) => <span key={permission}>{permissionLabel(permission)}</span>)}</div>
+          <div className="permission-cloud">{[...new Set(user.permissions)].map((permission) => <span key={permission}>{permissionLabel(permission)}</span>)}</div>
         </section>
       </div>
 
@@ -549,7 +560,7 @@ function Dashboard({state, navigate}: {state: FoundationState; navigate: (page: 
 }
 
 function dashboardCapabilityIcon(id: DashboardCapability['id']): LucideIcon {
-  return ({organization: Network, structure: GitBranch, personnel: ContactRound, 'personnel-review': FileClock, users: UserCog, registrations: UserCheck, roles: KeyRound, procurement: BriefcaseBusiness, treasury: HardDrive})[id];
+  return ({organization: Network, structure: GitBranch, personnel: ContactRound, recruitment: UserCheck, 'personnel-review': FileClock, users: UserCog, registrations: UserCheck, roles: KeyRound, procurement: BriefcaseBusiness, treasury: HardDrive})[id];
 }
 
 function dashboardCapabilityMetric(id: DashboardCapability['id'], state: FoundationState): string {
@@ -557,6 +568,7 @@ function dashboardCapabilityMetric(id: DashboardCapability['id'], state: Foundat
     organization: state.units.filter((unit) => unit.status === 'active').length,
     structure: state.units.filter((unit) => unit.status === 'active').length + state.positions.filter((position) => position.status === 'active').length,
     personnel: state.personnel.filter((person) => person.employmentStatus === 'active').length,
+    recruitment: state.operationalRecords.filter((record) => record.moduleId === 'recruitment-case' && !['closed','rejected','withdrawn'].includes(record.status)).length,
     'personnel-review': state.personnelProfileChangeRequests.filter((request) => request.status === 'submitted').length,
     users: state.users.filter((item) => item.status === 'active').length,
     registrations: state.registrationRequests.filter((request) => request.status === 'submitted' || request.status === 'in_review').length,
@@ -669,17 +681,6 @@ function ReportsPage({state}:{state:FoundationState}) {
   return <div className="page-stack"><PageIntro icon={Activity} eyebrow="Operational MIS" title="گزارش مدیریتی و سلامت صف‌ها" description="این نما از Projection و داده مرجع IndexedDB محاسبه می‌شود و هیچ عددی از سرور دریافت نمی‌کند."/><section className="metric-grid"><Metric icon={Database} tone="violet" value={state.operationalRecords.length.toLocaleString('en-US')} label="رکورد عملیاتی" detail={`${ERP_MODULES.length.toLocaleString('en-US')} زیربخش فعال`}/><Metric icon={Workflow} tone="blue" value={active.length.toLocaleString('en-US')} label="در جریان" detail="به‌جز وضعیت‌های پایانی"/><Metric icon={CircleAlert} tone="amber" value={overdue.length.toLocaleString('en-US')} label="سررسید گذشته" detail="نیازمند پیگیری"/><Metric icon={ScrollText} tone="green" value={state.audits.length.toLocaleString('en-US')} label="رویداد Audit" detail="قابل ردگیری"/></section><section className="panel"><PanelHeading eyebrow="Queue health" title="توزیع رکوردها در حوزه‌های محصول" subtitle="هر نوار با رکوردهای واقعی ذخیره‌شده در مرورگر به‌روز می‌شود."/><div className="report-bars">{groups.map((item)=><div key={item.group}><span>{item.group}</span><i><b style={{width:`${Math.max(5,(item.count/Math.max(1,state.operationalRecords.length))*100)}%`}}/></i><strong>{item.count.toLocaleString('en-US')}</strong></div>)}</div></section><section className="panel"><PanelHeading eyebrow="Rebuildable projections" title="وضعیت نماهای محاسباتی" subtitle="Projectionها مشتق‌شده‌اند و با ابزار داده می‌توانند از Source of Truth بازسازی شوند."/><div className="storage-grid">{state.projections.map((item)=><StorageDatum key={item.id} label={item.kind} value={`نسخه ${item.version.toLocaleString('en-US')} · ${formatDateTime(item.rebuiltAt)}`}/>)}</div></section></div>
 }
 
-function WorkflowAdminPage({state,execute}:{state:FoundationState;execute:(label:string,work:()=>Promise<FoundationState>,success:string)=>Promise<void>}) {
-  const [selected,setSelected]=useState(state.workflows[0]?.moduleId??''); const [editing,setEditing]=useState(false); const [query,setQuery]=useState(''); const workflow=state.workflows.find((item)=>item.moduleId===selected)??state.workflows[0];
-  const visibleWorkflows=useMemo(()=>{const search=query.trim().toLocaleLowerCase('fa-IR');if(!search)return state.workflows;return state.workflows.filter((item)=>`${item.title} ${item.moduleId} ${item.assignmentPolicy} ${item.approvalPolicyId??''} ${queueLabel(item.queueStrategy)}`.toLocaleLowerCase('fa-IR').includes(search));},[query,state.workflows]);
-  useEffect(()=>{if(visibleWorkflows.length&&!visibleWorkflows.some((item)=>item.moduleId===selected))setSelected(visibleWorkflows[0].moduleId);},[selected,visibleWorkflows]);
-  if(!workflow)return <FatalState error="گردش‌کاری در داده محلی پیدا نشد."/>;
-  return <div className="page-stack"><PageIntro icon={Workflow} eyebrow="Controlled workflow designer" title="مدیریت محدود گردش‌کار" description="در V1 فقط Queue، Assignment و Approval Policy قابل نسخه‌گذاری است؛ State Machine مصوب به‌صورت آزاد ویرایش نمی‌شود."/><div className="workflow-admin-grid"><section className="panel workflow-directory"><h3>گردش‌کارهای منتشرشده</h3><DataSearchToolbar value={query} onChange={setQuery} placeholder="جست‌وجوی گردش‌کار یا سیاست" count={visibleWorkflows.length} unit="گردش‌کار" compact/><label className="select-field"><select value={selected} onChange={(event)=>setSelected(event.target.value)}>{visibleWorkflows.map((item)=><option key={item.id} value={item.moduleId}>{item.title}</option>)}</select></label>{visibleWorkflows.map((item)=><button key={item.id} className={item.moduleId===workflow.moduleId?'active':''} onClick={()=>setSelected(item.moduleId)}><span><strong>{item.title}</strong><small>{item.moduleId}</small></span><b>V{item.version.toLocaleString('en-US')}</b></button>)}{!visibleWorkflows.length&&<DataSearchEmpty text="گردش‌کاری با این جست‌وجو پیدا نشد."/>}</section><section className="panel workflow-detail"><div className="panel-heading"><div><span className="eyebrow">نسخه منتشرشده {workflow.version.toLocaleString('en-US')}</span><h3>{workflow.title}</h3><p>{workflow.assignmentPolicy}</p></div><button className="button button--primary" onClick={()=>setEditing(true)}><Pencil size={17}/> نسخه جدید Policy</button></div><div className="record-facts"><div><span>راهبرد صف<strong>{queueLabel(workflow.queueStrategy)}</strong></span></div><div><span>Approval Policy<strong>{workflow.approvalPolicyId??'Policy ماژول'}</strong></span></div><div><span>وضعیت<strong>منتشرشده</strong></span></div></div><div className="workflow-state-map">{Object.entries(workflow.stateLabels).map(([id,label])=><span key={id}>{label}<code>{id}</code></span>)}</div><div className="transition-map">{workflow.transitions.map((item)=><article key={item.id}><span>{item.from.map((from)=>workflow.stateLabels[from]??from).join(' / ')}</span><ArrowLeft size={17}/><strong>{workflow.stateLabels[item.to]??item.to}</strong><small>{item.label}{item.makerChecker?' · maker/checker':''}</small></article>)}</div></section></div>{editing&&<WorkflowPolicyDialog workflow={workflow} onClose={()=>setEditing(false)} onSave={(input)=>execute('workflow-policy',()=>service.updateWorkflowPolicy(workflow.moduleId,workflow.version,input),'نسخه جدید Policy منتشر شد.').then(()=>setEditing(false))}/>}</div>;
-}
-
-function WorkflowPolicyDialog({workflow,onClose,onSave}:{workflow:FoundationState['workflows'][number];onClose:()=>void;onSave:(input:{queueStrategy:FoundationState['workflows'][number]['queueStrategy'];assignmentPolicy:string;approvalPolicyId?:string})=>Promise<void>}){const [queueStrategy,setQueue]=useState(workflow.queueStrategy);const [assignmentPolicy,setAssignment]=useState(workflow.assignmentPolicy);const [approvalPolicyId,setApproval]=useState(workflow.approvalPolicyId??'');const [errors,setErrors]=useState<string[]>([]);return <div className="modal-scrim"><form noValidate className="dialog" onSubmit={(event)=>{event.preventDefault();const next=validateRequired([{label:'سیاست تخصیص',value:assignmentPolicy}]);setErrors(next);if(!next.length)void onSave({queueStrategy,assignmentPolicy,approvalPolicyId});}}><header><div><span className="eyebrow">نسخه جدید بدون تغییر State Machine</span><h2>{workflow.title}</h2></div><button type="button" className="icon-button" onClick={onClose}><X size={20}/></button></header><div className="dialog-body form-grid"><FormValidationSummary errors={errors}/><label className="field"><RequiredLabel>راهبرد صف</RequiredLabel><select aria-required="true" value={queueStrategy} onChange={(event)=>setQueue(event.target.value as typeof queueStrategy)}><option value="owner">مالک رکورد</option><option value="assignee">کاربر تخصیص‌یافته</option><option value="unit">صف واحد</option><option value="company">صف شرکت</option></select></label><label className="field"><OptionalLabel>شناسه سیاست تأیید</OptionalLabel><input dir="ltr" value={approvalPolicyId} onChange={(event)=>setApproval(event.target.value)}/></label><label className="field field--wide"><RequiredLabel>سیاست تخصیص</RequiredLabel><textarea aria-required="true" rows={4} value={assignmentPolicy} onChange={(event)=>setAssignment(event.target.value)}/></label></div><footer><button type="button" className="button button--ghost" onClick={onClose}>انصراف</button><button className="button button--primary">انتشار نسخه جدید</button></footer></form></div>}
-function queueLabel(value:string){return {owner:'مالک رکورد',assignee:'کاربر تخصیص‌یافته',unit:'صف واحد',company:'صف شرکت'}[value]??value}
-
 function QaGuide({state, navigate}: {state: FoundationState; navigate: (page: PageId) => void}) {
   const steps = [
     ['نمای سازمان را بررسی کنید', 'درخت سازمان، مسئولان، تعداد اعضا و تفکیک سمت از نقش دسترسی را ببینید.', () => navigate('organization')],
@@ -765,7 +766,7 @@ function UsersPage({state, onEdit, onLogin, onStatus}: {state: FoundationState; 
   </div>{deactivateTarget && <StatusConfirmDialog user={deactivateTarget} onClose={() => setDeactivateTarget(null)} onConfirm={() => { onStatus(deactivateTarget, 'inactive'); setDeactivateTarget(null); }} />}</>;
 }
 
-function UserDialog({user, state, onClose, onSave, onPassword, onLogin}: {user?: LocalUser; state: FoundationState; onClose: () => void; onSave: (input: UserInput) => void; onPassword?: (password: string) => Promise<void>; onLogin?: () => void}) {
+function UserDialog({user, state, onClose, onSave, onPassword, onLogin}: {user?: LocalUser; state: FoundationState; onClose: () => void; onSave: (input: UserInput) => void; onPassword?: (password: string) => Promise<boolean>; onLogin?: () => void}) {
   const actor = state.activeUser; const creating = !user;
   const linkedPersonnel = state.personnel.find((person) => person.id === user?.personnelId);
   const [tab, setTab] = useState<'profile' | 'access' | 'activity'>('profile');
@@ -778,6 +779,12 @@ function UserDialog({user, state, onClose, onSave, onPassword, onLogin}: {user?:
   const [password, setPassword] = useState(''); const [passwordMode, setPasswordMode] = useState(false); const [errors,setErrors]=useState<string[]>([]);
   const mayEdit = creating ? can(actor, 'organization.users.create') : can(actor, 'foundation.users.edit');
   const mayAssign = can(actor, 'organization.roles.assign'); const mayLogin = Boolean(user && onLogin && actor.isAdmin && user.status === 'active' && user.id !== actor.id);
+  const availablePositions = positionsForUnit(state.positions, unitId, user?.positionId).filter((position) => position.status === 'active' || position.id === user?.positionId);
+  const changeUnit = (nextUnitId: string) => {
+    setUnitId(nextUnitId);
+    const currentPosition = state.positions.find((position) => position.id === positionId);
+    if (!currentPosition || !positionSupportsUnit(currentPosition, nextUnitId)) setPositionId('');
+  };
   const basePermissions = [...new Set(state.roles.filter((role) => roleIds.includes(role.id) && role.status === 'active').flatMap((role) => role.permissions))];
   const permissions = user?.isAdmin ? user.permissions : [...new Set([...basePermissions.filter((permission) => !permissionDenials.includes(permission)), ...permissionGrants])];
   const recent = user ? state.audits.filter((audit) => audit.effectiveUserId === user.id || audit.actorId === user.actorId).slice(0, 6) : [];
@@ -789,11 +796,11 @@ function UserDialog({user, state, onClose, onSave, onPassword, onLogin}: {user?:
     {tab === 'profile' && <><div className="form-grid user-profile-form">
       <label className="field-label"><RequiredLabel>نام و نام خانوادگی</RequiredLabel><input aria-required="true" autoFocus value={name} disabled={!mayEdit || Boolean(linkedPersonnel)} onChange={(event) => setName(event.target.value)} /></label>
       <label className="field-label"><RequiredLabel>نام کاربری</RequiredLabel><input aria-required="true" dir="ltr" value={username} disabled={!mayEdit} onChange={(event) => setUsername(event.target.value)} placeholder="name.family" /></label>
-      <label className="field-label"><RequiredLabel>واحد سازمانی</RequiredLabel><select aria-required="true" value={unitId} disabled={!mayEdit || Boolean(linkedPersonnel)} onChange={(event) => setUnitId(event.target.value)}><option value="">انتخاب کنید</option>{state.units.filter((unit) => unit.type !== 'شعبه' && (unit.status === 'active' || unit.id === user?.unitId)).map((unit) => <option key={unit.id} value={unit.id}>{unit.name}</option>)}</select></label>
-      <label className="field-label"><RequiredLabel>سمت سازمانی</RequiredLabel><select aria-required="true" value={positionId} disabled={!mayEdit || Boolean(linkedPersonnel)} onChange={(event) => setPositionId(event.target.value)}><option value="">انتخاب کنید</option>{state.positions.filter((position) => position.status === 'active' || position.id === user?.positionId).map((position) => <option key={position.id} value={position.id}>{position.title}</option>)}</select></label>
+      <label className="field-label"><RequiredLabel>واحد سازمانی</RequiredLabel><select aria-required="true" value={unitId} disabled={!mayEdit || Boolean(linkedPersonnel)} onChange={(event) => changeUnit(event.target.value)}><option value="">انتخاب کنید</option>{state.units.filter((unit) => unit.type !== 'شعبه' && (unit.status === 'active' || unit.id === user?.unitId)).map((unit) => <option key={unit.id} value={unit.id}>{unit.name}</option>)}</select></label>
+      <label className="field-label"><RequiredLabel>سمت سازمانی</RequiredLabel><select aria-required="true" value={positionId} disabled={!mayEdit || Boolean(linkedPersonnel) || !unitId} onChange={(event) => setPositionId(event.target.value)}><option value="">{unitId ? 'انتخاب سمت مجاز این واحد' : 'ابتدا واحد را انتخاب کنید'}</option>{availablePositions.map((position) => <option key={position.id} value={position.id}>{position.title}</option>)}</select><small>فقط سمت‌های تعریف‌شده برای واحد انتخابی نمایش داده می‌شوند.</small></label>
       <label className="field-label"><OptionalLabel>مدیر مستقیم</OptionalLabel><select value={managerUserId} disabled={!mayEdit || Boolean(linkedPersonnel)} onChange={(event) => setManagerUserId(event.target.value)}><option value="">بدون مدیر مستقیم</option>{state.users.filter((item) => item.status === 'active' && item.id !== user?.id).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
       {creating && <label className="field-label"><RequiredLabel>رمز عبور اولیه</RequiredLabel><input aria-required="true" type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="حداقل ۸ نویسه" /></label>}
-    </div>{linkedPersonnel && <div className="linked-source-note"><ContactRound size={19} /><span><strong>متصل به پرونده پرسنلی</strong> نام، واحد، سمت و مدیر مستقیم از پرونده «{linkedPersonnel.personnelCode}» خوانده می‌شوند.</span></div>}{!creating && can(actor, 'organization.users.password.manage') && <div className="password-control"><div><KeyRound size={20} /><span><strong>رمز عبور محلی</strong><small>آخرین تغییر: {formatDateTime(user.passwordUpdatedAt)}</small></span></div>{!passwordMode ? <button className="button button--secondary" onClick={() => setPasswordMode(true)}>تنظیم رمز جدید</button> : <div className="password-inline"><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="حداقل ۸ نویسه" /><button className="button button--primary" disabled={password.length < 8} onClick={() => onPassword?.(password).then(() => {setPassword(''); setPasswordMode(false);})}>ثبت رمز</button><button className="icon-button" aria-label="انصراف از تغییر رمز" onClick={() => setPasswordMode(false)}><X size={18} /></button></div>}</div>}</>}
+    </div>{linkedPersonnel && <div className="linked-source-note"><ContactRound size={19} /><span><strong>متصل به پرونده پرسنلی</strong> نام، واحد، سمت و مدیر مستقیم از پرونده «{linkedPersonnel.personnelCode}» خوانده می‌شوند.</span></div>}{!creating && can(actor, 'organization.users.password.manage') && <div className="password-control"><div><KeyRound size={20} /><span><strong>رمز عبور محلی</strong><small>آخرین تغییر: {formatDateTime(user.passwordUpdatedAt)}</small></span></div>{!passwordMode ? <button className="button button--secondary" onClick={() => setPasswordMode(true)}>تنظیم رمز جدید</button> : <div className="password-inline"><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="حداقل ۸ نویسه" /><button className="button button--primary" disabled={password.length < 8} onClick={() => onPassword?.(password).then((succeeded) => {if (succeeded) {setPassword(''); setPasswordMode(false);}})}>ثبت رمز</button><button className="icon-button" aria-label="انصراف از تغییر رمز" onClick={() => setPasswordMode(false)}><X size={18} /></button></div>}</div>}</>}
     {tab === 'access' && <UserAccessEditor user={user} state={state} roleIds={roleIds} mayAssign={mayAssign} permissions={permissions} permissionGrants={permissionGrants} permissionDenials={permissionDenials} onChange={setRoleIds} onGrantsChange={setPermissionGrants} onDenialsChange={setPermissionDenials} />}
     {tab === 'activity' && <div className="recent-activity">{recent.length ? recent.map((audit) => <article key={audit.id}><span className={`audit-outcome audit-outcome--${audit.outcome}`}>{audit.outcome === 'success' ? <Check size={15} /> : <CircleAlert size={15} />}</span><div><strong>{legacyTerminology(audit.summary)}</strong><p>{audit.reason ?? actionLabel(audit.action)}</p></div><time>{formatDateTime(audit.occurredAt)}</time></article>) : <div className="empty-state"><ScrollText size={24} /><strong>فعالیتی ثبت نشده است</strong></div>}</div>}
     <div className="user-policy-note"><ShieldCheck size={20} /><div><strong>دسترسی از نام نقش مستقل است</strong><span>Permission، Scope، Resource Policy و Workflow Guard با هم تصمیم نهایی را می‌سازند. استثنای ادمین قابل انتساب به نقش‌های دیگر نیست.</span></div></div>
@@ -871,7 +878,7 @@ function UserAccessEditor({user, state, roleIds, mayAssign, permissions, permiss
     </section>
     <section className="compact-access-summary">
       <div className="section-mini-heading"><strong>خلاصه دسترسی مؤثر</strong><span>نقش‌ها منهای استثناها، به‌علاوه مجوزهای تکمیلی</span></div>
-      <div className="effective-access-card"><ShieldCheck size={27} /><strong>{permissions.length.toLocaleString('en-US')} مجوز مؤثر</strong><span>محدوده پایه: {user?.isAdmin ? 'کل شرکت · استثنای محافظت‌شده ادمین' : scopeLabel(state.roles.find((role) => role.id === roleIds[0])?.scope ?? 'SELF')}</span><dl className="permission-override-stats"><div><dt>پایه نقش‌ها</dt><dd>{basePermissions.length.toLocaleString('en-US')}</dd></div><div><dt>مستثناشده</dt><dd>{permissionDenials.filter((item) => basePermissions.includes(item)).length.toLocaleString('en-US')}</dd></div><div><dt>افزوده</dt><dd>{permissionGrants.filter((item) => !basePermissions.includes(item)).length.toLocaleString('en-US')}</dd></div></dl><div>{permissions.slice(0, 12).map((permission) => <i key={permission}>{permissionLabel(permission)}</i>)}</div></div>
+      <div className="effective-access-card"><ShieldCheck size={27} /><strong>{permissions.length.toLocaleString('en-US')} مجوز مؤثر</strong><span>محدوده پایه: {user?.isAdmin ? 'کل شرکت · استثنای محافظت‌شده ادمین' : scopeLabel(state.roles.find((role) => role.id === roleIds[0])?.scope ?? 'SELF')}</span><dl className="permission-override-stats"><div><dt>پایه نقش‌ها</dt><dd>{basePermissions.length.toLocaleString('en-US')}</dd></div><div><dt>مستثناشده</dt><dd>{permissionDenials.filter((item) => basePermissions.includes(item)).length.toLocaleString('en-US')}</dd></div><div><dt>افزوده</dt><dd>{permissionGrants.filter((item) => !basePermissions.includes(item)).length.toLocaleString('en-US')}</dd></div></dl><div>{[...new Set(permissions)].slice(0, 12).map((permission) => <i key={permission}>{permissionLabel(permission)}</i>)}</div></div>
     </section>
   </div>;
 }
@@ -884,7 +891,7 @@ function IconAction({label, tone = 'neutral', large = false, disabled = false, o
   return <button type="button" className={`icon-action icon-action--${tone} ${large ? 'icon-action--large' : ''}`} aria-label={label} data-tooltip={label} disabled={disabled} onClick={onClick}>{children}</button>;
 }
 
-function AccountSecurityPage({user, busy, onSubmit}: {user: LocalUser; busy: boolean; onSubmit: (input: SelfCredentialChangeInput) => Promise<void>}) {
+function AccountSecurityPage({user, busy, onSubmit}: {user: LocalUser; busy: boolean; onSubmit: (input: SelfCredentialChangeInput) => Promise<boolean>}) {
   const [username, setUsername] = useState(user.username);
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');

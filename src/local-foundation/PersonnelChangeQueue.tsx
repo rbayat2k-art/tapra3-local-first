@@ -66,7 +66,7 @@ export function PersonnelChangeQueue({state, service, execute}: {state: Foundati
         {!sortedRows.length && <div className="table-empty"><Search size={22}/><strong>درخواستی با این فیلتر پیدا نشد</strong><span>عبارت جست‌وجو یا وضعیت انتخابی را تغییر دهید.</span></div>}
       </div>
     </section>
-    {reviewRequest && <ReviewDialog request={reviewRequest} personnel={state.personnel.find((item) => item.id === reviewRequest.personnelId)} readOnly={reviewRequest.status !== 'submitted'} onClose={() => setReviewRequest(null)} onDecision={(decision, reason) => {void execute('profile-change-review', () => service.reviewProfileChangeRequest(reviewRequest.id, decision, reason, reviewRequest.version), decision === 'approved' ? 'درخواست تأیید و اطلاعات پرونده به‌روزرسانی شد.' : 'درخواست با ثبت دلیل رد شد.').then(() => setReviewRequest(null));}}/>}
+    {reviewRequest && <ReviewDialog request={reviewRequest} personnel={state.personnel.find((item) => item.id === reviewRequest.personnelId)} readOnly={reviewRequest.status !== 'submitted'} onClose={() => setReviewRequest(null)} onDecision={(decision, reason) => {void execute('profile-change-review', () => service.reviewProfileChangeRequest(reviewRequest.id, decision, reason, reviewRequest.version), decision === 'approved' ? 'درخواست تأیید و اطلاعات پرونده به‌روزرسانی شد.' : 'درخواست با ثبت دلیل رد شد.').then((succeeded) => {if (succeeded) setReviewRequest(null);});}}/>}
   </div>;
 }
 

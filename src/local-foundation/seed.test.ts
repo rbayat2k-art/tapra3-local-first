@@ -27,7 +27,7 @@ describe('deterministic local seed', () => {
 
   it('models QA identities as users with product status and admin-only QA login', () => {
     const admin = LOCAL_USERS.find((item) => item.roleId === 'role-admin')!;
-    const seller = LOCAL_USERS.find((item) => item.roleId === 'role-seller')!;
+    const seller = LOCAL_USERS.find((item) => item.roleId === 'role-sales-seller')!;
     expect(admin.roleTitle).toBe('ادمین');
     expect(admin.permissions).toContain('foundation.users.qa_login');
     expect(seller.permissions).not.toContain('foundation.users.qa_login');
@@ -35,7 +35,7 @@ describe('deterministic local seed', () => {
   });
 
   it('applies per-user permission grants and denials without mutating the role bundle', () => {
-    const seller = LOCAL_USERS.find((item) => item.roleId === 'role-seller')!;
+    const seller = LOCAL_USERS.find((item) => item.roleId === 'role-sales-seller')!;
     const sellerRole = SECURITY_ROLES.find((item) => item.id === seller.roleId)!;
     const denied = sellerRole.permissions[0];
     const granted = 'foundation.audit.view';
@@ -44,6 +44,29 @@ describe('deterministic local seed', () => {
     expect(resolved.permissions).not.toContain(denied);
     expect(resolved.permissions).toContain(granted);
     expect(sellerRole.permissions).toEqual(roleSnapshot);
+  });
+
+  it('uses one official seller role with both base and sales permissions', () => {
+    const sellerRole = SECURITY_ROLES.find((item) => item.id === 'role-sales-seller')!;
+    expect(SECURITY_ROLES.some((item) => item.id === 'role-seller')).toBe(false);
+    expect(sellerRole.name).toBe('فروشنده');
+    expect(sellerRole.permissions).toContain('foundation.dashboard.view');
+    expect(sellerRole.permissions).toContain('foundation.preferences.manage');
+    expect(sellerRole.permissions).toContain('crm.lead.view');
+    expect(sellerRole.permissions).toContain('sales.sale.create');
+  });
+
+  it('ships every active sales-network personnel with an active linked login', () => {
+    const salesPersonnel = PERSONNEL_RECORDS.filter((item) => item.employmentStatus === 'active' && item.salesHierarchyLevel);
+    expect(salesPersonnel.length).toBeGreaterThan(0);
+    for (const person of salesPersonnel) {
+      const linkedUser = LOCAL_USERS.find((user) => user.id === person.linkedUserId);
+      expect(linkedUser, `${person.personnelCode} باید حساب متصل داشته باشد`).toBeDefined();
+      expect(linkedUser?.status).toBe('active');
+      expect(linkedUser?.personnelId).toBe(person.id);
+      expect(linkedUser?.roleIds).toContain('role-sales-seller');
+      expect(linkedUser?.salesHierarchyLevel).toBe(person.salesHierarchyLevel);
+    }
   });
 
   it('keeps positions separate from security roles and the unit tree acyclic', () => {
@@ -95,6 +118,8 @@ describe('deterministic local seed', () => {
     for (const person of PERSONNEL_RECORDS.filter((item) => item.salesHierarchyLevel)) {
       expect(person.positionId).toBe(positionIdForSalesHierarchy(person.salesHierarchyLevel));
       expect(person.salesBranchUnitId).toBe(person.branchUnitId);
+      expect(person.salesAssignmentStartDate).toBe(person.startDate);
+      if (person.salesCompensationHistory?.length) expect(person.salesCompensationHistory[0].effectiveFrom).toBe(person.salesAssignmentStartDate);
     }
   });
 

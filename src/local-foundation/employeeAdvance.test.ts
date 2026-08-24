@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import type {FoundationSession, FoundationStoreName, OperationalRecord, SnapshotManifest} from './model';
+import type {FoundationSession, FoundationStoreName, OperationalRecord, SnapshotManifest, WorkflowDefinition} from './model';
 import {FOUNDATION_STORES} from './model';
 import {createSeedData} from './seed';
 import {LocalFoundationService} from './service';
@@ -139,5 +139,26 @@ describe('employee advance workflow', () => {
     advance = state.operationalRecords.find((item) => item.id === advance.id)!;
     expect(advance.status).toBe('final_review');
     expect(advance.assigneeUserId).toBe('persona-sales-advance-approver');
+  });
+
+  it('blocks employee self-service on a proxy-only branch route but keeps authorized proxy registration available', async () => {
+    const {storage, session, service} = await setup();
+    const workflow = (await storage.getAll<WorkflowDefinition>('workflow_definitions')).find((item) => item.moduleId === 'employee-advance')!;
+    await storage.put('workflow_definitions', {
+      ...workflow,
+      routeVariants:[{
+        id:'central-proxy-only', title:'ثبت نیابتی شعبه سعادت‌آباد', branchUnitIds:['unit-branch-central'], priority:100,
+        status:'active' as const, allowSelfSubmission:false, approvalStages:workflow.approvalStages!,
+      }],
+    });
+
+    await login(storage, session, 'persona-seller');
+    await expect(service.createEmployeeAdvance({beneficiaryPersonnelId:'personnel-arman',amountRial:'60000000',note:'',signatureAccepted:true})).rejects.toThrow('ثبت مستقیم مساعده برای این شعبه غیرفعال است');
+
+    await login(storage, session, 'persona-sales-advance-approver');
+    const state = await service.createEmployeeAdvance({beneficiaryPersonnelId:'personnel-arman',amountRial:'60000000',note:'ثبت نیابتی مجاز',signatureAccepted:true,approveAtCreation:true});
+    const advance = state.operationalRecords.find((item) => item.moduleId === 'employee-advance' && item.createdByUserId === 'persona-sales-advance-approver')!;
+    expect(advance.workflowRouteId).toBe('central-proxy-only');
+    expect(advance.status).toBe('accounting_review');
   });
 });

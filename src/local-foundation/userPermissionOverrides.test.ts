@@ -42,11 +42,47 @@ function userInput(user: LocalUser) {
 }
 
 describe('per-user permission overrides', () => {
+  it('ends a stale local session immediately when its user has become inactive', async () => {
+    const storage = new MemoryStorage();
+    await storage.replaceAll(createSeedData());
+    const inactiveUser = LOCAL_USERS.find((user) => user.id === 'persona-support-agent')!;
+    const session = await storage.get<FoundationSession>('sessions', 'active-session');
+    await storage.put('sessions', {...session!, activeUserId: inactiveUser.id, actingAdminUserId: undefined, signedOutAt: undefined});
+
+    const state = await new LocalFoundationService(storage).loadState();
+
+    expect(state.activeUser.id).toBe(inactiveUser.id);
+    expect(state.activeUser.status).toBe('inactive');
+    expect(state.session.signedOutAt).toBeTruthy();
+  });
+
+  it('migrates the legacy sales expert role to the official seller role without losing access', async () => {
+    const storage = new MemoryStorage();
+    const legacySeed = createSeedData();
+    const officialSellerRole = legacySeed.security_roles.find((role) => role.id === 'role-sales-seller')!;
+    legacySeed.security_roles.push({...officialSellerRole, id: 'role-seller', name: 'کارشناس فروش'});
+    legacySeed.users = legacySeed.users.map((user) => user.id === 'persona-seller'
+      ? {...user, roleId: 'role-seller', roleIds: ['role-seller']}
+      : user);
+    legacySeed.meta = legacySeed.meta.map((record) => record.id === 'seedVersion'
+      ? {...record, value: 'complete-local-erp-v1.20-versioned-workflow-editing'}
+      : record);
+    await storage.replaceAll(legacySeed);
+
+    const state = await new LocalFoundationService(storage).initialize();
+    const seller = state.users.find((user) => user.id === 'persona-seller')!;
+    expect(state.roles.some((role) => role.id === 'role-seller')).toBe(false);
+    expect(seller.roleId).toBe('role-sales-seller');
+    expect(seller.roleIds).toContain('role-sales-seller');
+    expect(seller.permissions).toContain('foundation.dashboard.view');
+    expect(seller.permissions).toContain('sales.sale.create');
+  });
+
   it('persists a denied role permission for only one user and records the change in Audit', async () => {
     const storage = new MemoryStorage();
     await storage.replaceAll(createSeedData());
     const admin = LOCAL_USERS.find((user) => user.isAdmin)!;
-    const target = LOCAL_USERS.find((user) => user.roleId === 'role-seller')!;
+    const target = LOCAL_USERS.find((user) => user.roleId === 'role-sales-seller')!;
     const session = await storage.get<FoundationSession>('sessions', 'active-session');
     await storage.put('sessions', {...session!, activeUserId: admin.id, actingAdminUserId: undefined});
     const service = new LocalFoundationService(storage);
@@ -70,7 +106,7 @@ describe('per-user permission overrides', () => {
     const storage = new MemoryStorage();
     await storage.replaceAll(createSeedData());
     const actor = LOCAL_USERS.find((user) => user.roleId === 'role-user-manager')!;
-    const target = LOCAL_USERS.find((user) => user.roleId === 'role-seller')!;
+    const target = LOCAL_USERS.find((user) => user.roleId === 'role-sales-seller')!;
     await storage.put('users', {...actor, permissionDenials: ['organization.roles.assign']});
     const session = await storage.get<FoundationSession>('sessions', 'active-session');
     await storage.put('sessions', {...session!, activeUserId: actor.id, actingAdminUserId: undefined});

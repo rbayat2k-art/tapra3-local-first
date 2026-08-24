@@ -1,5 +1,6 @@
 import {describe, expect, it} from 'vitest';
-import {authorize} from './authorization';
+import {authorize, operationalRecordResource} from './authorization';
+import type {OperationalRecord} from './model';
 import {QA_PERSONAS} from './seed';
 
 const persona = (id: string) => QA_PERSONAS.find((item) => item.id === id)!;
@@ -9,6 +10,30 @@ describe('local permission engine', () => {
     const result = authorize({persona: persona('persona-seller'), permission: 'foundation.dashboard.view'});
     expect(result.allowed).toBe(true);
     expect(result.code).toBe('authorization.allowed');
+  });
+
+  it('denies every permission when the account is inactive, including an admin account', () => {
+    const inactiveAdmin = {...persona('persona-product-owner'), status: 'inactive' as const};
+    const result = authorize({persona: inactiveAdmin, permission: 'foundation.dashboard.view'});
+    expect(result.allowed).toBe(false);
+    expect(result.code).toBe('account.inactive');
+  });
+
+  it('lets a SELF-scoped assignee see work assigned to them without changing the immutable creator', () => {
+    const seller = persona('persona-seller');
+    const record: OperationalRecord = {
+      id: 'assigned-work', moduleId: 'sale', domain: 'sales', trackingCode: 'SALE-TEST-1',
+      title: 'کار ارجاع‌شده', description: '', status: 'open', priority: 'normal',
+      companyId: seller.companyId, unitId: seller.unitId, assigneeUserId: seller.id,
+      createdByActorId: 'actor-another-user', createdByUserId: 'persona-another-user',
+      updatedByActorId: 'actor-another-user', version: 1, payload: {},
+      createdAt: '2026-08-23T08:00:00.000Z', updatedAt: '2026-08-23T08:00:00.000Z',
+    };
+    const resource = operationalRecordResource(seller, record);
+    const result = authorize({persona: seller, permission: 'foundation.dashboard.view', action: 'view', resource});
+    expect(result.allowed).toBe(true);
+    expect(resource.ownerId).toBe(seller.actorId);
+    expect(resource.createdBy).toBe('actor-another-user');
   });
 
   it('models the protected admin exception explicitly without granting it to similar roles', () => {

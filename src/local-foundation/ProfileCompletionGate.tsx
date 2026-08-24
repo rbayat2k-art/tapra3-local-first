@@ -9,7 +9,7 @@ interface Props {
   state: FoundationState;
   busy: boolean;
   externalError?: string | null;
-  onSubmit: (input: ProfileCompletionInput) => Promise<void>;
+  onSubmit: (input: ProfileCompletionInput) => Promise<boolean>;
   onSignOut: () => void;
   onEndQa?: () => void;
 }

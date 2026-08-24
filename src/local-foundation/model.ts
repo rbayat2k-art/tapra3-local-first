@@ -1,6 +1,6 @@
-export const FOUNDATION_SCHEMA_VERSION = 8;
+export const FOUNDATION_SCHEMA_VERSION = 10;
 export const FOUNDATION_DB_NAME = 'tapra2_local';
-export const FOUNDATION_SEED_VERSION = 'complete-local-erp-v1.15-employee-advance-workflow';
+export const FOUNDATION_SEED_VERSION = 'complete-local-erp-v1.28-unit-position-catalog';
 
 export type ScopeType = 'COMPANY' | 'UNIT' | 'TEAM' | 'SELF' | 'RECORD';
 /** Permission codes are registry-driven and always use domain.resource.action. */
@@ -9,6 +9,21 @@ export type PermissionCode = string;
 export type UserStatus = 'active' | 'inactive';
 export type SalesHierarchyLevel = 'sales_vice' | 'sales_manager' | 'senior_supervisor' | 'sales_supervisor' | 'seller';
 export type SalesChannel = 'call_center' | 'branch' | 'field' | 'partner';
+export type SalesCompensationMode = 'fixed_salary' | 'commission_only' | 'fixed_salary_plus_commission';
+export type SalesCommissionBasis = 'invoice_collection';
+
+export interface SalesCompensationRecord {
+  id: string;
+  mode: SalesCompensationMode;
+  monthlyFixedSalaryRial?: string;
+  commissionPercent?: string;
+  commissionBasis: SalesCommissionBasis;
+  effectiveFrom: string;
+  reason: string;
+  actorId: string;
+  actorName: string;
+  recordedAt: string;
+}
 
 export interface LocalUser {
   id: string;
@@ -45,9 +60,54 @@ export interface LocalUser {
   qaGenerated?: boolean;
 }
 
-export type PersonnelEmploymentStatus = 'active' | 'ended';
+export type PersonnelEmploymentStatus = 'active' | 'ending_scheduled' | 'ended' | 'rehire_scheduled';
+export type PersonnelDepartureInitiator = 'employee' | 'organization';
 export type PersonnelGender = 'female' | 'male' | 'unspecified';
 export type PersonnelMaritalStatus = 'single' | 'married' | 'unspecified';
+
+export type PersonnelLifecycleEventKind =
+  | 'employment_started'
+  | 'employment_end_scheduled'
+  | 'employment_end_cancelled'
+  | 'employment_ended'
+  | 'rehire_scheduled'
+  | 'rehired';
+
+export interface PersonnelLifecycleEvent {
+  id: string;
+  kind: PersonnelLifecycleEventKind;
+  effectiveDate: string;
+  reason: string;
+  handoffNotes?: string;
+  departureInitiator?: PersonnelDepartureInitiator;
+  actorId: string;
+  actorName: string;
+  recordedAt: string;
+  previousEmploymentType?: string;
+  employmentType?: string;
+  unitId?: string;
+  positionId?: string;
+  branchUnitId?: string;
+  managerPersonnelId?: string;
+  roleIds?: string[];
+}
+
+export interface PendingPersonnelLifecycleChange {
+  kind: 'end' | 'rehire';
+  effectiveDate: string;
+  reason: string;
+  handoffNotes?: string;
+  departureInitiator?: PersonnelDepartureInitiator;
+  employmentType?: string;
+  unitId?: string;
+  positionId?: string;
+  branchUnitId?: string;
+  managerPersonnelId?: string;
+  roleIds?: string[];
+  scheduledByActorId: string;
+  scheduledByActorName: string;
+  scheduledAt: string;
+}
 
 export type PersonnelMovementKind = 'branch_transfer' | 'unit_change' | 'position_change' | 'sales_transfer';
 
@@ -117,12 +177,20 @@ export interface PersonnelRecord {
   linkedUserId?: string;
   branchUnitId?: string;
   salesHierarchyLevel?: SalesHierarchyLevel;
+  /** Independent effective start of the person's current sales-network role. */
+  salesAssignmentStartDate?: string;
   salesChannel?: SalesChannel;
   salesSupervisorPersonnelId?: string;
   salesBranchUnitId?: string;
   salesStructureId?: string;
+  /** Append-only dated compensation terms for members of the sales hierarchy. */
+  salesCompensationHistory?: SalesCompensationRecord[];
   qaGenerated?: boolean;
   movements?: PersonnelMovement[];
+  /** Append-only employment lifecycle history. Existing personnel codes and identity are never recreated. */
+  lifecycleHistory?: PersonnelLifecycleEvent[];
+  /** A future-dated end or rehire waiting to become effective. */
+  pendingLifecycleChange?: PendingPersonnelLifecycleChange;
   createdAt: string;
   updatedAt: string;
 }
@@ -217,6 +285,8 @@ export interface OrganizationalPosition {
   id: string;
   title: string;
   description: string;
+  /** Units in which this position may be assigned. Branches are not organizational units. */
+  unitIds: string[];
   status: OrganizationRecordStatus;
   createdAt: string;
   updatedAt: string;
@@ -328,6 +398,48 @@ export interface WorkflowTransitionDefinition {
   handoffModuleId?: string;
 }
 
+export type WorkflowStageScope = 'COMPANY' | 'UNIT' | 'BRANCH' | 'SELF';
+export type WorkflowStageDecision = 'approve' | 'reject' | 'needs_correction' | 'return_previous' | 'handoff';
+export type WorkflowStageAssignmentMode = 'role_queue' | 'specific_user' | 'branch_manager';
+
+/**
+ * Editable routing policy layered on top of the approved, immutable state machine.
+ * Ordering, responsible roles, scope and allowed decisions are versioned. State
+ * ids and transitions themselves remain owned by the product definition.
+ */
+export interface WorkflowApprovalStageDefinition {
+  id: string;
+  title: string;
+  stateId: string;
+  roleIds: string[];
+  scope: WorkflowStageScope;
+  decisions: WorkflowStageDecision[];
+  required: boolean;
+  allowSelfApproval: boolean;
+  /** How the concrete user responsible for this stage is resolved at runtime. */
+  assignmentMode?: WorkflowStageAssignmentMode;
+  /** Required only when assignmentMode is specific_user. */
+  assigneeUserId?: string;
+  description?: string;
+}
+
+/**
+ * A branch-specific routing override. The base approvalStages remain the
+ * company-wide fallback. Active variants are matched by branch and priority;
+ * the selected id is frozen on the operational record at creation time.
+ */
+export interface WorkflowRouteVariantDefinition {
+  id: string;
+  title: string;
+  branchUnitIds: string[];
+  priority: number;
+  status: 'active' | 'inactive';
+  /** Branch policy for employee self-service. Defaults to true for legacy routes. */
+  allowSelfSubmission?: boolean;
+  approvalStages: WorkflowApprovalStageDefinition[];
+  description?: string;
+}
+
 export interface WorkflowDefinition {
   id: string;
   moduleId: string;
@@ -340,6 +452,11 @@ export interface WorkflowDefinition {
   queueStrategy: 'owner' | 'assignee' | 'unit' | 'company';
   assignmentPolicy: string;
   approvalPolicyId?: string;
+  approvalStages?: WorkflowApprovalStageDefinition[];
+  routeVariants?: WorkflowRouteVariantDefinition[];
+  /** Company-wide fallback for employee self-service. Defaults to true. */
+  allowSelfSubmission?: boolean;
+  changeSummary?: string;
   productDecisionRequired?: string;
   createdAt: string;
   updatedAt: string;
@@ -368,6 +485,10 @@ export interface OperationalRecord {
   createdByActorId: string;
   createdByUserId: string;
   updatedByActorId: string;
+  /** نسخه گردش‌کاری که این پرونده با آن آغاز شده است؛ تا پایان عمر پرونده ثابت می‌ماند. */
+  workflowVersion?: number;
+  /** مسیر پایه یا استثنای شعبه‌ای انتخاب‌شده هنگام ایجاد؛ تا پایان پرونده ثابت است. */
+  workflowRouteId?: string;
   version: number;
   payload: Record<string, OperationalPayloadValue>;
   createdAt: string;
@@ -509,6 +630,7 @@ export const FOUNDATION_STORES = [
   'performance_reviews',
   'training_records',
   'personnel_documents',
+  'recruitment_cases',
   'leads',
   'lead_assignments',
   'calls',
@@ -600,6 +722,7 @@ export interface FoundationState {
   customers: CustomerRecord[];
   customerImports: CustomerImportJob[];
   workflows: WorkflowDefinition[];
+  workflowVersions: WorkflowDefinition[];
   operationalRecords: OperationalRecord[];
   operationalHistory: OperationalRecordHistory[];
   notifications: UserNotification[];

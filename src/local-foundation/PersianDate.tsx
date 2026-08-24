@@ -44,9 +44,10 @@ interface PersianDateInputProps {
   required?: boolean;
   invalid?: boolean;
   ariaLabel?: string;
+  min?: string;
 }
 
-export function PersianDateInput({value = '', onChange, disabled = false, required = false, invalid = false, ariaLabel = 'انتخاب تاریخ شمسی'}: PersianDateInputProps) {
+export function PersianDateInput({value = '', onChange, disabled = false, required = false, invalid = false, ariaLabel = 'انتخاب تاریخ شمسی', min}: PersianDateInputProps) {
   const pickerValue = value && !Number.isNaN(parseDate(value).getTime()) ? parseDate(value) : null;
   return <DatePicker
     value={pickerValue}
@@ -55,6 +56,7 @@ export function PersianDateInput({value = '', onChange, disabled = false, requir
     locale={persianEn}
     format="YYYY/MM/DD"
     calendarPosition="bottom-right"
+    minDate={min && !Number.isNaN(parseDate(min).getTime()) ? parseDate(min) : undefined}
     containerClassName="persian-date-container"
     inputClass="persian-date-input"
     className="tapra-persian-calendar"

@@ -1,4 +1,4 @@
-import type {AuthorizationDecision, AuthorizationRequest, DemoResource, QaPersona} from './model';
+import type {AuthorizationDecision, AuthorizationRequest, DemoResource, OperationalRecord, QaPersona} from './model';
 
 const deny = (code: string, reasonFa: string, progress: Partial<AuthorizationDecision> = {}): AuthorizationDecision => ({
   allowed: false,
@@ -26,6 +26,9 @@ function resolveScope(persona: QaPersona, resource?: DemoResource): boolean {
 
 export function authorize(request: AuthorizationRequest): AuthorizationDecision {
   const {persona, permission, resource, action, targetState, allowedTransitions} = request;
+  if (persona.status !== 'active') {
+    return deny('account.inactive', 'حساب کاربری غیرفعال است و اجازه مشاهده یا انجام عملیات ندارد.');
+  }
   if (!persona.isAdmin && !persona.permissions.includes(permission)) {
     return deny('permission.missing', 'این نقش مجوز لازم برای این اقدام را ندارد.');
   }
@@ -57,6 +60,23 @@ export function authorize(request: AuthorizationRequest): AuthorizationDecision 
     scopeMatched: true,
     policyMatched: true,
     workflowMatched: true,
+  };
+}
+
+/**
+ * Builds the exact same authorization resource for list visibility and service
+ * actions. An explicitly assigned SELF-scoped user owns the work item for
+ * authorization purposes while the immutable creator remains available for
+ * maker/checker enforcement.
+ */
+export function operationalRecordResource(persona: QaPersona, record: OperationalRecord): DemoResource {
+  return {
+    id: record.id,
+    companyId: record.companyId,
+    unitId: record.unitId,
+    ownerId: record.assigneeUserId === persona.id ? persona.actorId : record.createdByActorId,
+    createdBy: record.createdByActorId,
+    state: record.status,
   };
 }
 
