@@ -1,0 +1,32 @@
+[config]
+response_language = "fa-IR"
+repo_context_files = [
+  "AGENTS.md",
+  "docs/engineering/definition-of-done.md",
+  "docs/engineering/testing-policy.md",
+]
+repo_context_from_default_branch = true
+repo_context_max_lines = 700
+
+[github_app]
+pr_commands = [
+  "/describe",
+  "/review",
+]
+feedback_on_draft_pr = false
+handle_push_trigger = true
+push_commands = [
+  "/review",
+]
+
+[pr_reviewer]
+extra_instructions = """
+Treat AGENTS.md and the current TAPRA engineering policies as constraints. Focus on authorization, scope, maker/checker, workflow version/route integrity, IndexedDB migration and multi-store atomicity, stale writes, audit/event privacy, Persian RTL/Jalali boundaries, and missing negative tests. Do not auto-assume a product rule. Label conclusions in the review as VALID, FALSE POSITIVE, or NEEDS PRODUCT DECISION and explain the execution path for high-risk findings.
+"""
+
+[pr_code_suggestions]
+num_code_suggestions = 6
+suggestions_score_threshold = 8
+
+[pr_description]
+publish_labels = false
