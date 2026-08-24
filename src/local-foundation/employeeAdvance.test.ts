@@ -52,6 +52,18 @@ describe('employee advance workflow', () => {
     expect(state.operationalHistory.filter((item) => item.recordId === advance.id).some((item) => item.toState === 'branch_review')).toBe(false);
   });
 
+  it('enforces a published self-approval prohibition at creation', async () => {
+    const {storage, session, service} = await setup();
+    const workflow = (await storage.getAll<WorkflowDefinition>('workflow_definitions')).find((item) => item.moduleId === 'employee-advance')!;
+    await storage.put('workflow_definitions', {
+      ...workflow,
+      approvalStages: workflow.approvalStages?.map((stage) => stage.stateId === 'final_review' ? {...stage, allowSelfApproval:false} : stage),
+    });
+    await login(storage, session, 'persona-sales-advance-approver');
+    await expect(service.createEmployeeAdvance({beneficiaryPersonnelId:'personnel-sales-advance-approver',amountRial:'90000000',note:'',signatureAccepted:true,approveAtCreation:true}))
+      .rejects.toThrow('تأیید درخواست خود');
+  });
+
   it('keeps requests private outside beneficiary, assignee and scoped approval roles', async () => {
     const {storage, session, service} = await setup(); await login(storage, session, 'persona-seller');
     let state = await service.createEmployeeAdvance({beneficiaryPersonnelId: 'personnel-arman', amountRial: '10000000', note: '', signatureAccepted: true});

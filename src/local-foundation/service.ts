@@ -1245,7 +1245,8 @@ export class LocalFoundationService {
     const finalReviewStage = selectedRoute.approvalStages.find((stage) => stage.stateId === 'final_review');
     const isMainApprover = Boolean(finalReviewStage && canUserTakeAdvanceStage(actor, finalReviewStage, state, assignmentContext));
     if (ownRequest && !canSelfSubmitAdvance(branchUnitId, state) && !isMainApprover) throw new Error('ثبت مستقیم مساعده برای این شعبه غیرفعال است؛ مسئول مجاز می‌تواند نیابتی ثبت کند.');
-    const approvedAtCreation = isMainApprover && input.approveAtCreation === true;
+    if (ownRequest && isMainApprover && input.approveAtCreation === true && finalReviewStage?.allowSelfApproval !== true) throw new Error('سیاست این مرحله تأیید درخواست خود را مجاز نمی‌داند.');
+    const approvedAtCreation = isMainApprover && input.approveAtCreation === true && (!ownRequest || finalReviewStage?.allowSelfApproval === true);
     const normalStart = routeStates.find((stage) => stage !== 'sent_to_treasury');
     const status: AdvanceStage | undefined = approvedAtCreation ? routeStates.find((stage) => stage === 'accounting_review') : normalStart;
     if (!status) throw new Error('مسیر تأیید این شعبه مرحله قابل شروع ندارد. تنظیمات گردش‌کار را بررسی کنید.');
@@ -1372,6 +1373,8 @@ export class LocalFoundationService {
     const stageDefinition = (stageId: string) => approvalStagesForRoute(boundWorkflow, state.roles, record.workflowRouteId).find((item) => item.stateId === stageId);
     const actorMayReview = (stageId: string, _fallback: string[]) => {
       const configured = stageDefinition(stageId);
+      const isActualBeneficiary = payload.beneficiaryUserId === actor.id;
+      if (isActualBeneficiary && configured?.allowSelfApproval !== true) return false;
       return actor.isAdmin || Boolean(configured && canUserTakeAdvanceStage(actor, configured, state, assignmentContext));
     };
     const activeStageUser = (stageId: string, _fallback: string[]) => resolveAdvanceStageAssignee(state, boundWorkflow, record.workflowRouteId, stageId, assignmentContext);
@@ -2129,15 +2132,16 @@ export class LocalFoundationService {
     requirePermission(effectiveUser, 'foundation.workflow.manage', 'مجوز مدیریت گردش‌کار را ندارید.');
     const existing = state.workflows.find((item) => item.moduleId === moduleId);
     if (!existing) throw new Error('گردش‌کار پیدا نشد.');
+    if (moduleId !== 'employee-advance') throw new Error('ویرایش این گردش‌کار تا اتصال کامل موتور اجرایی غیرفعال است؛ فقط سیاست مساعده اکنون قابل انتشار است.');
     if (existing.version !== expectedVersion) throw new Error('نسخه گردش‌کار تغییر کرده است؛ صفحه را تازه‌سازی کنید.');
     if (input.assignmentPolicy.trim().length < 5) throw new Error('قانون تعیین مسئول پرونده را شفاف وارد کنید.');
     if (input.changeSummary.trim().length < 5) throw new Error('دلیل انتشار نسخه جدید را شفاف وارد کنید.');
     const validationErrors = validateWorkflowPolicy(existing, input.approvalStages, state.roles, input.routeVariants ?? [], state.users);
     if (validationErrors.length) throw new Error(validationErrors.join('\n'));
     const now = new Date().toISOString();
-    const approvalStages = input.approvalStages.map((stage) => ({...stage, title:stage.title.trim(), roleIds:[...stage.roleIds], decisions:[...stage.decisions], assigneeUserId:stage.assignmentMode === 'specific_user' ? stage.assigneeUserId : undefined, description:stage.description?.trim() || undefined}));
-    const routeVariants = (input.routeVariants ?? []).map((variant) => ({...variant, allowSelfSubmission:variant.allowSelfSubmission ?? true, title:variant.title.trim(), description:variant.description?.trim() || undefined, branchUnitIds:[...new Set(variant.branchUnitIds)], approvalStages:variant.approvalStages.map((stage) => ({...stage, title:stage.title.trim(), roleIds:[...stage.roleIds], decisions:[...stage.decisions], assigneeUserId:stage.assignmentMode === 'specific_user' ? stage.assigneeUserId : undefined, description:stage.description?.trim() || undefined}))}));
-    const updated: WorkflowDefinition = {...existing, queueStrategy: input.queueStrategy, assignmentPolicy: input.assignmentPolicy.trim(), approvalPolicyId: input.approvalPolicyId?.trim() || undefined, allowSelfSubmission:input.allowSelfSubmission ?? existing.allowSelfSubmission ?? true, approvalStages, routeVariants, changeSummary: input.changeSummary.trim(), version: existing.version + 1, updatedAt: now};
+    const approvalStages = input.approvalStages.map((stage) => ({...stage, required:true, title:stage.title.trim(), roleIds:[...stage.roleIds], decisions:[...stage.decisions], assigneeUserId:stage.assignmentMode === 'specific_user' ? stage.assigneeUserId : undefined, description:stage.description?.trim() || undefined}));
+    const routeVariants = (input.routeVariants ?? []).map((variant) => ({...variant, allowSelfSubmission:variant.allowSelfSubmission ?? true, title:variant.title.trim(), description:variant.description?.trim() || undefined, branchUnitIds:[...new Set(variant.branchUnitIds)], approvalStages:variant.approvalStages.map((stage) => ({...stage, required:true, title:stage.title.trim(), roleIds:[...stage.roleIds], decisions:[...stage.decisions], assigneeUserId:stage.assignmentMode === 'specific_user' ? stage.assigneeUserId : undefined, description:stage.description?.trim() || undefined}))}));
+    const updated: WorkflowDefinition = {...existing, queueStrategy: existing.queueStrategy, assignmentPolicy: input.assignmentPolicy.trim(), approvalPolicyId: input.approvalPolicyId?.trim() || undefined, allowSelfSubmission:input.allowSelfSubmission ?? existing.allowSelfSubmission ?? true, approvalStages, routeVariants, changeSummary: input.changeSummary.trim(), version: existing.version + 1, updatedAt: now};
     await this.storage.transaction(['workflow_definitions','workflow_versions'], 'readwrite', async (tx) => {
       await tx.put('workflow_versions', {...existing, id: `${existing.id}-v${existing.version}`, workflowId: existing.id});
       await tx.put('workflow_definitions', updated);
