@@ -217,7 +217,7 @@ button:disabled { cursor: not-allowed; }
 .topbar { position: sticky; top: 0; z-index: 30; display: flex; min-height: 76px; align-items: center; justify-content: space-between; padding: 12px 30px; border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--surface) 92%, transparent); backdrop-filter: blur(18px); }
 .topbar-title { display: flex; align-items: center; gap: 10px; }
 .topbar-title > div { display: flex; flex-direction: column; }
-.topbar-title span { color: var(--faint); font-size: 8.5px; }
+.topbar-title span { color: var(--muted); font-size: 8.5px; }
 .topbar-title h1 { margin: 4px 0 0; font-size: 17px; letter-spacing: -.4px; }
 .topbar-actions { display: flex; align-items: center; gap: 9px; }
 .topbar-actions { position: relative; }

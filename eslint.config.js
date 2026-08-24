@@ -5,11 +5,13 @@ import globals from 'globals';
 import tseslint from 'typescript-eslint';
 
 const activeFiles = [
+  'e2e/**/*.ts',
   'src/main.tsx',
   'src/App.tsx',
   'src/local-foundation/**/*.{ts,tsx}',
   'vite.config.ts',
   'vitest.config.ts',
+  'playwright.config.ts',
 ];
 
 export default tseslint.config(

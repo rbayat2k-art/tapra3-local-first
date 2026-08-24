@@ -30,7 +30,7 @@ npm run build
 
 ## Browser و Visual
 
-Playwright/axe و visual regression فقط وقتی Gate آن‌ها در CI فعال و baseline توسط مالک محصول تأیید شده باشد `Verified` هستند. Snapshot بصری بدون baseline تأییدشده نباید به‌تنهایی Merge را مسدود کند.
+Playwright/axe برای Chrome فعال است و دو smoke scenario قطعی دارد: خروج/ورود محلی همراه reload و حفظ session، و نبود تخلف `serious`/`critical` در صفحه ورود و داشبورد. CI trace، screenshot خطا و HTML report را نگه می‌دارد. Visual regression هنوز `Unverified` است؛ Snapshot بصری بدون baseline تأییدشده مالک محصول نباید Merge را مسدود کند.
 
 ## Coverage
 
