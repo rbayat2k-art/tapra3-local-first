@@ -134,6 +134,7 @@ function validateSelfServiceProfile(personnel: PersonnelRecord, allPersonnel: Pe
 }
 
 export class LocalFoundationService {
+  private readonly lifecycleExecutionToken = Symbol('approved-personnel-lifecycle');
   constructor(private readonly storage: StorageAdapter = new IndexedDBAdapter()) {}
 
   async initialize(): Promise<FoundationState> {
@@ -703,11 +704,12 @@ export class LocalFoundationService {
     const state = await this.loadState(); const actor = state.activeUser;
     if (!canReviewEmploymentEnd(actor)) throw new Error('فقط منابع انسانی مجاز به تأیید و اجرای درخواست پایان همکاری است.');
     const record = state.operationalRecords.find((item) => item.id === recordId && item.moduleId === 'offboarding'); if (!record) throw new Error('درخواست پایان همکاری پیدا نشد.');
+    if (record.createdByUserId === actor.id || record.createdByActorId === actor.actorId) throw new Error('ثبت‌کننده درخواست نمی‌تواند همان درخواست پایان همکاری را تأیید کند.');
     if (record.version !== expectedVersion) throw new Error('این درخواست در تب دیگری تغییر کرده است. صفحه را تازه‌سازی و دوباره تلاش کنید.');
     if (record.status !== 'requested') throw new Error('فقط درخواست در انتظار بررسی منابع انسانی قابل تأیید است.');
     const person = state.personnel.find((item) => item.id === record.ownerPersonnelId); if (!person) throw new Error('پرونده پرسنلی مرتبط پیدا نشد.');
     const decisionNote = note.trim(); if (decisionNote.length < 3) throw new Error('توضیح تصمیم منابع انسانی الزامی است.');
-    await this.schedulePersonnelEnd(person.id, {effectiveDate: String(record.payload.proposedEmploymentEndDate ?? record.payload.employmentEndDate ?? ''), departureInitiator: record.payload.departureInitiator === 'employee' ? 'employee' : 'organization', reason: String(record.payload.employmentEndReason ?? ''), handoffNotes: record.description || undefined});
+    await this.schedulePersonnelEnd(person.id, {effectiveDate: String(record.payload.proposedEmploymentEndDate ?? record.payload.employmentEndDate ?? ''), departureInitiator: record.payload.departureInitiator === 'employee' ? 'employee' : 'organization', reason: String(record.payload.employmentEndReason ?? ''), handoffNotes: record.description || undefined}, this.lifecycleExecutionToken);
     const refreshed = await this.loadState(); const current = refreshed.operationalRecords.find((item) => item.id === record.id); if (!current) throw new Error('درخواست پس از تأیید پیدا نشد.');
     const now = new Date().toISOString(); const targetStatus = current.status === 'requested' ? 'scheduled' : current.status;
     const updated: OperationalRecord = {...current, status: targetStatus, updatedByActorId: actor.actorId, version: current.version + 1, payload: {...current.payload, approvedByUserId: actor.id, approvedByName: actor.name, approvedAt: now, approvalNote: decisionNote, requestHasOperationalEffect: true, currentWaitingFor: targetStatus === 'scheduled' ? `اجرای پایان همکاری در ${String(current.payload.proposedEmploymentEndDate ?? '')}` : current.payload.currentWaitingFor}, updatedAt: now};
@@ -736,9 +738,9 @@ export class LocalFoundationService {
     return this.loadState();
   }
 
-  async schedulePersonnelEnd(personnelId: string, input: PersonnelEndInput): Promise<FoundationState> {
+  async schedulePersonnelEnd(personnelId: string, input: PersonnelEndInput, executionToken?: symbol): Promise<FoundationState> {
     const state = await this.loadState(); const actor = state.activeUser;
-    if (!can(actor, 'organization.personnel.manage') && !canReviewEmploymentEnd(actor)) throw new Error('مجوز ثبت پایان همکاری را ندارید.');
+    if (!actor.isAdmin && executionToken !== this.lifecycleExecutionToken) throw new Error('اجرای مستقیم پایان همکاری فقط مسیر اضطراری ادمین است؛ منابع انسانی باید درخواست مستقل بسازد و تأییدکننده دیگری آن را تصویب کند.');
     const person = state.personnel.find((item) => item.id === personnelId); if (!person) throw new Error('پرونده پرسنلی پیدا نشد.');
     if (person.employmentStatus !== 'active') throw new Error('فقط همکاری فعال را می‌توان خاتمه داد.');
     if (actor.personnelId === person.id) throw new Error('ثبت‌کننده نمی‌تواند پایان همکاری خودش را ثبت کند.');
@@ -1591,7 +1593,12 @@ export class LocalFoundationService {
   }
 
   async createOperationalRecord(moduleId: string, input: OperationalRecordInput): Promise<FoundationState> {
+    return this.createOperationalRecordInternal(moduleId, input, false);
+  }
+
+  private async createOperationalRecordInternal(moduleId: string, input: OperationalRecordInput, allowSpecialized: boolean): Promise<FoundationState> {
     const module = ERP_MODULES.find((item) => item.id === moduleId); if (!module) throw new Error('ماژول عملیاتی پیدا نشد.');
+    if (moduleId === 'recruitment-case' && !allowSpecialized) throw new Error('پرونده جذب فقط از مسیر اختصاصی اعلام نیاز نیرو قابل ایجاد است.');
     const state = await this.loadState(); const effectiveUser = state.activeUser;
     requirePermission(effectiveUser, permissionFor(moduleId, 'create'), 'مجوز ایجاد رکورد در این ماژول را ندارید.');
     const preparedInput = moduleId === 'purchase-request' ? preparePurchaseRequestInput(state, input) : input;
@@ -1632,7 +1639,7 @@ export class LocalFoundationService {
     const selectedSalesStructures = managerialScope.source === 'active_sales_structure'
       ? state.salesStructures.filter((structure) => managerialScope.structureIds.includes(structure.id) && structure.branchUnitId === targetBranch.id)
       : [];
-    return this.createOperationalRecord('recruitment-case', {
+    return this.createOperationalRecordInternal('recruitment-case', {
       title: input.title, description: input.description, unitId: input.unitId, branchUnitId: targetBranch.id,
       ownerPersonnelId: actor.personnelId, assigneeUserId: hrAssignee.id, dueAt: input.neededDate,
       payload: {
@@ -1647,7 +1654,7 @@ export class LocalFoundationService {
         candidateName: 'هنوز انتخاب نشده', candidateAccount: 'هنوز ساخته نشده', personnelStatus: 'متقاضی',
         currentWaitingFor: 'کارشناس جذب منابع انسانی', digitalSignatures: [],
       },
-    });
+    }, true);
   }
 
   async updateOperationalRecord(moduleId: string, recordId: string, expectedVersion: number, input: Partial<OperationalRecordInput>): Promise<FoundationState> {
@@ -1671,6 +1678,7 @@ export class LocalFoundationService {
     const workflow = workflowForRecord(state, module, record);
     const transition = workflow.transitions.find((item) => item.id === transitionId && item.from.includes(record.status)); if (!transition) throw new Error('این انتقال از وضعیت فعلی مجاز نیست.');
     requirePermission(effectiveUser, transition.permission, 'مجوز این انتقال گردش‌کار را ندارید.'); this.assertRecordScope(effectiveUser, record, transition.makerChecker ? 'approve' : 'transition');
+    if (moduleId === 'recruitment-case' && !effectiveUser.isAdmin && record.assigneeUserId !== effectiveUser.id) throw new Error('فقط مسئول ثبت‌شده مرحله فعلی پرونده جذب می‌تواند این انتقال را انجام دهد.');
     if (transition.makerChecker && record.createdByActorId === effectiveUser.actorId) throw new Error('سازنده رکورد نمی‌تواند همان رکورد را تأیید کند.');
     if (moduleId === 'purchase-request' && ['draft', 'needs_correction'].includes(record.status) && ['submitted', 'cancelled'].includes(transition.to) && record.createdByUserId !== effectiveUser.id) throw new Error('فقط درخواست‌کننده اصلی می‌تواند پیش‌نویس را ارسال، اصلاح یا لغو کند.');
     if (transition.sensitive && state.session.actingAdminUserId) throw new Error('تأیید حساس در حالت ورود آزمایشی غیرفعال است؛ کاربر باید مستقیماً وارد شود.');
@@ -1707,7 +1715,7 @@ export class LocalFoundationService {
 
   private resolveRecruitmentAssignee(state: FoundationState, targetState: string, actor: LocalUser, record: OperationalRecord): LocalUser | undefined {
     const roleByState: Record<string, string> = {
-      hr_review: 'role-recruitment-operator', ready_to_publish: 'role-recruitment-operator', published: 'role-recruitment-operator', candidate_review: 'role-recruitment-operator',
+      hr_review: 'role-recruitment-manager', ready_to_publish: 'role-recruitment-operator', published: 'role-recruitment-operator', candidate_review: 'role-recruitment-operator',
       interview_scheduled: 'role-recruitment-interviewer', evaluated: 'role-recruitment-manager', offer_sent: 'role-recruitment-manager', offer_accepted: 'role-recruitment-manager',
       ready_to_start: 'role-onboarding-supervisor', training: 'role-onboarding-supervisor', contracted: 'role-recruitment-manager',
     };

@@ -31,6 +31,17 @@ async function confirmAssetCustodyBoth(storage: MemoryStorage, service: LocalFou
 }
 
 describe('personnel employment lifecycle', () => {
+  it('requires a distinct HR checker and blocks direct HR execution', async () => {
+    const {storage, service} = await setup();
+    await switchActiveUser(storage, 'persona-hr-operator');
+    let state = await service.submitPersonnelEndRequest('personnel-arman', {effectiveDate: todayIsoDate(), departureInitiator:'organization', reason:'بررسی مستقل پایان همکاری'});
+    const request = state.operationalRecords.find((item) => item.moduleId === 'offboarding' && item.ownerPersonnelId === 'personnel-arman')!;
+    await expect(service.approvePersonnelEndRequest(request.id, request.version, 'تأیید توسط همان ثبت‌کننده'))
+      .rejects.toThrow('ثبت‌کننده درخواست');
+    await expect(service.schedulePersonnelEnd('personnel-laleh', {effectiveDate: todayIsoDate(), departureInitiator:'organization', reason:'دورزدن درخواست'}))
+      .rejects.toThrow('مسیر اضطراری ادمین');
+  });
+
   it('lets a direct supervisor submit a review request without changing employment, login, roles or panel access', async () => {
     const {storage, service} = await setup();
     await switchActiveUser(storage, 'persona-callcenter-a');
