@@ -2,7 +2,7 @@ import {describe, expect, it} from 'vitest';
 import {ERP_MODULES} from './erpCatalog';
 import {createSeedData} from './seed';
 import type {FoundationState, WorkflowApprovalStageDefinition, WorkflowDefinition, WorkflowRouteVariantDefinition} from './model';
-import {activeWorkflowFor, approvalStagesFor, roleIdsForWorkflowState, selectWorkflowRoute, validateWorkflowPolicy, workflowForRecord, workflowStageAllows} from './workflowPolicy';
+import {activeWorkflowFor, approvalStagesFor, approvalStagesForRoute, roleIdsForWorkflowState, selectWorkflowRoute, validateWorkflowPolicy, workflowForRecord, workflowStageAllows} from './workflowPolicy';
 import {canSelfSubmitAdvance, resolveAdvanceStageAssignee} from './employeeAdvance';
 
 describe('versioned workflow management policy', () => {
@@ -42,6 +42,20 @@ describe('versioned workflow management policy', () => {
     const resolved = workflowForRecord({workflows:[versionTwo], workflowVersions:[versionOne]}, module, {workflowVersion:1});
     expect(resolved.version).toBe(1);
     expect(resolved.assignmentPolicy).toBe('مسیر نسخه یک');
+  });
+
+  it('fails closed when an in-flight record references a missing historical version', () => {
+    const module = ERP_MODULES.find((item) => item.id === 'employee-advance')!;
+    const active = {...module.workflow, version: 2};
+    expect(() => workflowForRecord({workflows:[active], workflowVersions:[]}, module, {workflowVersion:1}))
+      .toThrow('نسخه تاریخی 1');
+  });
+
+  it('fails closed when a frozen route is missing from the pinned workflow', () => {
+    const seed = createSeedData();
+    const workflow = (seed.workflow_definitions as WorkflowDefinition[]).find((item) => item.moduleId === 'employee-advance')!;
+    expect(() => approvalStagesForRoute(workflow, seed.security_roles, 'removed-branch-route'))
+      .toThrow('مسیر تاریخی');
   });
 
   it('enforces configured decisions and rejects an incompatible sequence', () => {

@@ -230,9 +230,21 @@ export class LocalFoundationService {
     const seeded = createSeedData() as Record<FoundationStoreName, unknown[]>;
     const seededRecruitmentRecords = seeded.recruitment_cases as OperationalRecord[];
     const seededRecruitmentHistory = (seeded.workflow_history as OperationalRecordHistory[]).filter((item) => item.moduleId === 'recruitment-case');
+    const seededWorkflowDefinitions = seeded.workflow_definitions as WorkflowDefinition[];
+    const seededWorkflowVersions = seeded.workflow_versions as WorkflowDefinition[];
     const existingEntries = await Promise.all(FOUNDATION_STORES.map(async (store) => [store, await this.storage.getAll(store)] as const));
     const existing = Object.fromEntries(existingEntries) as Record<FoundationStoreName, unknown[]>;
     for (const store of FOUNDATION_STORES) if (existing[store].length) seeded[store] = existing[store];
+    const priorWorkflowDefinitions = existing.workflow_definitions as WorkflowDefinition[];
+    seeded.workflow_definitions = [
+      ...priorWorkflowDefinitions,
+      ...seededWorkflowDefinitions.filter((candidate) => !priorWorkflowDefinitions.some((workflow) => workflow.moduleId === candidate.moduleId)),
+    ];
+    const priorWorkflowVersions = existing.workflow_versions as WorkflowDefinition[];
+    seeded.workflow_versions = [
+      ...priorWorkflowVersions,
+      ...seededWorkflowVersions.filter((candidate) => !priorWorkflowVersions.some((workflow) => workflow.moduleId === candidate.moduleId && workflow.version === candidate.version)),
+    ];
     const priorRecruitmentRecords = existing.recruitment_cases as OperationalRecord[];
     seeded.recruitment_cases = [
       ...priorRecruitmentRecords,

@@ -79,6 +79,7 @@ export function approvalStagesForRoute(
   if (routeId && routeId !== BASE_WORKFLOW_ROUTE_ID) {
     const variant = workflow.routeVariants?.find((item) => item.id === routeId);
     if (variant) return cloneStages(variant.approvalStages);
+    throw new Error(`مسیر تاریخی گردش‌کار «${routeId}» برای نسخه ${workflow.version} پیدا نشد؛ پرونده تا ترمیم سیاست قابل ادامه نیست.`);
   }
   return approvalStagesFor(workflow, roles);
 }
@@ -102,7 +103,9 @@ export function workflowForRecord(
 ): WorkflowDefinition {
   const active = activeWorkflowFor(state, module);
   if (!record.workflowVersion || record.workflowVersion === active.version) return active;
-  return state.workflowVersions?.find((workflow) => workflow.moduleId === module.id && workflow.version === record.workflowVersion) ?? active;
+  const historical = state.workflowVersions?.find((workflow) => workflow.moduleId === module.id && workflow.version === record.workflowVersion);
+  if (historical) return historical;
+  throw new Error(`نسخه تاریخی ${record.workflowVersion} گردش‌کار «${module.id}» پیدا نشد؛ پرونده تا ترمیم سیاست قابل ادامه نیست.`);
 }
 
 export function workflowWithActivePolicy(state: Pick<FoundationState,'workflows'>, module: ErpModuleDefinition): ErpModuleDefinition {
@@ -188,7 +191,9 @@ export function validateWorkflowPolicy(
 function workflowForVersion(state: Pick<FoundationState,'workflows'> & Partial<Pick<FoundationState,'workflowVersions'>>, moduleId: string, workflowVersion?: number): WorkflowDefinition | undefined {
   const active = state.workflows.find((item) => item.moduleId === moduleId);
   if (!workflowVersion || active?.version === workflowVersion) return active;
-  return state.workflowVersions?.find((item) => item.moduleId === moduleId && item.version === workflowVersion) ?? active;
+  const historical = state.workflowVersions?.find((item) => item.moduleId === moduleId && item.version === workflowVersion);
+  if (historical) return historical;
+  throw new Error(`نسخه تاریخی ${workflowVersion} گردش‌کار «${moduleId}» پیدا نشد؛ پرونده تا ترمیم سیاست قابل ادامه نیست.`);
 }
 
 export function roleIdsForWorkflowState(

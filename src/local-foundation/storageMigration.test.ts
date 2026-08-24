@@ -10,6 +10,7 @@ import {
   type OperationalRecordHistory,
 } from './model';
 import {createSeedData} from './seed';
+import {ERP_MODULES} from './erpCatalog';
 import {LocalFoundationService} from './service';
 import {IndexedDBAdapter} from './storage';
 
@@ -26,6 +27,8 @@ function createVersionNineDatabase(databaseName: string): Promise<void> {
     {id: 'custom-user-preference', value: 'keep-me'},
   ] satisfies MetaRecord[];
   seed.workflow_history = [];
+  seed.workflow_definitions = (seed.workflow_definitions as Array<{moduleId: string}>).filter((workflow) => workflow.moduleId !== 'recruitment-case');
+  seed.workflow_versions = (seed.workflow_versions as Array<{moduleId: string}>).filter((workflow) => workflow.moduleId !== 'recruitment-case');
 
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(databaseName, PREVIOUS_SCHEMA_VERSION);
@@ -63,6 +66,9 @@ describe('IndexedDB schema 9 to schema 10 migration', () => {
       .filter((history) => history.moduleId === 'recruitment-case');
     expect(recruitmentHistory.length).toBeGreaterThanOrEqual(5);
     expect(recruitmentHistory.every((history) => recruitmentIds.has(history.recordId))).toBe(true);
+    expect(state.workflows.some((workflow) => workflow.moduleId === 'recruitment-case')).toBe(true);
+    expect(state.workflowVersions.some((workflow) => workflow.moduleId === 'recruitment-case')).toBe(true);
+    expect(new Set(state.workflows.map((workflow) => workflow.moduleId))).toEqual(new Set(ERP_MODULES.map((module) => module.id)));
 
     const versionRequest = indexedDB.open(databaseName);
     const actualVersion = await new Promise<number>((resolve, reject) => {
