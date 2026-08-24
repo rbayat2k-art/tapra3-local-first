@@ -11,6 +11,7 @@
 - [ ] Migration/atomicity/concurrency/failure paths متناسب با ریسک پوشش دارند.
 - [ ] تست مثبت و تست منفی لازم اضافه شده‌اند.
 - [ ] RTL، فارسی، responsive و accessibility برای UI مرتبط بررسی شده‌اند.
+- [ ] `npm run lint` موفق است.
 - [ ] `npm run typecheck` موفق است.
 - [ ] `npm test` موفق است.
 - [ ] `npm run build` موفق است.
@@ -19,4 +20,3 @@
 - [ ] Docs و status labelهای مرتبط به‌روزند.
 - [ ] تغییر روی Branch امن با کامیت‌های روشن است و protected branch خودکار Merge نشده است.
 - [ ] هشدارها، محدودیت‌ها و بخش‌های unverified در تحویل نهایی گفته شده‌اند.
-

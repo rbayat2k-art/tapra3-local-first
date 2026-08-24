@@ -5,6 +5,7 @@
 ## Gate پایه هر تغییر کد
 
 ```text
+npm run lint
 npm run typecheck
 npm test
 npm run build
@@ -35,6 +36,14 @@ Playwright/axe و visual regression فقط وقتی Gate آن‌ها در CI ف�
 
 Coverage برای جلوگیری از افت استفاده می‌شود، نه بازی با درصد. ابتدا baseline واقعی ثبت، سپس threshold روی فایل‌های دامنه‌ای جدید/تغییریافته اعمال و به‌تدریج افزایش داده می‌شود. کاهش threshold برای عبور PR ممنوع است مگر با تصمیم ثبت‌شده.
 
+Baseline ثبت‌شده در 2026-08-24 روی 22 فایل و 124 تست: Statement برابر 27.21%، Branch برابر 23.79%، Function برابر 19.41% و Line برابر 37.52%. در این مرحله `npm run test:coverage` گزارش تولید می‌کند اما threshold سراسری عمداً Merge را مسدود نمی‌کند؛ ابتدا UIهای بدون تست و فایل‌های بزرگ باید به‌صورت هدفمند پوشش داده شوند.
+
+ESLint فقط مسیر فعال Local Foundation و entry/configهای مرتبط را پوشش می‌دهد؛ prototypeها و پوشه‌های legacy فعلاً وارد Gate نشده‌اند. Baseline نخست 45 warning و صفر error است. `npm run lint` خطاها را متوقف می‌کند؛ `npm run lint:strict` بدهی هشدارها را نیز نشان می‌دهد و پس از پاک‌سازی baseline باید Gate اصلی شود.
+
+## اسکن امنیتی
+
+Workflow با نام `security-advisory`، Semgrep، Trivy و Gitleaks را با حداقل permission اجرا می‌کند. تا زمان triage اولین baseline، نتیجه Scannerها advisory است. حذف `continue-on-error` فقط پس از ثبت `VALID`/`FALSE POSITIVE`ها و تعیین allowlist مجاز است.
+
 ## پذیرش Finding
 
 خروجی AI یا Scanner حکم خودکار نیست. هر Finding یکی از وضعیت‌های زیر را می‌گیرد:
@@ -42,4 +51,3 @@ Coverage برای جلوگیری از افت استفاده می‌شود، نه
 - `VALID`: شاهد و اثر واقعی دارد؛ اصلاح یا risk acceptance لازم است.
 - `FALSE POSITIVE`: با شاهد دقیق رد می‌شود.
 - `NEEDS PRODUCT DECISION`: رفتار درست بدون تصمیم مالک محصول مشخص نیست.
-
