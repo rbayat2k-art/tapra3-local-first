@@ -156,17 +156,15 @@ export class LocalFoundationService {
   }
 
   private async applyDuePersonnelLifecycleChanges(): Promise<void> {
-    const [personnel, users, roles] = await Promise.all([
-      this.storage.getAll<PersonnelRecord>('personnel'),
-      this.storage.getAll<LocalUser>('users'),
-      this.storage.getAll<SecurityRole>('security_roles'),
-    ]);
+    const state = await this.loadState();
     const today = currentLocalDate();
-    for (const person of personnel) {
+    for (const person of state.personnel) {
       const pending = person.pendingLifecycleChange;
       if (!pending || pending.effectiveDate > today) continue;
       const now = new Date().toISOString();
-      const linkedUser = users.find((user) => user.id === person.linkedUserId);
+      const linkedUser = state.users.find((user) => user.id === person.linkedUserId);
+      const auditUser = state.users.find((user) => user.actorId === pending.scheduledByActorId) ?? state.users.find((user) => user.isAdmin) ?? state.activeUser;
+      const correlationId = newId('correlation');
       if (pending.kind === 'end') {
         const event = {
           id: newId('employment-event'), kind: 'employment_ended' as const, effectiveDate: pending.effectiveDate,
@@ -174,10 +172,33 @@ export class LocalFoundationService {
           actorName: pending.scheduledByActorName, recordedAt: now, previousEmploymentType: person.employmentType,
           roleIds: linkedUser?.roleIds ?? [],
         };
-        await this.storage.put('personnel', {...person, employmentStatus: 'ended', endDate: pending.effectiveDate, pendingLifecycleChange: undefined, lifecycleHistory: [...(person.lifecycleHistory ?? []), event], updatedAt: now});
-        if (linkedUser && !linkedUser.isAdmin) await this.storage.put('users', {...linkedUser, status: 'inactive'});
-        await this.ensureOffboardingCase({...person, employmentStatus: 'ended', endDate: pending.effectiveDate}, users.find((user) => user.actorId === pending.scheduledByActorId)?.id, pending.effectiveDate, pending.reason, pending.handoffNotes, pending.departureInitiator);
-        await this.appendSystemAudit('organization.personnel.employment_ended_automatically', `پایان همکاری زمان‌بندی‌شده «${person.firstName} ${person.lastName}» اجرا شد.`, linkedUser?.id ?? users.find((user) => user.isAdmin)?.id ?? LOCAL_USERS[0].id, {personnelId: person.id, effectiveDate: pending.effectiveDate});
+        const updatedPerson: PersonnelRecord = {...person, employmentStatus: 'ended', endDate: pending.effectiveDate, pendingLifecycleChange: undefined, lifecycleHistory: [...(person.lifecycleHistory ?? []), event], updatedAt: now};
+        const openCase = state.operationalRecords.find((record) => record.moduleId === 'offboarding' && record.ownerPersonnelId === person.id && !['completed', 'cancelled'].includes(record.status));
+        const module = ERP_MODULES.find((item) => item.id === 'offboarding'); if (!module) throw new Error('گردش خروج در سامانه فعال نیست.');
+        const pendingAssets = state.operationalRecords.filter((record) => record.moduleId === 'fixed-asset' && record.payload.custodianPersonnelId === person.id && record.status !== 'disposed');
+        const assetOfficer = state.users.find((user) => user.status === 'active' && user.roleIds.includes('role-asset-manager'));
+        const offboarding: OperationalRecord = openCase
+          ? {...openCase, status: 'offboarding', assigneeUserId: assetOfficer?.id ?? auditUser.id, updatedByActorId: auditUser.actorId, version: openCase.version + 1, payload: {...openCase.payload, employmentEndDate: pending.effectiveDate, employmentEndReason: pending.reason, departureInitiator: pending.departureInitiator ?? openCase.payload.departureInitiator ?? 'organization', accountClosureStatus: 'disabled', assetClearanceStatus: pendingAssets.length ? 'pending' : 'clear', pendingAssetIds: pendingAssets.map((asset) => asset.id), handoffStatus: pending.handoffNotes?.trim() ? 'documented' : 'pending', organizationalClearanceStatus: 'pending', financialClearanceStatus: 'pending', currentWaitingFor: pendingAssets.length ? 'عودت دارایی‌ها و اموال' : 'تسویه مالی و سازمانی'}, updatedAt: now}
+          : {id: newId('offboarding'), moduleId: 'offboarding', domain: 'hr', trackingCode: `${module.prefix}-${new Date().getFullYear()}-${String(state.operationalRecords.filter((record) => record.moduleId === 'offboarding').length + 1).padStart(4, '0')}`, title: `تسویه و خروج ${person.firstName} ${person.lastName}`, description: pending.handoffNotes?.trim() ?? '', status: 'offboarding', priority: 'normal', companyId: auditUser.companyId, unitId: person.unitId, branchUnitId: person.branchUnitId, ownerPersonnelId: person.id, assigneeUserId: assetOfficer?.id ?? auditUser.id, createdByActorId: auditUser.actorId, createdByUserId: auditUser.id, updatedByActorId: auditUser.actorId, workflowVersion: activeWorkflowFor(state, module).version, version: 1, payload: {personnelId: person.id, personnelCode: person.personnelCode, employmentEndDate: pending.effectiveDate, employmentEndReason: pending.reason, departureInitiator: pending.departureInitiator ?? 'organization', accountClosureStatus: 'disabled', assetClearanceStatus: pendingAssets.length ? 'pending' : 'clear', pendingAssetIds: pendingAssets.map((asset) => asset.id), handoffStatus: pending.handoffNotes?.trim() ? 'documented' : 'pending', organizationalClearanceStatus: 'pending', financialClearanceStatus: 'pending', currentWaitingFor: pendingAssets.length ? 'عودت دارایی‌ها و اموال' : 'تسویه مالی و سازمانی'}, createdAt: now, updatedAt: now};
+        const history: OperationalRecordHistory = openCase
+          ? this.makeHistory(state, offboarding, auditUser, 'transitioned', {fromState: openCase.status, toState: 'offboarding', reason: pending.reason, snapshot: {personnelId: person.id, pendingAssetIds: pendingAssets.map((asset) => asset.id)}})
+          : {id: newId('history'), recordId: offboarding.id, moduleId: offboarding.moduleId, sequence: 1, eventType: 'created', actorId: auditUser.actorId, actorName: auditUser.name, effectiveUserId: auditUser.id, reason: pending.reason, snapshot: {personnelId: person.id, pendingAssetIds: pendingAssets.map((asset) => asset.id)}, occurredAt: now};
+        await this.storage.transaction(['personnel', 'users', 'offboarding_cases', 'workflow_history', 'audit_events', 'domain_events', 'meta'], 'readwrite', async (tx) => {
+          const latestPerson = await tx.get<PersonnelRecord>('personnel', person.id);
+          if (!latestPerson || latestPerson.updatedAt !== person.updatedAt || latestPerson.pendingLifecycleChange?.scheduledAt !== pending.scheduledAt) return;
+          if (openCase) {
+            const latestCase = await tx.get<OperationalRecord>('offboarding_cases', openCase.id);
+            if (!latestCase || latestCase.version !== openCase.version) throw new Error('پرونده خروج هم‌زمان تغییر کرده است؛ اجرای زمان‌بندی‌شده دوباره تلاش خواهد شد.');
+          }
+          const audits = await tx.getAll<AuditEvent>('audit_events');
+          await tx.put('personnel', updatedPerson);
+          if (linkedUser && !linkedUser.isAdmin) await tx.put('users', {...linkedUser, status: 'inactive'});
+          await tx.put('offboarding_cases', offboarding);
+          await tx.put('workflow_history', history);
+          await tx.put('audit_events', {id: newId('audit'), sequence: nextSequence(audits), companyId: auditUser.companyId, category: 'system', action: 'organization.personnel.employment_ended_automatically', actorId: auditUser.actorId, actorName: auditUser.name, effectiveUserId: auditUser.id, occurredAt: now, summary: `پایان همکاری زمان‌بندی‌شده «${person.firstName} ${person.lastName}» اجرا شد.`, outcome: 'success', correlationId, metadata: {personnelId: person.id, effectiveDate: pending.effectiveDate, offboardingRecordId: offboarding.id}} satisfies AuditEvent);
+          await tx.put('domain_events', {id: newId('event'), aggregateType: 'personnel-lifecycle', aggregateId: person.id, eventType: 'employment_ended_automatically', actorId: auditUser.actorId, occurredAt: now, correlationId, payload: {effectiveDate: pending.effectiveDate, offboardingRecordId: offboarding.id}} satisfies DomainEvent);
+          await tx.put('meta', {id: 'lastPersistedAt', value: now});
+        });
       } else {
         const roleIds = pending.roleIds ?? [];
         const event = {
@@ -194,13 +215,22 @@ export class LocalFoundationService {
           managerPersonnelId: pending.managerPersonnelId, pendingLifecycleChange: undefined,
           lifecycleHistory: [...(person.lifecycleHistory ?? []), event], updatedAt: now,
         };
-        await this.storage.put('personnel', updatedPerson);
+        let updatedUser: LocalUser | undefined;
         if (linkedUser) {
-          const managerUserId = users.find((user) => user.personnelId === updatedPerson.managerPersonnelId)?.id;
+          const managerUserId = state.users.find((user) => user.personnelId === updatedPerson.managerPersonnelId)?.id;
           const roleId = roleIds[0] ?? linkedUser.roleId;
-          await this.storage.put('users', resolveUserAccess({...linkedUser, status: 'active', roleId, roleIds, unitId: updatedPerson.unitId, positionId: updatedPerson.positionId, branchUnitId: updatedPerson.branchUnitId, managerUserId}, roles));
+          updatedUser = resolveUserAccess({...linkedUser, status: 'active', roleId, roleIds, unitId: updatedPerson.unitId, positionId: updatedPerson.positionId, branchUnitId: updatedPerson.branchUnitId, managerUserId}, state.roles);
         }
-        await this.appendSystemAudit('organization.personnel.rehired_automatically', `بازگشت به همکاری زمان‌بندی‌شده «${person.firstName} ${person.lastName}» اجرا شد.`, linkedUser?.id ?? users.find((user) => user.isAdmin)?.id ?? LOCAL_USERS[0].id, {personnelId: person.id, effectiveDate: pending.effectiveDate, roleIds: roleIds.join(',')});
+        await this.storage.transaction(['personnel', 'users', 'audit_events', 'domain_events', 'meta'], 'readwrite', async (tx) => {
+          const latestPerson = await tx.get<PersonnelRecord>('personnel', person.id);
+          if (!latestPerson || latestPerson.updatedAt !== person.updatedAt || latestPerson.pendingLifecycleChange?.scheduledAt !== pending.scheduledAt) return;
+          const audits = await tx.getAll<AuditEvent>('audit_events');
+          await tx.put('personnel', updatedPerson);
+          if (updatedUser) await tx.put('users', updatedUser);
+          await tx.put('audit_events', {id: newId('audit'), sequence: nextSequence(audits), companyId: auditUser.companyId, category: 'system', action: 'organization.personnel.rehired_automatically', actorId: auditUser.actorId, actorName: auditUser.name, effectiveUserId: auditUser.id, occurredAt: now, summary: `بازگشت به همکاری زمان‌بندی‌شده «${person.firstName} ${person.lastName}» اجرا شد.`, outcome: 'success', correlationId, metadata: {personnelId: person.id, effectiveDate: pending.effectiveDate, roleIds: roleIds.join(',')}} satisfies AuditEvent);
+          await tx.put('domain_events', {id: newId('event'), aggregateType: 'personnel-lifecycle', aggregateId: person.id, eventType: 'rehired_automatically', actorId: auditUser.actorId, occurredAt: now, correlationId, payload: {effectiveDate: pending.effectiveDate, roleIds}} satisfies DomainEvent);
+          await tx.put('meta', {id: 'lastPersistedAt', value: now});
+        });
       }
     }
   }
@@ -709,13 +739,7 @@ export class LocalFoundationService {
     if (record.status !== 'requested') throw new Error('فقط درخواست در انتظار بررسی منابع انسانی قابل تأیید است.');
     const person = state.personnel.find((item) => item.id === record.ownerPersonnelId); if (!person) throw new Error('پرونده پرسنلی مرتبط پیدا نشد.');
     const decisionNote = note.trim(); if (decisionNote.length < 3) throw new Error('توضیح تصمیم منابع انسانی الزامی است.');
-    await this.schedulePersonnelEnd(person.id, {effectiveDate: String(record.payload.proposedEmploymentEndDate ?? record.payload.employmentEndDate ?? ''), departureInitiator: record.payload.departureInitiator === 'employee' ? 'employee' : 'organization', reason: String(record.payload.employmentEndReason ?? ''), handoffNotes: record.description || undefined}, this.lifecycleExecutionToken);
-    const refreshed = await this.loadState(); const current = refreshed.operationalRecords.find((item) => item.id === record.id); if (!current) throw new Error('درخواست پس از تأیید پیدا نشد.');
-    const now = new Date().toISOString(); const targetStatus = current.status === 'requested' ? 'scheduled' : current.status;
-    const updated: OperationalRecord = {...current, status: targetStatus, updatedByActorId: actor.actorId, version: current.version + 1, payload: {...current.payload, approvedByUserId: actor.id, approvedByName: actor.name, approvedAt: now, approvalNote: decisionNote, requestHasOperationalEffect: true, currentWaitingFor: targetStatus === 'scheduled' ? `اجرای پایان همکاری در ${String(current.payload.proposedEmploymentEndDate ?? '')}` : current.payload.currentWaitingFor}, updatedAt: now};
-    const history = this.makeHistory(refreshed, updated, actor, current.status === targetStatus ? 'comment' : 'transitioned', {fromState: current.status, toState: targetStatus, reason: decisionNote, snapshot: {approvedAt: now, effectiveDate: current.payload.proposedEmploymentEndDate}});
-    await this.persistOperationalChange('offboarding_cases', updated, history, actor, 'approved', `منابع انسانی درخواست پایان همکاری «${person.firstName} ${person.lastName}» را تأیید کرد.`, decisionNote);
-    return this.loadState();
+    return this.schedulePersonnelEnd(person.id, {effectiveDate: String(record.payload.proposedEmploymentEndDate ?? record.payload.employmentEndDate ?? ''), departureInitiator: record.payload.departureInitiator === 'employee' ? 'employee' : 'organization', reason: String(record.payload.employmentEndReason ?? ''), handoffNotes: record.description || undefined}, this.lifecycleExecutionToken, {recordId, expectedVersion, note: decisionNote});
   }
 
   async cancelPersonnelEndRequest(personnelId: string, reason: string, expectedVersion?: number): Promise<FoundationState> {
@@ -738,7 +762,7 @@ export class LocalFoundationService {
     return this.loadState();
   }
 
-  async schedulePersonnelEnd(personnelId: string, input: PersonnelEndInput, executionToken?: symbol): Promise<FoundationState> {
+  async schedulePersonnelEnd(personnelId: string, input: PersonnelEndInput, executionToken?: symbol, approval?: {recordId: string; expectedVersion: number; note: string}): Promise<FoundationState> {
     const state = await this.loadState(); const actor = state.activeUser;
     if (!actor.isAdmin && executionToken !== this.lifecycleExecutionToken) throw new Error('اجرای مستقیم پایان همکاری فقط مسیر اضطراری ادمین است؛ منابع انسانی باید درخواست مستقل بسازد و تأییدکننده دیگری آن را تصویب کند.');
     const person = state.personnel.find((item) => item.id === personnelId); if (!person) throw new Error('پرونده پرسنلی پیدا نشد.');
@@ -750,12 +774,44 @@ export class LocalFoundationService {
     if (reason.length < 3) throw new Error('دلیل پایان همکاری الزامی است.');
     const now = new Date().toISOString(); const immediate = effectiveDate === currentLocalDate();
     const linkedUser = state.users.find((user) => user.id === person.linkedUserId);
+    const approvalRecord = approval ? state.operationalRecords.find((item) => item.id === approval.recordId && item.moduleId === 'offboarding') : undefined;
+    if (approval && (!approvalRecord || approvalRecord.version !== approval.expectedVersion || approvalRecord.status !== 'requested' || approvalRecord.ownerPersonnelId !== person.id)) throw new Error('درخواست پایان همکاری هم‌زمان تغییر کرده است؛ صفحه را تازه کنید.');
+    if (!approval && state.operationalRecords.some((item) => item.moduleId === 'offboarding' && item.ownerPersonnelId === person.id && item.status === 'requested')) throw new Error('برای این پرسنل درخواست بررسی باز وجود دارد؛ همان درخواست باید توسط تأییدکننده مستقل تصویب شود.');
     const scheduledEvent = {id: newId('employment-event'), kind: immediate ? 'employment_ended' as const : 'employment_end_scheduled' as const, effectiveDate, reason, handoffNotes: input.handoffNotes?.trim(), departureInitiator: input.departureInitiator, actorId: actor.actorId, actorName: actor.name, recordedAt: now, previousEmploymentType: person.employmentType, roleIds: linkedUser?.roleIds ?? []};
     const updated: PersonnelRecord = {...person, employmentStatus: immediate ? 'ended' : 'ending_scheduled', endDate: effectiveDate, lifecycleHistory: [...(person.lifecycleHistory ?? []), scheduledEvent], pendingLifecycleChange: immediate ? undefined : {kind: 'end', effectiveDate, reason, handoffNotes: input.handoffNotes?.trim(), departureInitiator: input.departureInitiator, scheduledByActorId: actor.actorId, scheduledByActorName: actor.name, scheduledAt: now}, updatedAt: now};
-    await this.storage.put('personnel', updated);
-    if (immediate && linkedUser && !linkedUser.isAdmin) await this.storage.put('users', {...linkedUser, status: 'inactive'});
-    if (immediate) await this.ensureOffboardingCase(updated, actor.id, effectiveDate, reason, input.handoffNotes, input.departureInitiator);
-    await this.appendAudit({actor, effectiveUser: actor, category: 'system', action: immediate ? 'organization.personnel.employment_ended' : 'organization.personnel.employment_end_scheduled', summary: immediate ? `${input.departureInitiator === 'employee' ? 'استعفای' : 'قطع همکاری'} «${person.firstName} ${person.lastName}» ثبت و حساب او غیرفعال شد.` : `${input.departureInitiator === 'employee' ? 'استعفا' : 'قطع همکاری'} برای «${person.firstName} ${person.lastName}» در تاریخ ${effectiveDate} زمان‌بندی شد.`, reason, outcome: 'success', metadata: {personnelId, effectiveDate, immediate, departureInitiator: input.departureInitiator, linkedUserId: linkedUser?.id ?? ''}});
+    const module = ERP_MODULES.find((item) => item.id === 'offboarding'); if (!module) throw new Error('گردش خروج در سامانه فعال نیست.');
+    const pendingAssets = state.operationalRecords.filter((record) => record.moduleId === 'fixed-asset' && record.payload.custodianPersonnelId === person.id && record.status !== 'disposed');
+    const assetOfficer = state.users.find((user) => user.status === 'active' && user.roleIds.includes('role-asset-manager'));
+    const targetStatus = immediate ? 'offboarding' : 'scheduled';
+    const approvalPayload = approval ? {approvedByUserId: actor.id, approvedByName: actor.name, approvedAt: now, approvalNote: approval.note, requestHasOperationalEffect: true} : {requestHasOperationalEffect: true};
+    const commonPayload = immediate
+      ? {employmentEndDate: effectiveDate, employmentEndReason: reason, departureInitiator: input.departureInitiator, accountClosureStatus: 'disabled', assetClearanceStatus: pendingAssets.length ? 'pending' : 'clear', pendingAssetIds: pendingAssets.map((asset) => asset.id), handoffStatus: input.handoffNotes?.trim() ? 'documented' : 'pending', organizationalClearanceStatus: 'pending', financialClearanceStatus: 'pending', currentWaitingFor: pendingAssets.length ? 'عودت دارایی‌ها و اموال' : 'تسویه مالی و سازمانی'}
+      : {employmentEndDate: effectiveDate, employmentEndReason: reason, departureInitiator: input.departureInitiator, accountClosureStatus: 'active', currentWaitingFor: `اجرای پایان همکاری در ${effectiveDate}`};
+    const existing = state.operationalRecords.filter((record) => record.moduleId === 'offboarding');
+    const offboarding: OperationalRecord = approvalRecord
+      ? {...approvalRecord, status: targetStatus, assigneeUserId: immediate ? assetOfficer?.id ?? actor.id : approvalRecord.assigneeUserId, updatedByActorId: actor.actorId, version: approvalRecord.version + 1, payload: {...approvalRecord.payload, ...commonPayload, ...approvalPayload}, updatedAt: now}
+      : {id: newId('offboarding'), moduleId: 'offboarding', domain: 'hr', trackingCode: `${module.prefix}-${new Date().getFullYear()}-${String(existing.length + 1).padStart(4, '0')}`, title: `${immediate ? 'تسویه و خروج' : 'پایان همکاری زمان‌بندی‌شده'} ${person.firstName} ${person.lastName}`, description: input.handoffNotes?.trim() ?? '', status: targetStatus, priority: 'normal', companyId: actor.companyId, unitId: person.unitId, branchUnitId: person.branchUnitId, ownerPersonnelId: person.id, assigneeUserId: immediate ? assetOfficer?.id ?? actor.id : actor.id, createdByActorId: actor.actorId, createdByUserId: actor.id, updatedByActorId: actor.actorId, workflowVersion: activeWorkflowFor(state, module).version, version: 1, payload: {personnelId: person.id, personnelCode: person.personnelCode, ...commonPayload, ...approvalPayload}, createdAt: now, updatedAt: now};
+    const history: OperationalRecordHistory = approvalRecord
+      ? this.makeHistory(state, offboarding, actor, 'transitioned', {fromState: approvalRecord.status, toState: targetStatus, reason: approval?.note ?? reason, snapshot: {personnelId, effectiveDate, immediate}})
+      : {id: newId('history'), recordId: offboarding.id, moduleId: offboarding.moduleId, sequence: 1, eventType: 'created', actorId: actor.actorId, actorName: actor.name, effectiveUserId: actor.id, reason, snapshot: {personnelId, effectiveDate, immediate}, occurredAt: now};
+    const updatedUser = immediate && linkedUser && !linkedUser.isAdmin ? {...linkedUser, status: 'inactive' as const} : undefined;
+    const auditActor = await this.resolveAuditActor(actor); const correlationId = newId('correlation');
+    await this.storage.transaction(['personnel', 'users', 'offboarding_cases', 'workflow_history', 'audit_events', 'domain_events', 'meta'], 'readwrite', async (tx) => {
+      const latestPerson = await tx.get<PersonnelRecord>('personnel', person.id);
+      if (!latestPerson || latestPerson.updatedAt !== person.updatedAt || latestPerson.employmentStatus !== person.employmentStatus) throw new Error('پرونده پرسنلی هم‌زمان تغییر کرده است؛ صفحه را تازه کنید.');
+      if (approvalRecord) {
+        const latestRequest = await tx.get<OperationalRecord>('offboarding_cases', approvalRecord.id);
+        if (!latestRequest || latestRequest.version !== approvalRecord.version || latestRequest.status !== 'requested') throw new Error('درخواست پایان همکاری هم‌زمان تغییر کرده است؛ صفحه را تازه کنید.');
+      }
+      const audits = await tx.getAll<AuditEvent>('audit_events');
+      await tx.put('personnel', updated);
+      if (updatedUser) await tx.put('users', updatedUser);
+      await tx.put('offboarding_cases', offboarding);
+      await tx.put('workflow_history', history);
+      await tx.put('audit_events', {id: newId('audit'), sequence: nextSequence(audits), companyId: actor.companyId, category: 'system', action: immediate ? 'organization.personnel.employment_ended' : 'organization.personnel.employment_end_scheduled', actorId: auditActor.actorId, actorName: auditActor.name, effectiveUserId: actor.id, occurredAt: now, summary: immediate ? `${input.departureInitiator === 'employee' ? 'استعفای' : 'قطع همکاری'} «${person.firstName} ${person.lastName}» ثبت و حساب او غیرفعال شد.` : `${input.departureInitiator === 'employee' ? 'استعفا' : 'قطع همکاری'} برای «${person.firstName} ${person.lastName}» در تاریخ ${effectiveDate} زمان‌بندی شد.`, reason, outcome: 'success', correlationId, metadata: {personnelId, effectiveDate, immediate, departureInitiator: input.departureInitiator, linkedUserId: linkedUser?.id ?? '', offboardingRecordId: offboarding.id}} satisfies AuditEvent);
+      await tx.put('domain_events', {id: newId('event'), aggregateType: 'personnel-lifecycle', aggregateId: person.id, eventType: immediate ? 'employment_ended' : 'employment_end_scheduled', actorId: auditActor.actorId, occurredAt: now, correlationId, payload: {effectiveUserId: actor.id, effectiveDate, offboardingRecordId: offboarding.id}} satisfies DomainEvent);
+      await tx.put('meta', {id: 'lastPersistedAt', value: now});
+    });
     return this.loadState();
   }
 
@@ -1448,7 +1504,7 @@ export class LocalFoundationService {
     const transferId = newId('asset-transfer'); const employeeOtp = createLocalOtp(); const officerOtp = createLocalOtp(); const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
     const [employeeOtpHash, officerOtpHash] = await Promise.all([hashLocalOtp(transferId, 'employee', employeeOtp), hashLocalOtp(transferId, 'officer', officerOtp)]);
     const existing = state.operationalRecords.filter((record) => record.moduleId === 'asset-transfer');
-    const transfer: OperationalRecord = {id: transferId, moduleId: 'asset-transfer', domain: 'asset', trackingCode: `${module.prefix}-${new Date().getFullYear()}-${String(existing.length + 1).padStart(4, '0')}`, title: `${input.action === 'delivery' ? 'تحویل' : 'عودت'} ${asset.title} — ${personnel.firstName} ${personnel.lastName}`, description: input.notes?.trim() ?? '', status: 'submitted', priority: 'normal', companyId: actor.companyId, unitId: personnel.unitId, branchUnitId: personnel.branchUnitId, ownerPersonnelId: personnel.id, assigneeUserId: actor.id, relatedRecordId: asset.id, createdByActorId: actor.actorId, createdByUserId: actor.id, updatedByActorId: actor.actorId, workflowVersion: workflow.version, version: 1, payload: {assetRecordId: asset.id, assetTrackingCode: asset.trackingCode, personnelId: personnel.id, personnelCode: personnel.personnelCode, action: input.action, employeeConfirmed: false, officerConfirmed: false, employeeOtpHash, officerOtpHash, otpExpiresAt: expiresAt, confirmationPolicy: 'employee_and_asset_officer_otp'}, createdAt: now, updatedAt: now};
+    const transfer: OperationalRecord = {id: transferId, moduleId: 'asset-transfer', domain: 'asset', trackingCode: `${module.prefix}-${new Date().getFullYear()}-${String(existing.length + 1).padStart(4, '0')}`, title: `${input.action === 'delivery' ? 'تحویل' : 'عودت'} ${asset.title} — ${personnel.firstName} ${personnel.lastName}`, description: input.notes?.trim() ?? '', status: 'submitted', priority: 'normal', companyId: actor.companyId, unitId: personnel.unitId, branchUnitId: personnel.branchUnitId, ownerPersonnelId: personnel.id, assigneeUserId: actor.id, relatedRecordId: asset.id, createdByActorId: actor.actorId, createdByUserId: actor.id, updatedByActorId: actor.actorId, workflowVersion: workflow.version, version: 1, payload: {assetRecordId: asset.id, assetTrackingCode: asset.trackingCode, personnelId: personnel.id, personnelCode: personnel.personnelCode, action: input.action, employeeConfirmed: false, officerConfirmed: false, employeeOtpHash, officerOtpHash, employeeOtpExpiresAt: expiresAt, officerOtpExpiresAt: expiresAt, confirmationPolicy: 'employee_and_asset_officer_otp'}, createdAt: now, updatedAt: now};
     const history: OperationalRecordHistory = {id: newId('history'), recordId: transfer.id, moduleId: transfer.moduleId, sequence: 1, eventType: 'created', actorId: actor.actorId, actorName: actor.name, effectiveUserId: actor.id, snapshot: {transferId: transfer.id, assetRecordId: asset.id, personnelId: personnel.id, action: input.action, otpExpiresAt: expiresAt}, occurredAt: now};
     await this.persistOperationalChange(module.store, transfer, history, actor, 'created', `فرایند ${input.action === 'delivery' ? 'تحویل' : 'عودت'} دارایی «${asset.title}» با تأیید دوطرفه ایجاد شد.`);
     if (ownReturn) {
@@ -1474,7 +1530,7 @@ export class LocalFoundationService {
     if (transfer.payload[`${party}Confirmed`] === true) throw new Error('تأیید این طرف قبلاً ثبت شده است.');
     const otp = createLocalOtp(); const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
     const otpHash = await hashLocalOtp(transfer.id, party, otp);
-    const updated: OperationalRecord = {...transfer, payload: {...transfer.payload, [`${party}OtpHash`]: otpHash, otpExpiresAt: expiresAt}, updatedByActorId: actor.actorId, updatedAt: new Date().toISOString(), version: transfer.version + 1};
+    const updated: OperationalRecord = {...transfer, payload: {...transfer.payload, [`${party}OtpHash`]: otpHash, [`${party}OtpExpiresAt`]: expiresAt}, updatedByActorId: actor.actorId, updatedAt: new Date().toISOString(), version: transfer.version + 1};
     await this.storage.put('asset_transfers', updated);
     await this.appendAudit({actor, effectiveUser: actor, category: 'authorization', action: `asset.custody.${party}_otp_issued`, summary: `رمز یک‌بارمصرف ${party === 'employee' ? 'پرسنل' : 'مسئول اموال'} فقط برای طرف مجاز صادر شد.`, outcome: 'success', metadata: {transferId: transfer.id, party}});
     return {state: await this.loadState(), transferId, party, otp, expiresAt};
@@ -1492,32 +1548,60 @@ export class LocalFoundationService {
     if (party === 'officer' && (!isAssetOfficer || isEmployee)) throw new Error('تأیید مسئول اموال فقط توسط مسئول مجاز و مستقل قابل ثبت است.');
     const otherParty = party === 'employee' ? 'officer' : 'employee';
     if (transfer.payload[`${otherParty}ConfirmedByUserId`] === actor.id) throw new Error('یک کاربر نمی‌تواند تأیید هر دو طرف را ثبت کند.');
-    const expiresAt = String(transfer.payload.otpExpiresAt ?? '');
+    const expiresAt = String(transfer.payload[`${party}OtpExpiresAt`] ?? transfer.payload.otpExpiresAt ?? '');
     if (!expiresAt || new Date(expiresAt).getTime() < Date.now()) throw new Error('رمز یک‌بارمصرف منقضی شده است؛ فرایند جدیدی ایجاد کنید.');
     const confirmedKey = party === 'employee' ? 'employeeConfirmed' : 'officerConfirmed';
     if (transfer.payload[confirmedKey] === true) throw new Error('این طرف قبلاً تحویل را تأیید کرده است.');
     const hashKey = party === 'employee' ? 'employeeOtpHash' : 'officerOtpHash'; const expectedHash = String(transfer.payload[hashKey] ?? '');
     if (!/^\d{6}$/.test(otp) || await hashLocalOtp(transfer.id, party, otp) !== expectedHash) throw new Error('رمز یک‌بارمصرف معتبر نیست.');
-    const now = new Date().toISOString(); const payload = {...transfer.payload, [confirmedKey]: true, [hashKey]: null, [`${party}ConfirmedAt`]: now, [`${party}ConfirmedByUserId`]: actor.id};
+    const now = new Date().toISOString(); const payload = {...transfer.payload, [confirmedKey]: true, [hashKey]: null, [`${party}OtpExpiresAt`]: null, [`${party}ConfirmedAt`]: now, [`${party}ConfirmedByUserId`]: actor.id};
     const bothConfirmed = (party === 'employee' || transfer.payload.employeeConfirmed === true) && (party === 'officer' || transfer.payload.officerConfirmed === true);
     const updated: OperationalRecord = {...transfer, status: bothConfirmed ? 'completed' : 'approved', payload, updatedByActorId: actor.actorId, updatedAt: now, version: transfer.version + 1};
     const history = this.makeHistory(state, updated, actor, 'transitioned', {fromState: transfer.status, toState: updated.status, reason: party === 'employee' ? 'تأیید رمز یک‌بارمصرف تحویل‌گیرنده' : 'تأیید رمز یک‌بارمصرف مسئول اموال', snapshot: {party, bothConfirmed}});
-    await this.persistOperationalChange('asset_transfers', updated, history, actor, 'confirmed', `${party === 'employee' ? 'تحویل‌گیرنده' : 'مسئول اموال'} فرایند «${transfer.title}» را با رمز یک‌بارمصرف تأیید کرد.`);
+    let updatedAsset: OperationalRecord | undefined;
+    let updatedOffboarding: OperationalRecord | undefined;
+    let custodyAction: 'delivery' | 'return' | undefined;
     if (bothConfirmed) {
       const asset = state.operationalRecords.find((record) => record.id === transfer.relatedRecordId && record.moduleId === 'fixed-asset');
       if (!asset) throw new Error('دارایی مرتبط با این انتقال پیدا نشد.');
-      const action = transfer.payload.action === 'return' ? 'return' : 'delivery';
-      const updatedAsset: OperationalRecord = {...asset, status: 'active', ownerPersonnelId: action === 'delivery' ? targetPersonnelId : undefined, payload: {...asset.payload, custodianPersonnelId: action === 'delivery' ? targetPersonnelId : null, custodyStatus: action === 'delivery' ? 'delivered' : 'returned', lastCustodyTransferId: transfer.id, lastCustodyChangedAt: now}, updatedByActorId: actor.actorId, updatedAt: now, version: asset.version + 1};
-      await this.storage.put('fixed_assets', updatedAsset);
-      if (action === 'return') {
+      custodyAction = transfer.payload.action === 'return' ? 'return' : 'delivery';
+      updatedAsset = {...asset, status: 'active', ownerPersonnelId: custodyAction === 'delivery' ? targetPersonnelId : undefined, payload: {...asset.payload, custodianPersonnelId: custodyAction === 'delivery' ? targetPersonnelId : null, custodyStatus: custodyAction === 'delivery' ? 'delivered' : 'returned', lastCustodyTransferId: transfer.id, lastCustodyChangedAt: now}, updatedByActorId: actor.actorId, updatedAt: now, version: asset.version + 1};
+      if (custodyAction === 'return') {
         const offboarding = state.operationalRecords.find((record) => record.moduleId === 'offboarding' && record.ownerPersonnelId === targetPersonnelId && !['completed', 'cancelled'].includes(record.status));
         if (offboarding) {
           const pendingAssetIds = state.operationalRecords.filter((record) => record.moduleId === 'fixed-asset' && record.id !== asset.id && record.payload.custodianPersonnelId === targetPersonnelId && record.status !== 'disposed').map((record) => record.id);
-          await this.storage.put('offboarding_cases', {...offboarding, payload: {...offboarding.payload, pendingAssetIds, assetClearanceStatus: pendingAssetIds.length ? 'pending' : 'clear', currentWaitingFor: pendingAssetIds.length ? 'عودت دارایی‌ها و اموال' : 'تسویه مالی و سازمانی'}, updatedByActorId: actor.actorId, updatedAt: now, version: offboarding.version + 1});
+          updatedOffboarding = {...offboarding, payload: {...offboarding.payload, pendingAssetIds, assetClearanceStatus: pendingAssetIds.length ? 'pending' : 'clear', currentWaitingFor: pendingAssetIds.length ? 'عودت دارایی‌ها و اموال' : 'تسویه مالی و سازمانی'}, updatedByActorId: actor.actorId, updatedAt: now, version: offboarding.version + 1};
         }
       }
-      await this.appendAudit({actor, effectiveUser: actor, category: 'system', action: action === 'delivery' ? 'asset.custody.delivered' : 'asset.custody.returned', summary: `${action === 'delivery' ? 'تحویل' : 'عودت'} دارایی «${asset.title}» با تأیید دوطرفه قطعی شد.`, outcome: 'success', metadata: {assetId: asset.id, transferId: transfer.id, personnelId: targetPersonnelId}});
     }
+    const auditActor = await this.resolveAuditActor(actor);
+    const correlationId = newId('correlation');
+    const confirmationSummary = `${party === 'employee' ? 'تحویل‌گیرنده' : 'مسئول اموال'} فرایند «${transfer.title}» را با رمز یک‌بارمصرف تأیید کرد.`;
+    await this.storage.transaction(['asset_transfers', 'fixed_assets', 'offboarding_cases', 'workflow_history', 'audit_events', 'domain_events', 'meta'], 'readwrite', async (tx) => {
+      const latestTransfer = await tx.get<OperationalRecord>('asset_transfers', transfer.id);
+      if (!latestTransfer || latestTransfer.version !== transfer.version || latestTransfer.status !== transfer.status) throw new Error('این فرایند هم‌زمان در پنجره دیگری تغییر کرده است؛ صفحه را تازه کنید.');
+      if (updatedAsset) {
+        const latestAsset = await tx.get<OperationalRecord>('fixed_assets', updatedAsset.id);
+        if (!latestAsset || latestAsset.version + 1 !== updatedAsset.version) throw new Error('دارایی مرتبط هم‌زمان تغییر کرده است؛ صفحه را تازه کنید.');
+      }
+      if (updatedOffboarding) {
+        const latestOffboarding = await tx.get<OperationalRecord>('offboarding_cases', updatedOffboarding.id);
+        if (!latestOffboarding || latestOffboarding.version + 1 !== updatedOffboarding.version) throw new Error('پرونده خروج هم‌زمان تغییر کرده است؛ صفحه را تازه کنید.');
+      }
+      const audits = await tx.getAll<AuditEvent>('audit_events');
+      const auditSequence = nextSequence(audits);
+      await tx.put('asset_transfers', updated);
+      await tx.put('workflow_history', history);
+      if (updatedAsset) await tx.put('fixed_assets', updatedAsset);
+      if (updatedOffboarding) await tx.put('offboarding_cases', updatedOffboarding);
+      await tx.put('audit_events', {id: newId('audit'), sequence: auditSequence, companyId: updated.companyId, category: 'system', action: `${updated.domain}.${updated.moduleId}.confirmed`, actorId: auditActor.actorId, actorName: auditActor.name, effectiveUserId: actor.id, occurredAt: now, summary: confirmationSummary, outcome: 'success', correlationId, metadata: {recordId: updated.id, moduleId: updated.moduleId, version: updated.version, actingAdminUserId: auditActor.id === actor.id ? null : auditActor.id}} satisfies AuditEvent);
+      await tx.put('domain_events', {id: newId('event'), aggregateType: updated.moduleId, aggregateId: updated.id, eventType: 'confirmed', actorId: auditActor.actorId, occurredAt: now, correlationId, payload: {effectiveUserId: actor.id, status: updated.status, version: updated.version}} satisfies DomainEvent);
+      if (updatedAsset && custodyAction) {
+        await tx.put('audit_events', {id: newId('audit'), sequence: auditSequence + 1, companyId: updatedAsset.companyId, category: 'system', action: custodyAction === 'delivery' ? 'asset.custody.delivered' : 'asset.custody.returned', actorId: auditActor.actorId, actorName: auditActor.name, effectiveUserId: actor.id, occurredAt: now, summary: `${custodyAction === 'delivery' ? 'تحویل' : 'عودت'} دارایی «${updatedAsset.title}» با تأیید دوطرفه قطعی شد.`, outcome: 'success', correlationId, metadata: {assetId: updatedAsset.id, transferId: transfer.id, personnelId: targetPersonnelId}} satisfies AuditEvent);
+        await tx.put('domain_events', {id: newId('event'), aggregateType: 'asset-custody', aggregateId: updatedAsset.id, eventType: custodyAction === 'delivery' ? 'delivered' : 'returned', actorId: auditActor.actorId, occurredAt: now, correlationId, payload: {transferId: transfer.id, personnelId: targetPersonnelId}} satisfies DomainEvent);
+      }
+      await tx.put('meta', {id: 'lastPersistedAt', value: now});
+    });
     return this.loadState();
   }
 
@@ -2126,7 +2210,7 @@ export class LocalFoundationService {
       {id:'operational-seed', passed: ERP_MODULES.every((module)=>state.operationalRecords.some((record)=>record.moduleId===module.id))},
       {id:'role-library', passed: state.roles.length >= 50},
       {id:'audit-persistence', passed: state.audits.length > 0},
-      {id:'recruitment-five-deterministic-cases', passed: state.operationalRecords.filter((item)=>item.moduleId==='recruitment-case').length === 5},
+      {id:'recruitment-five-deterministic-cases', passed: ['recruitment-case-001','recruitment-case-002','recruitment-case-003','recruitment-case-004','recruitment-case-005'].every((id)=>state.operationalRecords.some((item)=>item.moduleId==='recruitment-case'&&item.id===id))},
       {id:'recruitment-request-role', passed: state.roles.some((role)=>role.id==='role-workforce-requester'&&role.permissions.includes('hr.recruitment_case.create'))},
       {id:'recruitment-hr-role', passed: state.roles.some((role)=>role.id==='role-recruitment-manager'&&role.permissions.includes('hr.recruitment_case.approve'))},
       {id:'recruitment-interviewer-isolation', passed: state.users.some((user)=>user.id==='persona-callcenter-a'&&user.roleIds.includes('role-recruitment-interviewer'))},

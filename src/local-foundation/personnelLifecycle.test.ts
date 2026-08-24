@@ -9,7 +9,26 @@ import {permissionFor} from './erpCatalog';
 
 class MemoryStorage implements StorageAdapter {
   private stores = new Map<FoundationStoreName, Map<IDBValidKey, unknown>>(FOUNDATION_STORES.map((store) => [store, new Map()]));
-  async transaction<T>(stores: FoundationStoreName[], _mode: IDBTransactionMode, work: (transaction: StorageTransaction) => Promise<T>): Promise<T> {const tx: StorageTransaction = {get: async <V>(store, id) => this.stores.get(store)?.get(id) as V | undefined,getAll: async <V>(store) => [...(this.stores.get(store)?.values() ?? [])] as V[],put: async <V>(store, value) => {this.stores.get(store)!.set((value as {id: IDBValidKey}).id, structuredClone(value));},delete: async (store, id) => {this.stores.get(store)!.delete(id);},clear: async (store) => {this.stores.get(store)!.clear();}}; return work(tx);}
+  private failPutStore?: FoundationStoreName;
+  failNextPut(store: FoundationStoreName) {this.failPutStore = store;}
+  async transaction<T>(stores: FoundationStoreName[], mode: IDBTransactionMode, work: (transaction: StorageTransaction) => Promise<T>): Promise<T> {
+    const working: Map<FoundationStoreName, Map<IDBValidKey, unknown>> = mode === 'readwrite'
+      ? new Map([...this.stores.entries()].map(([store, values]) => [store, stores.includes(store) ? new Map([...values].map(([id, value]) => [id, structuredClone(value)])) : values]))
+      : this.stores;
+    const tx: StorageTransaction = {
+      get: async <V>(store, id) => working.get(store)?.get(id) as V | undefined,
+      getAll: async <V>(store) => [...(working.get(store)?.values() ?? [])] as V[],
+      put: async <V>(store, value) => {
+        if (this.failPutStore === store) {this.failPutStore = undefined; throw new Error(`injected ${store} failure`);}
+        working.get(store)!.set((value as {id: IDBValidKey}).id, structuredClone(value));
+      },
+      delete: async (store, id) => {working.get(store)!.delete(id);},
+      clear: async (store) => {working.get(store)!.clear();},
+    };
+    const result = await work(tx);
+    if (mode === 'readwrite') for (const store of stores) this.stores.set(store, working.get(store)!);
+    return result;
+  }
   get<T>(store: FoundationStoreName, id: IDBValidKey) {return this.transaction([store], 'readonly', (tx) => tx.get<T>(store, id));}
   getAll<T>(store: FoundationStoreName) {return this.transaction([store], 'readonly', (tx) => tx.getAll<T>(store));}
   put<T>(store: FoundationStoreName, value: T) {return this.transaction([store], 'readwrite', (tx) => tx.put(store, value));}
@@ -166,6 +185,43 @@ describe('asset custody with local OTP', () => {
     expect(deliveredAsset.payload.custodianPersonnelId).toBe('personnel-arman');
     expect(JSON.stringify(state.audits)).not.toContain(confirmation.employeeOtp);
     expect(JSON.stringify(state.audits)).not.toContain(confirmation.officerOtp);
+  });
+
+  it('keeps each party OTP expiry independent when the other party requests a new code', async () => {
+    const {storage, service} = await setup();
+    const state = await service.createOperationalRecord('fixed-asset', {title: 'دارایی آزمون انقضای مستقل'});
+    const asset = state.operationalRecords.find((record) => record.moduleId === 'fixed-asset' && record.title === 'دارایی آزمون انقضای مستقل')!;
+    const transfer = await service.createAssetCustodyChallenge({assetRecordId: asset.id, personnelId: 'personnel-arman', action: 'delivery'});
+    await service.issueAssetCustodyOtp(transfer.transferId, 'officer');
+    const beforeEmployeeIssue = await storage.get<{payload: Record<string, unknown>}>('asset_transfers', transfer.transferId);
+    const officerExpiry = beforeEmployeeIssue!.payload.officerOtpExpiresAt;
+    await switchActiveUser(storage, 'persona-seller');
+    await service.issueAssetCustodyOtp(transfer.transferId, 'employee');
+    const afterEmployeeIssue = await storage.get<{payload: Record<string, unknown>}>('asset_transfers', transfer.transferId);
+    expect(afterEmployeeIssue!.payload.officerOtpExpiresAt).toBe(officerExpiry);
+    expect(afterEmployeeIssue!.payload.employeeOtpExpiresAt).toBeTruthy();
+  });
+
+  it('rolls back transfer, asset and audit writes together when final custody persistence fails', async () => {
+    const {storage, service} = await setup();
+    const state = await service.createOperationalRecord('fixed-asset', {title: 'دارایی آزمون بازگشت تراکنش'});
+    const asset = state.operationalRecords.find((record) => record.moduleId === 'fixed-asset' && record.title === 'دارایی آزمون بازگشت تراکنش')!;
+    const transfer = await service.createAssetCustodyChallenge({assetRecordId: asset.id, personnelId: 'personnel-arman', action: 'delivery'});
+    await switchActiveUser(storage, 'persona-seller');
+    const employee = await service.issueAssetCustodyOtp(transfer.transferId, 'employee');
+    await service.confirmAssetCustodyOtp(transfer.transferId, 'employee', employee.otp);
+    await switchActiveUser(storage, 'persona-product-owner');
+    const officer = await service.issueAssetCustodyOtp(transfer.transferId, 'officer');
+    const auditsBefore = (await storage.getAll('audit_events')).length;
+    storage.failNextPut('fixed_assets');
+    await expect(service.confirmAssetCustodyOtp(transfer.transferId, 'officer', officer.otp)).rejects.toThrow('injected fixed_assets failure');
+    const transferAfterFailure = await storage.get<{status: string}>('asset_transfers', transfer.transferId);
+    const assetAfterFailure = await storage.get<{payload: Record<string, unknown>}>('fixed_assets', asset.id);
+    expect(transferAfterFailure?.status).toBe('approved');
+    expect(assetAfterFailure?.payload.custodianPersonnelId).toBeFalsy();
+    expect((await storage.getAll('audit_events')).length).toBe(auditsBefore);
+    const recovered = await service.confirmAssetCustodyOtp(transfer.transferId, 'officer', officer.otp);
+    expect(recovered.operationalRecords.find((record) => record.id === transfer.transferId)?.status).toBe('completed');
   });
 
   it('prevents one actor from confirming both sides even when the employee also has the asset-manager role', async () => {
