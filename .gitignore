@@ -4,6 +4,7 @@ build/
 coverage/
 playwright-report/
 test-results/
+storybook-static/
 outputs/
 .artifact-work/
 *.log

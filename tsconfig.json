@@ -24,6 +24,8 @@
     "noEmit": true
   },
   "include": [
+    ".storybook/**/*.ts",
+    ".storybook/**/*.tsx",
     "e2e/**/*.ts",
     "src/main.tsx",
     "src/App.tsx",

@@ -40,4 +40,6 @@
 
 ## Shared component policy
 
-`src/components/ui/primitives.tsx` امروز در UI فعال Local Foundation استفاده عمومی ندارد و بعضی tokenهای موردنیاز آن نیز در `:root` جاری تعریف نشده‌اند؛ بنابراین canonical اعلام نمی‌شود. دو خانواده Modal (`modal-layer/modal-card` و `modal-scrim/dialog`) و دو خانواده Field نیز فعلاً هم‌زمان وجود دارند. کد جدید نزدیک‌ترین flow فعال را reuse می‌کند و consolidation در یک مأموریت مستقل با تست بصری انجام می‌شود. Component مشترک تازه فقط با دو مصرف‌کننده واقعی یا مأموریت consolidation تصویب‌شده ایجاد می‌شود. Storybook و visual baseline تا فعال‌شدن Gate نباید `Verified` اعلام شوند.
+`src/components/ui/primitives.tsx` امروز در UI فعال Local Foundation استفاده عمومی ندارد و بعضی tokenهای موردنیاز آن نیز در `:root` جاری تعریف نشده‌اند؛ بنابراین canonical اعلام نمی‌شود. دو خانواده Modal (`modal-layer/modal-card` و `modal-scrim/dialog`) و دو خانواده Field نیز فعلاً هم‌زمان وجود دارند. کد جدید نزدیک‌ترین flow فعال را reuse می‌کند و consolidation در یک مأموریت مستقل با تست بصری انجام می‌شود. Component مشترک تازه فقط با دو مصرف‌کننده واقعی یا مأموریت consolidation تصویب‌شده ایجاد می‌شود.
+
+Storybook روی اجزای واقعاً فعال `FormValidation`، `PersianDateInput` و `SortHeader` برقرار و build آن CI gate است. اضافه‌کردن Story به معنی canonical شدن خودکار یک Component نیست؛ جدول بالا و مصرف واقعی تعیین‌کننده‌اند. Visual snapshot baseline هنوز تأیید نشده و `Unverified` است.

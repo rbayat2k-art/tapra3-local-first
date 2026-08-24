@@ -5,6 +5,7 @@ import globals from 'globals';
 import tseslint from 'typescript-eslint';
 
 const activeFiles = [
+  '.storybook/**/*.{ts,tsx}',
   'e2e/**/*.ts',
   'src/main.tsx',
   'src/App.tsx',

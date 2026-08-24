@@ -47,6 +47,9 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Build Storybook
+        run: npm run build-storybook
+
       - name: Browser and accessibility smoke tests
         run: npm run test:e2e
 
