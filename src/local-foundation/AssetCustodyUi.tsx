@@ -3,6 +3,8 @@ import {CheckCircle2, KeyRound, PackageCheck, RotateCcw, ShieldCheck, X} from 'l
 import type {FoundationState, OperationalRecord} from './model';
 import type {AssetCustodyInput, LocalAssetCustodyChallenge, LocalFoundationService} from './service';
 import {formatPersianDateTime} from './PersianDate';
+import {can} from './authorization';
+import {permissionFor} from './erpCatalog';
 
 interface CommonProps {
   state: FoundationState;
@@ -42,37 +44,46 @@ export function AssetCustodyEditor({state, service, execute, onClose}: CommonPro
         <label className="field"><span>پرسنل تحویل‌گیرنده/تحویل‌دهنده <b className="required-star">*</b></span><select value={personnelId} disabled={action === 'return' && Boolean(assetId)} onChange={(event) => setPersonnelId(event.target.value)}><option value="">انتخاب پرسنل...</option>{personnel.map((person) => <option value={person.id} key={person.id}>{person.firstName} {person.lastName} — {person.personnelCode}</option>)}</select></label>
         <label className="field"><span>توضیحات (اختیاری)</span><textarea value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="وضعیت فیزیکی، لوازم همراه یا توضیح تکمیلی..."/></label>
       </div> : <div className="dialog__body form-stack">
-        <div className="success-panel"><ShieldCheck size={23}/><div><strong>فرایند ایجاد شد</strong><span>این رمزها فقط برای آزمون محلی نمایش داده می‌شوند و در پایگاه داده ذخیره نمی‌شوند.</span></div></div>
-        <div className="asset-otp-grid"><div><span>رمز پرسنل</span><strong dir="ltr">{challenge.employeeOtp}</strong></div><div><span>رمز مسئول اموال</span><strong dir="ltr">{challenge.officerOtp}</strong></div></div>
+        <div className="success-panel"><ShieldCheck size={23}/><div><strong>فرایند ایجاد شد</strong><span>فقط رمز مربوط به نقش فعلی شما نمایش داده می‌شود و متن رمز در پایگاه داده ذخیره نمی‌شود.</span></div></div>
+        <div className="asset-otp-grid"><div><span>{challenge.party === 'employee' ? 'رمز پرسنل' : 'رمز مسئول اموال'}</span><strong dir="ltr">{challenge.otp}</strong></div></div>
         <small>اعتبار تا {formatPersianDateTime(challenge.expiresAt)}</small>
       </div>}
-      <footer className="dialog__footer">{challenge ? <button className="button button--primary" onClick={onClose}>مشاهده و ثبت تأییدها</button> : <button className="button button--primary" onClick={() => void start()}><KeyRound size={18}/> ایجاد و دریافت رمزهای تأیید</button>}<button className="button button--ghost" onClick={onClose}>بستن</button></footer>
+      <footer className="dialog__footer">{challenge ? <button className="button button--primary" onClick={onClose}>مشاهده و ثبت تأییدها</button> : <button className="button button--primary" onClick={() => void start()}><KeyRound size={18}/> ایجاد فرایند و دریافت رمز من</button>}<button className="button button--ghost" onClick={onClose}>بستن</button></footer>
     </section>
   </div>;
 }
 
 export function AssetCustodyDrawer({state, record, service, execute, onClose}: CommonProps & {record: OperationalRecord; onClose: () => void}) {
-  const [employeeOtp, setEmployeeOtp] = useState('');
-  const [officerOtp, setOfficerOtp] = useState('');
+  const [otp, setOtp] = useState('');
+  const [shownOtp, setShownOtp] = useState('');
   const asset = state.operationalRecords.find((item) => item.id === record.relatedRecordId);
   const person = state.personnel.find((item) => item.id === record.ownerPersonnelId);
   const employeeConfirmed = record.payload.employeeConfirmed === true;
   const officerConfirmed = record.payload.officerConfirmed === true;
-  const confirm = async (party: 'employee' | 'officer') => {
-    const otp = party === 'employee' ? employeeOtp : officerOtp;
+  const targetPersonnelId = String(record.payload.personnelId ?? record.ownerPersonnelId ?? '');
+  const employeeParty = state.activeUser.personnelId === targetPersonnelId && !state.session.actingAdminUserId;
+  const officerParty = !employeeParty && !state.session.actingAdminUserId && (state.activeUser.isAdmin || can(state.activeUser, permissionFor('asset-transfer', 'approve')));
+  const party: 'employee' | 'officer' | undefined = employeeParty ? 'employee' : officerParty ? 'officer' : undefined;
+  const confirmed = party === 'employee' ? employeeConfirmed : officerConfirmed;
+  const issueOtp = async () => {
+    if (!party) return;
+    let challenge: LocalAssetCustodyChallenge | undefined;
+    const ok = await execute(`asset-custody-${party}-otp`, async () => { challenge = await service.issueAssetCustodyOtp(record.id, party); return challenge.state; }, 'رمز یک‌بارمصرف مخصوص شما صادر شد.');
+    if (ok && challenge) { setShownOtp(challenge.otp); setOtp(challenge.otp); }
+  };
+  const confirm = async () => {
+    if (!party) return;
     if (!/^\d{6}$/.test(otp)) return;
     const ok = await execute(`asset-custody-${party}`, () => service.confirmAssetCustodyOtp(record.id, party, otp), party === 'employee' ? 'تأیید پرسنل ثبت شد.' : 'تأیید مسئول اموال ثبت شد.');
-    if (ok) party === 'employee' ? setEmployeeOtp('') : setOfficerOtp('');
+    if (ok) { setOtp(''); setShownOtp(''); }
   };
   return <div className="drawer-scrim" onMouseDown={(event) => {if (event.currentTarget === event.target) onClose();}}><aside className="record-drawer asset-custody-drawer">
     <header><div><span className="eyebrow">{record.trackingCode}</span><h2>{record.title}</h2></div><button className="icon-button" onClick={onClose} aria-label="بستن"><X size={20}/></button></header>
     <div className="drawer-body form-stack">
       <div className="record-facts"><div><span>دارایی</span><strong>{asset?.title ?? 'نامشخص'}</strong></div><div><span>پرسنل</span><strong>{person ? `${person.firstName} ${person.lastName}` : 'نامشخص'}</strong></div><div><span>نوع عملیات</span><strong>{record.payload.action === 'return' ? 'عودت' : 'تحویل'}</strong></div></div>
       <div className="asset-confirmation-status"><Status confirmed={employeeConfirmed} label="تأیید پرسنل"/><Status confirmed={officerConfirmed} label="تأیید مسئول اموال"/></div>
-      {record.status !== 'completed' && <>
-        {!employeeConfirmed && <label className="field"><span>رمز شش‌رقمی پرسنل</span><div className="inline-confirm"><input dir="ltr" inputMode="numeric" maxLength={6} value={employeeOtp} onChange={(event) => setEmployeeOtp(event.target.value.replace(/\D/g, ''))}/><button className="button button--secondary" disabled={employeeOtp.length !== 6} onClick={() => void confirm('employee')}>ثبت تأیید پرسنل</button></div></label>}
-        {!officerConfirmed && <label className="field"><span>رمز شش‌رقمی مسئول اموال</span><div className="inline-confirm"><input dir="ltr" inputMode="numeric" maxLength={6} value={officerOtp} onChange={(event) => setOfficerOtp(event.target.value.replace(/\D/g, ''))}/><button className="button button--secondary" disabled={officerOtp.length !== 6} onClick={() => void confirm('officer')}>ثبت تأیید مسئول اموال</button></div></label>}
-      </>}
+      {record.status !== 'completed' && party && !confirmed && <label className="field"><span>رمز شش‌رقمی {party === 'employee' ? 'پرسنل' : 'مسئول اموال'}</span>{shownOtp && <small>رمز آزمایشی مخصوص حساب شما: <b dir="ltr">{shownOtp}</b></small>}<div className="inline-confirm"><input dir="ltr" inputMode="numeric" maxLength={6} value={otp} onChange={(event) => setOtp(event.target.value.replace(/\D/g, ''))}/><button className="button button--secondary" type="button" onClick={() => void issueOtp()}>دریافت رمز من</button><button className="button button--secondary" disabled={otp.length !== 6} onClick={() => void confirm()}>ثبت تأیید من</button></div></label>}
+      {record.status !== 'completed' && !party && <div className="waiting-banner"><ShieldCheck size={20}/><div><span>فقط خواندنی</span><strong>تأیید فقط در حساب مستقیم پرسنل یا مسئول مستقل اموال در دسترس است.</strong></div></div>}
       {record.status === 'completed' && <div className="success-panel"><CheckCircle2 size={22}/><div><strong>تحویل دوطرفه قطعی شده است</strong><span>زمان، عامل و سابقه در رویدادهای ممیزی نگهداری شده‌اند.</span></div></div>}
     </div>
     <footer className="drawer-footer"><button className="button button--ghost" onClick={onClose}>بستن</button></footer>

@@ -38,7 +38,7 @@ export interface PersonnelAssignmentChangeInput {kind: PersonnelMovementKind; ta
 export interface PersonnelEndInput {effectiveDate: string; departureInitiator: 'employee' | 'organization'; reason: string; handoffNotes?: string;}
 export interface PersonnelRehireInput {effectiveDate: string; reason: string; employmentType: string; unitId: string; positionId: string; branchUnitId?: string; managerPersonnelId?: string; roleIds: string[];}
 export interface AssetCustodyInput {assetRecordId: string; personnelId: string; action: 'delivery' | 'return'; notes?: string;}
-export interface LocalAssetCustodyChallenge {state: FoundationState; transferId: string; employeeOtp: string; officerOtp: string; expiresAt: string;}
+export interface LocalAssetCustodyChallenge {state: FoundationState; transferId: string; party: 'employee' | 'officer'; otp: string; expiresAt: string;}
 export interface OwnAssetIssueInput {assetRecordId: string; issueType: 'damage' | 'lost' | 'other'; description: string;}
 export type OffboardingClearanceArea = 'financial' | 'organizational';
 export interface SalesStructureInput {branchUnitId: string; salesVicePersonnelId?: string; salesManagerPersonnelId: string; seniorSupervisorPersonnelId: string; callCenterSupervisorPersonnelId: string;}
@@ -228,14 +228,21 @@ export class LocalFoundationService {
   private async migrateLocalFoundation(): Promise<void> {
     const now = new Date().toISOString();
     const seeded = createSeedData() as Record<FoundationStoreName, unknown[]>;
+    const seededRecruitmentRecords = seeded.recruitment_cases as OperationalRecord[];
     const seededRecruitmentHistory = (seeded.workflow_history as OperationalRecordHistory[]).filter((item) => item.moduleId === 'recruitment-case');
     const existingEntries = await Promise.all(FOUNDATION_STORES.map(async (store) => [store, await this.storage.getAll(store)] as const));
     const existing = Object.fromEntries(existingEntries) as Record<FoundationStoreName, unknown[]>;
     for (const store of FOUNDATION_STORES) if (existing[store].length) seeded[store] = existing[store];
-    const priorWorkflowHistory = seeded.workflow_history as OperationalRecordHistory[];
+    const priorRecruitmentRecords = existing.recruitment_cases as OperationalRecord[];
+    seeded.recruitment_cases = [
+      ...priorRecruitmentRecords,
+      ...seededRecruitmentRecords.filter((seedRecord) => !priorRecruitmentRecords.some((record) => record.id === seedRecord.id)),
+    ];
+    const migratedRecruitmentIds = new Set((seeded.recruitment_cases as OperationalRecord[]).map((record) => record.id));
+    const priorWorkflowHistory = existing.workflow_history as OperationalRecordHistory[];
     seeded.workflow_history = [
       ...priorWorkflowHistory.filter((item) => !seededRecruitmentHistory.some((seedItem) => seedItem.id === item.id)),
-      ...seededRecruitmentHistory,
+      ...seededRecruitmentHistory.filter((item) => migratedRecruitmentIds.has(item.recordId)),
     ];
 
     const priorRoles = existing.security_roles as SecurityRole[];
@@ -381,7 +388,9 @@ export class LocalFoundationService {
     const previousSession = (existing.sessions[0] as FoundationSession | undefined);
     const activeUserId = (seeded.users as LocalUser[]).some((user) => user.id === previousSession?.activeUserId) ? previousSession!.activeUserId : LOCAL_USERS[0].id;
     seeded.sessions = [{id: 'active-session', activeUserId, signedOutAt: previousSession?.signedOutAt, switchedAt: now, version: (previousSession?.version ?? 3) + 1} satisfies FoundationSession];
-    seeded.meta = [{id: 'schemaVersion', value: FOUNDATION_SCHEMA_VERSION}, {id: 'seedVersion', value: FOUNDATION_SEED_VERSION}, {id: 'lastPersistedAt', value: now}];
+    const systemMetaIds = new Set(['schemaVersion', 'seedVersion', 'seededAt', 'lastPersistedAt']);
+    const preservedMeta = (existing.meta as MetaRecord[]).filter((item) => !systemMetaIds.has(item.id));
+    seeded.meta = [...preservedMeta, {id: 'schemaVersion', value: FOUNDATION_SCHEMA_VERSION}, {id: 'seedVersion', value: FOUNDATION_SEED_VERSION}, {id: 'lastPersistedAt', value: now}];
     await this.storage.replaceAll(seeded);
     await this.appendSystemAudit('foundation.erp_v1.migrated', 'ساختار ERP محلی V1 بدون حذف داده‌های قبلی ارتقا یافت.', activeUserId, {schemaVersion: FOUNDATION_SCHEMA_VERSION, legacySellerRoleMigratedTo: 'role-sales-seller'});
   }
@@ -1409,6 +1418,9 @@ export class LocalFoundationService {
     if (asset.status === 'disposed') throw new Error('دارایی واگذارشده قابل تحویل یا عودت نیست.');
     const personnel = state.personnel.find((person) => person.id === input.personnelId);
     if (!personnel) throw new Error('پرونده پرسنلی تحویل‌گیرنده پیدا نشد.');
+    const isActorEmployee = actor.personnelId === personnel.id && !state.session.actingAdminUserId;
+    const isActorOfficer = !isActorEmployee && !state.session.actingAdminUserId && (actor.isAdmin || can(actor, permissionFor('asset-transfer', 'approve')));
+    if (!isActorEmployee && !isActorOfficer) throw new Error('ایجاد فرایند و دریافت رمز فقط برای خود پرسنل یا مسئول مستقل اموال مجاز است.');
     if (input.action === 'delivery' && personnel.employmentStatus !== 'active') throw new Error('تحویل دارایی فقط به پرسنل دارای همکاری فعال مجاز است.');
     const currentCustodian = typeof asset.payload.custodianPersonnelId === 'string' ? asset.payload.custodianPersonnelId : undefined;
     if (input.action === 'return' && currentCustodian !== personnel.id) throw new Error('این دارایی در حال حاضر در اختیار پرسنل انتخاب‌شده نیست.');
@@ -1426,7 +1438,29 @@ export class LocalFoundationService {
       const recipients = state.users.filter((user) => user.status === 'active' && user.roleIds.includes('role-asset-manager') && user.id !== actor.id);
       for (const recipient of recipients) await this.storage.put('notifications', {id: newId('notification'), userId: recipient.id, kind: 'workflow', title: `درخواست عودت ${asset.trackingCode}`, message: `${actor.name} درخواست عودت دارایی «${asset.title}» را ثبت کرد.`, actorUserId: actor.id, relatedRecordId: transfer.id, relatedModuleId: 'asset-transfer', createdAt: now} satisfies UserNotification);
     }
-    return {state: await this.loadState(), transferId, employeeOtp, officerOtp, expiresAt};
+    const party = isActorEmployee ? 'employee' : 'officer';
+    return {state: await this.loadState(), transferId, party, otp: party === 'employee' ? employeeOtp : officerOtp, expiresAt};
+  }
+
+  async issueAssetCustodyOtp(transferId: string, party: 'employee' | 'officer'): Promise<LocalAssetCustodyChallenge> {
+    const state = await this.loadState(); const actor = state.activeUser;
+    if (state.session.actingAdminUserId) throw new Error('رمز یک‌بارمصرف فقط در ورود مستقیم هر طرف نمایش داده می‌شود.');
+    const transfer = state.operationalRecords.find((record) => record.id === transferId && record.moduleId === 'asset-transfer');
+    if (!transfer || !['submitted', 'approved'].includes(transfer.status)) throw new Error('فرایند تحویل یا عودت فعال پیدا نشد.');
+    const targetPersonnelId = String(transfer.payload.personnelId ?? '');
+    const isEmployee = actor.personnelId === targetPersonnelId;
+    const isAssetOfficer = actor.isAdmin || can(actor, permissionFor('asset-transfer', 'approve'));
+    if (party === 'employee' && !isEmployee) throw new Error('رمز پرسنل فقط به حساب همان پرسنل نمایش داده می‌شود.');
+    if (party === 'officer' && (!isAssetOfficer || isEmployee)) throw new Error('رمز مسئول اموال فقط به مسئول مجاز و مستقل نمایش داده می‌شود.');
+    const otherParty = party === 'employee' ? 'officer' : 'employee';
+    if (transfer.payload[`${otherParty}ConfirmedByUserId`] === actor.id) throw new Error('یک کاربر نمی‌تواند تأیید هر دو طرف را ثبت کند.');
+    if (transfer.payload[`${party}Confirmed`] === true) throw new Error('تأیید این طرف قبلاً ثبت شده است.');
+    const otp = createLocalOtp(); const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+    const otpHash = await hashLocalOtp(transfer.id, party, otp);
+    const updated: OperationalRecord = {...transfer, payload: {...transfer.payload, [`${party}OtpHash`]: otpHash, otpExpiresAt: expiresAt}, updatedByActorId: actor.actorId, updatedAt: new Date().toISOString(), version: transfer.version + 1};
+    await this.storage.put('asset_transfers', updated);
+    await this.appendAudit({actor, effectiveUser: actor, category: 'authorization', action: `asset.custody.${party}_otp_issued`, summary: `رمز یک‌بارمصرف ${party === 'employee' ? 'پرسنل' : 'مسئول اموال'} فقط برای طرف مجاز صادر شد.`, outcome: 'success', metadata: {transferId: transfer.id, party}});
+    return {state: await this.loadState(), transferId, party, otp, expiresAt};
   }
 
   async confirmAssetCustodyOtp(transferId: string, party: 'employee' | 'officer', otp: string): Promise<FoundationState> {
@@ -1434,10 +1468,13 @@ export class LocalFoundationService {
     const transfer = state.operationalRecords.find((record) => record.id === transferId && record.moduleId === 'asset-transfer');
     if (!transfer || !['submitted', 'approved'].includes(transfer.status)) throw new Error('فرایند تحویل یا عودت فعال پیدا نشد.');
     const targetPersonnelId = String(transfer.payload.personnelId ?? '');
+    const isEmployee = actor.personnelId === targetPersonnelId;
     const isAssetOfficer = actor.isAdmin || can(actor, permissionFor('asset-transfer', 'approve'));
-    if (party === 'employee' && actor.personnelId !== targetPersonnelId && !isAssetOfficer) throw new Error('تأیید تحویل‌گیرنده فقط توسط خود شخص یا مسئول اموال قابل ثبت است.');
-    if (party === 'officer' && !isAssetOfficer) throw new Error('مجوز تأیید مسئول دارایی‌ها و اموال را ندارید.');
-    if (party === 'officer' && actor.personnelId === targetPersonnelId) throw new Error('یک نفر نمی‌تواند هم تحویل‌گیرنده و هم تأییدکننده اموال باشد.');
+    if (state.session.actingAdminUserId) throw new Error('تأیید دارایی در حالت مشاهده دسترسی مجاز نیست؛ هر طرف باید مستقیم وارد حساب خود شود.');
+    if (party === 'employee' && !isEmployee) throw new Error('تأیید پرسنل فقط توسط خود همان پرسنل قابل ثبت است.');
+    if (party === 'officer' && (!isAssetOfficer || isEmployee)) throw new Error('تأیید مسئول اموال فقط توسط مسئول مجاز و مستقل قابل ثبت است.');
+    const otherParty = party === 'employee' ? 'officer' : 'employee';
+    if (transfer.payload[`${otherParty}ConfirmedByUserId`] === actor.id) throw new Error('یک کاربر نمی‌تواند تأیید هر دو طرف را ثبت کند.');
     const expiresAt = String(transfer.payload.otpExpiresAt ?? '');
     if (!expiresAt || new Date(expiresAt).getTime() < Date.now()) throw new Error('رمز یک‌بارمصرف منقضی شده است؛ فرایند جدیدی ایجاد کنید.');
     const confirmedKey = party === 'employee' ? 'employeeConfirmed' : 'officerConfirmed';

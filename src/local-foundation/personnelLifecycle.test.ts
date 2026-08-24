@@ -1,10 +1,11 @@
 import {describe, expect, it} from 'vitest';
-import type {FoundationSession, FoundationStoreName, SnapshotManifest} from './model';
+import type {FoundationSession, FoundationStoreName, LocalUser, SnapshotManifest} from './model';
 import {FOUNDATION_STORES} from './model';
 import {createSeedData} from './seed';
 import {LocalFoundationService} from './service';
 import type {StorageAdapter, StorageTransaction} from './storage';
 import {todayIsoDate, toIsoDate} from './PersianDate';
+import {permissionFor} from './erpCatalog';
 
 class MemoryStorage implements StorageAdapter {
   private stores = new Map<FoundationStoreName, Map<IDBValidKey, unknown>>(FOUNDATION_STORES.map((store) => [store, new Map()]));
@@ -19,6 +20,15 @@ class MemoryStorage implements StorageAdapter {
 
 async function setup() {const storage = new MemoryStorage(); await storage.replaceAll(createSeedData()); return {storage, service: new LocalFoundationService(storage)};}
 async function switchActiveUser(storage: MemoryStorage, activeUserId: string) {const session = await storage.get<FoundationSession>('sessions', 'active-session'); await storage.put('sessions', {...session!, activeUserId, actingAdminUserId: undefined, switchedAt: new Date().toISOString(), version: (session?.version ?? 0) + 1});}
+async function confirmAssetCustodyBoth(storage: MemoryStorage, service: LocalFoundationService, transferId: string) {
+  await switchActiveUser(storage, 'persona-seller');
+  const employeeChallenge = await service.issueAssetCustodyOtp(transferId, 'employee');
+  await service.confirmAssetCustodyOtp(transferId, 'employee', employeeChallenge.otp);
+  await switchActiveUser(storage, 'persona-product-owner');
+  const officerChallenge = await service.issueAssetCustodyOtp(transferId, 'officer');
+  const state = await service.confirmAssetCustodyOtp(transferId, 'officer', officerChallenge.otp);
+  return {state, employeeOtp: employeeChallenge.otp, officerOtp: officerChallenge.otp};
+}
 
 describe('personnel employment lifecycle', () => {
   it('lets a direct supervisor submit a review request without changing employment, login, roles or panel access', async () => {
@@ -70,7 +80,7 @@ describe('personnel employment lifecycle', () => {
   });
 
   it('ends employment and disables login without deleting either record', async () => {
-    const {service} = await setup();
+    const {storage, service} = await setup();
     const state = await service.schedulePersonnelEnd('personnel-arman', {effectiveDate: todayIsoDate(), departureInitiator: 'organization', reason: 'پایان همکاری آزمایشی', handoffNotes: 'تحویل کامل کارها'});
     const personnel = state.personnel.find((item) => item.id === 'personnel-arman')!;
     const user = state.users.find((item) => item.id === 'persona-seller')!;
@@ -130,54 +140,79 @@ describe('personnel employment lifecycle', () => {
 
 describe('asset custody with local OTP', () => {
   it('requires both employee and asset officer confirmations and never persists plaintext OTP', async () => {
-    const {service} = await setup();
+    const {storage, service} = await setup();
     let state = await service.createOperationalRecord('fixed-asset', {title: 'لپ‌تاپ آزمایشی', description: 'دارایی تست چرخه تحویل', payload: {serialNumber: 'QA-001'}});
     const asset = state.operationalRecords.find((record) => record.moduleId === 'fixed-asset' && record.title === 'لپ‌تاپ آزمایشی')!;
     const challenge = await service.createAssetCustodyChallenge({assetRecordId: asset.id, personnelId: 'personnel-arman', action: 'delivery'});
     const transferBefore = challenge.state.operationalRecords.find((record) => record.id === challenge.transferId)!;
     expect(transferBefore.status).toBe('submitted');
-    expect(JSON.stringify(transferBefore)).not.toContain(challenge.employeeOtp);
-    expect(JSON.stringify(transferBefore)).not.toContain(challenge.officerOtp);
+    expect(JSON.stringify(transferBefore)).not.toContain(challenge.otp);
 
-    state = await service.confirmAssetCustodyOtp(challenge.transferId, 'employee', challenge.employeeOtp);
-    expect(state.operationalRecords.find((record) => record.id === challenge.transferId)?.status).toBe('approved');
-    state = await service.confirmAssetCustodyOtp(challenge.transferId, 'officer', challenge.officerOtp);
+    const confirmation = await confirmAssetCustodyBoth(storage, service, challenge.transferId);
+    state = confirmation.state;
     expect(state.operationalRecords.find((record) => record.id === challenge.transferId)?.status).toBe('completed');
     const deliveredAsset = state.operationalRecords.find((record) => record.id === asset.id)!;
     expect(deliveredAsset.payload.custodianPersonnelId).toBe('personnel-arman');
-    expect(JSON.stringify(state.audits)).not.toContain(challenge.employeeOtp);
-    expect(JSON.stringify(state.audits)).not.toContain(challenge.officerOtp);
+    expect(JSON.stringify(state.audits)).not.toContain(confirmation.employeeOtp);
+    expect(JSON.stringify(state.audits)).not.toContain(confirmation.officerOtp);
+  });
+
+  it('prevents one actor from confirming both sides even when the employee also has the asset-manager role', async () => {
+    const {storage, service} = await setup();
+    let state = await service.createOperationalRecord('fixed-asset', {title: 'دارایی آزمون تفکیک تأیید'});
+    const asset = state.operationalRecords.find((record) => record.moduleId === 'fixed-asset' && record.title === 'دارایی آزمون تفکیک تأیید')!;
+    const seller = await storage.get<LocalUser>('users', 'persona-seller');
+    await storage.put('users', {
+      ...seller!,
+      roleIds: [...seller!.roleIds, 'role-asset-manager'],
+      permissions: [...new Set([...seller!.permissions, permissionFor('asset-transfer', 'create'), permissionFor('asset-transfer', 'approve')])],
+    });
+    await switchActiveUser(storage, 'persona-seller');
+    const employeeChallenge = await service.createAssetCustodyChallenge({assetRecordId: asset.id, personnelId: 'personnel-arman', action: 'delivery'});
+    expect(employeeChallenge.party).toBe('employee');
+
+    await switchActiveUser(storage, 'persona-product-owner');
+    await expect(service.issueAssetCustodyOtp(employeeChallenge.transferId, 'employee')).rejects.toThrow('همان پرسنل');
+    await expect(service.confirmAssetCustodyOtp(employeeChallenge.transferId, 'employee', employeeChallenge.otp)).rejects.toThrow('همان پرسنل');
+    await switchActiveUser(storage, 'persona-seller');
+    await service.confirmAssetCustodyOtp(employeeChallenge.transferId, 'employee', employeeChallenge.otp);
+
+    await expect(service.issueAssetCustodyOtp(employeeChallenge.transferId, 'officer')).rejects.toThrow('مستقل');
+    await expect(service.confirmAssetCustodyOtp(employeeChallenge.transferId, 'officer', '000000')).rejects.toThrow('مستقل');
+    state = await service.loadState();
+    const transfer = state.operationalRecords.find((record) => record.id === employeeChallenge.transferId)!;
+    expect(transfer.payload.employeeConfirmedByUserId).toBe('persona-seller');
+    expect(transfer.payload.officerConfirmed).toBe(false);
+    expect(transfer.status).toBe('approved');
   });
 
   it('keeps a returned asset in inventory after two-sided confirmation', async () => {
-    const {service} = await setup();
+    const {storage, service} = await setup();
     let state = await service.createOperationalRecord('fixed-asset', {title: 'تلفن سازمانی آزمایشی'});
     const asset = state.operationalRecords.find((record) => record.moduleId === 'fixed-asset' && record.title === 'تلفن سازمانی آزمایشی')!;
     let challenge = await service.createAssetCustodyChallenge({assetRecordId: asset.id, personnelId: 'personnel-arman', action: 'delivery'});
-    await service.confirmAssetCustodyOtp(challenge.transferId, 'employee', challenge.employeeOtp);
-    await service.confirmAssetCustodyOtp(challenge.transferId, 'officer', challenge.officerOtp);
+    await confirmAssetCustodyBoth(storage, service, challenge.transferId);
+    await switchActiveUser(storage, 'persona-product-owner');
     challenge = await service.createAssetCustodyChallenge({assetRecordId: asset.id, personnelId: 'personnel-arman', action: 'return'});
-    await service.confirmAssetCustodyOtp(challenge.transferId, 'employee', challenge.employeeOtp);
-    state = await service.confirmAssetCustodyOtp(challenge.transferId, 'officer', challenge.officerOtp);
+    state = (await confirmAssetCustodyBoth(storage, service, challenge.transferId)).state;
     const returnedAsset = state.operationalRecords.find((record) => record.id === asset.id)!;
     expect(returnedAsset.payload.custodianPersonnelId).toBeNull();
     expect(returnedAsset.payload.custodyStatus).toBe('returned');
   });
 
   it('opens offboarding asset clearance and clears it only after confirmed return', async () => {
-    const {service} = await setup();
+    const {storage, service} = await setup();
     let state = await service.createOperationalRecord('fixed-asset', {title: 'مانیتور خروج آزمایشی'});
     const asset = state.operationalRecords.find((record) => record.moduleId === 'fixed-asset' && record.title === 'مانیتور خروج آزمایشی')!;
     let challenge = await service.createAssetCustodyChallenge({assetRecordId: asset.id, personnelId: 'personnel-arman', action: 'delivery'});
-    await service.confirmAssetCustodyOtp(challenge.transferId, 'employee', challenge.employeeOtp);
-    await service.confirmAssetCustodyOtp(challenge.transferId, 'officer', challenge.officerOtp);
+    await confirmAssetCustodyBoth(storage, service, challenge.transferId);
+    await switchActiveUser(storage, 'persona-product-owner');
     state = await service.schedulePersonnelEnd('personnel-arman', {effectiveDate: todayIsoDate(), departureInitiator: 'organization', reason: 'خروج همراه با دارایی'});
     let offboarding = state.operationalRecords.find((item) => item.moduleId === 'offboarding' && item.ownerPersonnelId === 'personnel-arman')!;
     expect(offboarding.payload.assetClearanceStatus).toBe('pending');
     expect(offboarding.payload.pendingAssetIds).toContain(asset.id);
     challenge = await service.createAssetCustodyChallenge({assetRecordId: asset.id, personnelId: 'personnel-arman', action: 'return'});
-    await service.confirmAssetCustodyOtp(challenge.transferId, 'employee', challenge.employeeOtp);
-    state = await service.confirmAssetCustodyOtp(challenge.transferId, 'officer', challenge.officerOtp);
+    state = (await confirmAssetCustodyBoth(storage, service, challenge.transferId)).state;
     offboarding = state.operationalRecords.find((item) => item.id === offboarding.id)!;
     expect(offboarding.payload.assetClearanceStatus).toBe('clear');
     expect(offboarding.payload.pendingAssetIds).toEqual([]);
@@ -188,8 +223,7 @@ describe('asset custody with local OTP', () => {
     let state = await service.createOperationalRecord('fixed-asset', {title: 'تبلت خودخدمتی'});
     const asset = state.operationalRecords.find((record) => record.moduleId === 'fixed-asset' && record.title === 'تبلت خودخدمتی')!;
     let delivery = await service.createAssetCustodyChallenge({assetRecordId: asset.id, personnelId: 'personnel-arman', action: 'delivery'});
-    await service.confirmAssetCustodyOtp(delivery.transferId, 'employee', delivery.employeeOtp);
-    await service.confirmAssetCustodyOtp(delivery.transferId, 'officer', delivery.officerOtp);
+    await confirmAssetCustodyBoth(storage, service, delivery.transferId);
     await switchActiveUser(storage, 'persona-seller');
 
     const ownReturn = await service.createAssetCustodyChallenge({assetRecordId: asset.id, personnelId: 'personnel-arman', action: 'return', notes: 'عودت از حساب کاربری من'});
@@ -202,8 +236,7 @@ describe('asset custody with local OTP', () => {
     let state = await service.createOperationalRecord('fixed-asset', {title: 'لپ‌تاپ گزارش خرابی'});
     const asset = state.operationalRecords.find((record) => record.moduleId === 'fixed-asset' && record.title === 'لپ‌تاپ گزارش خرابی')!;
     const delivery = await service.createAssetCustodyChallenge({assetRecordId: asset.id, personnelId: 'personnel-arman', action: 'delivery'});
-    await service.confirmAssetCustodyOtp(delivery.transferId, 'employee', delivery.employeeOtp);
-    await service.confirmAssetCustodyOtp(delivery.transferId, 'officer', delivery.officerOtp);
+    await confirmAssetCustodyBoth(storage, service, delivery.transferId);
     await switchActiveUser(storage, 'persona-seller');
 
     state = await service.reportOwnAssetIssue({assetRecordId: asset.id, issueType: 'damage', description: 'صفحه‌نمایش دستگاه روشن نمی‌شود.'});
