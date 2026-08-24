@@ -7,7 +7,7 @@
 | شناسه | نیازمندی و معیار پذیرش | شاهد | وضعیت |
 |---|---|---|---|
 | FR-001 | برنامه بدون Server/API اجرا شود. | `main.tsx`, `FoundationApp.tsx`, build | `Verified` |
-| FR-002 | operational data فقط در IndexedDB باشد. | `storage.ts`, 95 stores | `Verified` |
+| FR-002 | operational data فقط در IndexedDB باشد. | `storage.ts`, 96 stores | `Verified` |
 | FR-003 | UI از StorageAdapter جدا باشد. | `service.ts`, `storage.ts` | `Verified` |
 | FR-004 | منو با permission مؤثر تغییر کند. | navigation و tests | `Verified` |
 | FR-005 | role + scope + resource + workflow هم‌زمان اعمال شوند. | `authorization.ts`, tests | `Verified` |
@@ -51,7 +51,7 @@
 
 ## پوشش آزمون
 
-`Verified` در آخرین اجرای ثبت‌شده: 17 فایل و 75 تست موفق. coverage عددی line/branch تولید نمی‌شود؛ بنابراین درصد پوشش `Unknown` است.
+`Verified` در آخرین اجرای ثبت‌شده در 2026-08-24: 22 فایل و 124 تست موفق. coverage عددی line/branch هنوز تولید نمی‌شود؛ بنابراین درصد پوشش `Unknown` است.
 
 ## قاعده تغییر وضعیت
 

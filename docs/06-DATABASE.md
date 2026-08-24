@@ -1,6 +1,6 @@
 # مدل داده و IndexedDB
 
-> **وضعیت سند:** `Verified` | **DB:** `tapra2_local` | **Schema:** 9
+> **وضعیت سند:** `Verified` | **DB:** `tapra2_local` | **Schema:** 10
 
 ## قرارداد ذخیره‌سازی
 
@@ -17,7 +17,7 @@
 | CRM/Sales | customer/contact/lead/opportunity/sales structure stores | `Verified` برای schema؛ عمق قابلیت متفاوت است |
 | Finance/Operations | purchase, treasury, invoice, payment, accounting, warehouse و سایر storeهای Catalog | `Verified` برای schema |
 
-فهرست کامل ۹۵ store در [`FOUNDATION_STORES`](../src/local-foundation/model.ts) مرجع نهایی است.
+فهرست کامل ۹۶ store در [`FOUNDATION_STORES`](../src/local-foundation/model.ts) مرجع نهایی است.
 
 ## Indexها
 
@@ -31,7 +31,7 @@
 
 ## نسخه و migration
 
-- `Verified` — schema version عددی 9 است و seed version رشته `complete-local-erp-v1.20-versioned-workflow-editing` است.
+- `Verified` — schema version عددی 10 است و seed version رشته `complete-local-erp-v1.28-unit-position-catalog` است.
 - `Verified` — ایجاد storeهای گمشده در `onupgradeneeded` انجام می‌شود.
 - `Conflict` — سند قدیمی `architecture/local-foundation.md` هنوز schema version 7 را ذکر می‌کند.
 - `Unknown` — migrationهای معنایی رسمی و قابل rollback برای تغییر شکل payloadها وجود ندارد.

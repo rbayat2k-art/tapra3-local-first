@@ -1,0 +1,8 @@
+interface:
+  display_name: "Tapra Feature Delivery"
+  short_description: "Deliver TAPRA features through durable quality gates"
+  default_prompt: "Use $tapra-feature-delivery to turn this product request into a reviewed, tested TAPRA change."
+
+policy:
+  allow_implicit_invocation: true
+

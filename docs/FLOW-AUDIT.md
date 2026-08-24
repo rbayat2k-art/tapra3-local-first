@@ -49,7 +49,7 @@ flowchart RL
   APP --> EVENTS["Audit و Domain Events ماندگار"]
   APP --> PORT["StorageAdapter"]
   PORT --> IDB["IndexedDBAdapter"]
-  IDB --> DB["IndexedDB نسخه ۹ / ۹۵ Store"]
+  IDB --> DB["IndexedDB نسخه ۱۰ / ۹۶ Store"]
   PREFS["ترجیحات ظاهر و منو"] --> LS["localStorage فقط برای UI"]
 ```
 

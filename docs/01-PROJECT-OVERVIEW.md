@@ -16,7 +16,7 @@ Tapra2 یک ERP فارسی RTL و single-company-first است که در مرحل
 
 ## مرزهای فعلی
 
-- `Verified` — داده عملیاتی: IndexedDB با نام `tapra2_local` و schema version 9.
+- `Verified` — داده عملیاتی: IndexedDB با نام `tapra2_local` و schema version 10.
 - `Verified` — ترجیحات UI: localStorage.
 - `Verified` — احراز هویت، Permission، Scope، Policy و Workflow Guard محلی هستند.
 - `Verified` — Snapshot ساده و رمزگذاری‌شده قابل Export/Import است.
@@ -31,9 +31,9 @@ Tapra2 یک ERP فارسی RTL و single-company-first است که در مرحل
 
 | شاخص | مقدار | وضعیت |
 |---|---:|---|
-| Object storeهای IndexedDB | 95 | `Verified` |
+| Object storeهای IndexedDB | 96 | `Verified` |
 | ماژول‌های Registry | 67 | `Verified` |
-| تست‌های Vitest فعال | 75 | `Verified` |
+| تست‌های Vitest فعال | 124 در 22 فایل | `Verified` |
 | commit پایه مخزن | `853dac0` | `Verified` |
 | شاخه جاری هنگام مستندسازی | `feature/workflow-management` | `Verified` |
 

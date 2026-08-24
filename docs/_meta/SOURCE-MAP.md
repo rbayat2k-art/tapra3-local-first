@@ -1,6 +1,6 @@
 # نقشه منشأ ادعاهای اسناد
 
-> **Git evidence:** branch `feature/workflow-management`، commit پایه `853dac0`، تغییرات محلی ثبت‌نشده نیز بررسی شده‌اند.
+> **Git evidence:** شاخه مستقل `fix/ocr-blockers-20260824` با پایه `feature/workflow-management@a0f02dd`، اعتبارسنجی 2026-08-24.
 
 | سند | ادعاهای اصلی | Source/Test/Config | اطمینان |
 |---|---|---|---|
@@ -10,7 +10,7 @@
 | `03-ARCHITECTURE.md` | لایه‌ها و جریان فرمان | `FoundationApp`, `service`, `storage`, `authorization` | بالا |
 | `04-DIRECTORY-STRUCTURE.md` | کد فعال/قدیمی | `tsconfig`, import graph، file inventory | بالا |
 | `05-BUSINESS-RULES.md` | قواعد سازمان/فروش/خرید/مساعده | service و helperهای دامنه + تست مستقیم | بالا |
-| `06-DATABASE.md` | IndexedDB، ۹۵ store، index، snapshot | `model.ts`, `storage.ts` | بالا |
+| `06-DATABASE.md` | IndexedDB، ۹۶ store، index، snapshot | `model.ts`, `storage.ts` | بالا |
 | `07-API.md` | نبود HTTP و مرز Service | `service.ts`, search HTTP/router | بالا |
 | `08-AUTHENTICATION-AND-ACCESS.md` | session، hash، scope، QA | service/auth/model + auth tests | بالا |
 | `09-SECURITY.md` | crypto، trust boundary، risk | storage/service/model/config | بالا برای فعلی؛ آینده Planned |
@@ -19,7 +19,7 @@
 | `12-OBSERVABILITY.md` | audit/event/notification | model/service/UI | بالا |
 | `13-INCIDENT-RESPONSE.md` | runbook پیشنهادی | کنترل‌های موجود + inference عملیاتی | متوسط/Documented |
 | `14-DEVELOPMENT.md` | فرمان‌های واقعی | `package.json`, CI/config؛ اجرای مستقیم | بالا |
-| `15-TESTING.md` | ۱۷ فایل/۷۵ تست و gapها | Vitest config + اجرای 2026-08-22 | بالا |
+| `15-TESTING.md` | ۲۲ فایل/۱۲۴ تست و gapها | Vitest config + اجرای 2026-08-24 | بالا |
 | `16-DEPLOYMENT-AND-OPERATIONS.md` | build استاتیک و CI | Vite/package/CI + build | بالا |
 | `17-DECISIONS.md` | ADRهای محصول/معماری | گفتگو + کد فعال | mixed؛ برچسب‌دار |
 | `18-CHANGELOG-AND-PROJECT-STATUS.md` | Git و قابلیت فعلی | git status/log + تست/build | بالا |

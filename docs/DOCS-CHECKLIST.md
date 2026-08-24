@@ -12,7 +12,7 @@
 | لینک داخلی Markdown | موفق | صفر لینک شکسته |
 | ساختار Markdown | موفق | صفر فایل خالی، صفر سند بدون H1 و صفر بلوک Mermaid بازمانده |
 | Secret assignment scan | موفق | صفر الگوی انتساب credential در مستندات جدید |
-| دامنه مستندشده | ثبت شد | ۶۷ ماژول، ۹۵ store و ۲۳ جزء اصلی در ماتریس پوشش |
+| دامنه مستندشده | ثبت شد | ۶۷ ماژول، ۹۶ store و ۲۳ جزء اصلی در ماتریس پوشش |
 
 > هشدار اندازه بسته، مانع Build نیست؛ یک بدهی عملکردی ثبت‌شده برای code splitting است. نبود E2E، benchmark و هدف رسمی RPO/RTO همچنان شکاف معتبر است و به‌عنوان موفقیت اعلام نشده است.
 
@@ -37,7 +37,7 @@
 - [x] Frontend React/Vite — ورودی و componentها مستند شدند.
 - [-] Mobile/Desktop native — وجود ندارد؛ UI وب responsive است.
 - [x] Shared utilities منتخب — در ساختار پوشه‌ها ثبت شدند.
-- [x] Database — IndexedDB و ۹۵ store مستند شد.
+- [x] Database — IndexedDB و ۹۶ store مستند شد.
 - [!] Migration معنایی — فقط upgrade ساختاری storeها وجود دارد؛ migration payload رسمی موجود نیست.
 - [-] Worker/Queue/Cron/Webhook/WebSocket/Cache خارجی — در runtime فعلی وجود ندارد.
 - [x] Storage — `StorageAdapter` و `IndexedDBAdapter` مستند شدند.
@@ -76,8 +76,8 @@
 ## ۵. دور دوم — Accuracy و Contradiction
 
 - [x] ۶۷ ماژول Registry مستقیماً از `erpCatalog.ts` شمارش شد.
-- [x] ۹۵ store مستقیماً از `FOUNDATION_STORES` شمارش شد.
-- [x] schema version 9 و seed version فعال تطبیق داده شد.
+- [x] ۹۶ store مستقیماً از `FOUNDATION_STORES` شمارش شد.
+- [x] schema version 10 و seed version فعال تطبیق داده شد.
 - [x] stateهای خرید/خزانه/مساعده با کد و تست مقایسه شدند.
 - [x] Permission/Scope/Maker-checker با guard و تست مقایسه شد.
 - [x] لینک‌های نسبی اسناد جدید بررسی شدند.
