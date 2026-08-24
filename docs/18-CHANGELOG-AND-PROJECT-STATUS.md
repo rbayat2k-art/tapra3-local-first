@@ -1,12 +1,12 @@
 # تغییرات و وضعیت پروژه
 
-> **آخرین Snapshot مستند:** ۱۴۰۵/۰۵/۳۱ (2026-08-22)
+> **آخرین اعتبارسنجی مستند:** ۱۴۰۵/۰۶/۰۲ (2026-08-24)
 
 ## وضعیت Git
 
 - `Verified` — repository عمومی مقصد: `rbayat2k-art/tapra3-local-first` طبق تاریخچه گفتگو و remote پروژه.
-- `Verified` — شاخه هنگام بررسی: `feature/workflow-management`.
-- `Verified` — commit پایه: `853dac0` با پیام انتشار snapshot محصول Local-first.
+- `Verified` — شاخه اصلاحات مستقل: `fix/ocr-blockers-20260824`؛ هنوز با شاخه اصلی ادغام نشده است.
+- `Verified` — commit پایه اصلاحات: `a0f02dd` از `feature/workflow-management`.
 - `Verified` — tag/release پایه `v1.0.0` به‌عنوان نقطه بازگشت ساخته شده است.
 - `Verified` — working tree هنگام مستندسازی تغییرات ثبت‌نشده مرتبط با Workflow management، مساعده، خرید، UI و سرویس دارد؛ این سند وضعیت همان working tree را نیز منعکس می‌کند.
 
@@ -24,7 +24,7 @@
 
 ## وضعیت کیفیت
 
-`Verified` — در پایان این بازبینی، `npm run typecheck` موفق شد، هر ۱۷ فایل تست و هر ۷۵ تست Vitest عبور کردند و production build نیز موفق بود. تنها هشدار build، بزرگ‌تر بودن chunk اصلی از 500 kB بود.
+`Verified` — در پایان اعتبارسنجی 2026-08-24، `npm run typecheck` موفق شد، هر ۲۲ فایل تست و هر ۱۲۴ تست Vitest عبور کردند و production build با ۱٬۷۳۱ ماژول موفق بود. تنها هشدار build، بزرگ‌تر بودن chunk اصلی از 500 kB بود.
 
 ## تغییرات مستندسازی این مرحله
 
