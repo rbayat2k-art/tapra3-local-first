@@ -21,6 +21,8 @@ For a non-trivial product change, do not start by editing code.
 
 Use the repository skill `$tapra-feature-delivery` for feature work or cross-domain behavior changes.
 
+For a bounded non-trivial feature, create and keep Spec Kit artifacts in order: `$speckit-specify` → optional `$speckit-clarify` → `$speckit-plan` → `$speckit-tasks` → optional `$speckit-analyze` → `$speckit-implement` → `$speckit-converge`. Spec Kit does not override TAPRA product/domain authority or the risk gates below.
+
 ## Multi-agent policy
 
 - For broad or high-risk changes, delegate independent read-only work to the project agents in `.codex/agents/`: requirement analysis, domain/architecture, UI, tests, and security as applicable.

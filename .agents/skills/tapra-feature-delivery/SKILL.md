@@ -27,6 +27,8 @@ Separate:
 
 If a missing answer changes policy, money, employment, retention, access, workflow responsibility, sensitive data, or irreversible behavior, label it `NEEDS PRODUCT DECISION` and stop before implementation.
 
+For a bounded feature, use `$speckit-specify` to persist the approved requirement. Use `$speckit-clarify` only when material ambiguity remains; the TAPRA brief and constitution remain the domain guardrails.
+
 ## 3. Map domain, architecture, and UI
 
 For domain/persistence/authorization work, ask `domain_architect` to trace the active path and return files in scope, files out of scope, invariants, reuse targets, migration/concurrency impact, and risks.
@@ -50,9 +52,13 @@ The implementation hand-off must contain:
 - Required positive and negative tests.
 - Rollback point and commit boundary.
 
+Persist the plan with `$speckit-plan`, generate dependency-ordered work with `$speckit-tasks`, and run `$speckit-analyze` before implementation for medium/high-risk cross-domain changes.
+
 ## 5. Implement with one owner
 
 Keep one implementation owner. Use `implementation_worker` only for a bounded, approved scope and avoid concurrent edits to the same files.
+
+Use `$speckit-implement` only after the requirement, architecture/UI impact, and test matrix are approved. Use `$speckit-converge` after implementation to append remaining work rather than hiding incomplete acceptance criteria.
 
 Require the implementation to:
 
@@ -89,4 +95,3 @@ Do not auto-fix an AI/scanner finding without validating its execution path and 
 3. Push only the isolated branch when authorized. Do not create/merge a PR unless requested.
 4. Report branch, base, commits, tests, warnings, unverified areas, and the exact next human decision.
 5. Do not say Done unless `../../../docs/engineering/definition-of-done.md` is satisfied for all applicable items.
-
