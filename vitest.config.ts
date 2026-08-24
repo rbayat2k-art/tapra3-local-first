@@ -12,6 +12,7 @@ export default defineConfig({
       include: ['src/local-foundation/**/*.{ts,tsx}'],
       exclude: [
         'src/local-foundation/**/*.test.{ts,tsx}',
+        'src/local-foundation/**/*.stories.{ts,tsx}',
         'src/local-foundation/**/*.d.ts',
       ],
     },
