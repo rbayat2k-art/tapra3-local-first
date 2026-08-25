@@ -35,10 +35,23 @@ test('افراد هم‌نام فقط با شناسه پایدار انتخاب 
   const approver = page.locator('.enterprise-table-row').filter({hasText: 'P-1503'});
   await expect(vice).toContainText('سودابه مرادی');
   await expect(approver).toContainText('سودابه مرادی');
+  await expect(vice).toContainText('نام مشابه؛ شناسه را بررسی کنید');
+  await expect(approver).toContainText('نام مشابه؛ شناسه را بررسی کنید');
   await approver.locator('.record-identity').click();
   const personnelDialog = page.getByRole('dialog');
   await expect(personnelDialog.getByRole('heading')).toContainText('P-1503');
   await expect(personnelDialog).toContainText('نام مشابه در سازمان وجود دارد');
+  await expect(personnelDialog).toContainText('P-3010');
+  await personnelDialog.getByRole('button', {name: 'بستن پنجره'}).click();
+
+  await page.getByRole('button', {name: 'پرسنل جدید'}).click();
+  const createDialog = page.getByRole('dialog');
+  await expect(createDialog).toBeVisible();
+  await createDialog.locator('label.field-label').filter({hasText: 'نام'}).first().locator('input').fill('سودابه');
+  await createDialog.locator('label.field-label').filter({hasText: 'نام خانوادگی'}).locator('input').fill('مرادی');
+  await expect(createDialog).toContainText('نام مشابه در سازمان وجود دارد');
+  await expect(createDialog).toContainText('P-3010');
+  await expect(createDialog).toContainText('P-1503');
 });
 
 test('مدیر دسترسی کنترل‌های نقش سطح‌بالا و grant عملیاتی را فعال نمی‌بیند', async ({page}) => {

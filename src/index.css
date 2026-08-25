@@ -2382,7 +2382,7 @@ input[dir="ltr"],code,.operational-row-number,.cell-date,.table-version { font-v
   white-space: nowrap !important;
   border: 0 !important;
 }
-.identity-name-warning{display:block;margin-top:3px;color:#a16207;font-size:11px;font-style:normal;font-weight:700}.identity-safety-notice{margin:0 24px 14px}.identity-safety-notice span{display:grid;gap:2px}
+.identity-name-warning{display:block;margin-top:3px;color:#a16207;font-size:11px;font-style:normal;font-weight:700}.identity-safety-notice{margin:0 24px 14px}.identity-safety-notice>span{display:grid;gap:3px}.identity-safety-notice small{max-width:900px;color:var(--muted);font-size:10px;line-height:1.8}
 .registration-review-body{flex:1;min-height:0;overflow-y:auto;border:0;margin:0;padding-block:16px}.registration-review-body:disabled{opacity:1}.registration-review-status{margin-inline-end:auto;color:var(--muted);font-size:.78rem}
 @media(max-width:640px){.dialog--registration-review .segmented-control{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));flex-wrap:unset}.dialog--registration-review footer{align-items:stretch;flex-wrap:wrap}.registration-review-status{width:100%;margin:0}.dialog--registration-review footer .button{flex:1}}
 
