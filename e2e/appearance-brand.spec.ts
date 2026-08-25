@@ -26,6 +26,10 @@ test('برند شاهراه و پالت رنگی مستقل از حالت روز
   await expect(page).toHaveTitle(/شاهراه/);
   await expect(page.locator('#main-sidebar .shahrah-brand')).toContainText('شاهراه');
   await expect(page.locator('#main-sidebar .shahrah-brand img')).toBeVisible();
+  await expect(page.locator('.hero-brand-heading')).toContainText('شاهراه');
+  await expect(page.locator('.hero-brand-large img')).toBeVisible();
+  expect((await page.locator('.hero-brand-large .shahrah-brand__mark').boundingBox())?.width ?? 0).toBeGreaterThan(180);
+  expect(await page.locator('#main-sidebar .shahrah-brand img').getAttribute('src')).toContain('shahrah-mark-light');
 
   await page.goto('/?page=appearance');
   const classic = page.getByRole('button', {name: /کلاسیک بنفش/});
@@ -97,6 +101,9 @@ test('صفحه ورود فقط برند شاهراه و لوگوی محلی را
   await expect(page.getByRole('heading', {name: 'خوش آمدید'})).toBeVisible();
   await expect(page.locator('.auth-brand')).toContainText('شاهراه');
   await expect(page.locator('.auth-brand img')).toBeVisible();
+  expect((await page.locator('.auth-brand .shahrah-brand__mark').boundingBox())?.width ?? 0).toBeGreaterThanOrEqual(80);
+  expect(await page.locator('.auth-brand img').getAttribute('src')).toContain('shahrah-mark-light');
+  expect(await page.locator('.auth-showcase').evaluate((element) => getComputedStyle(element, '::after').backgroundImage)).toContain('shahrah-mark-lines');
   await expect(page.locator('body')).not.toContainText(/تیرا|تپرا|تاپرا|Tira|Tapra/);
 
   const results = await new AxeBuilder({page}).withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa']).analyze();

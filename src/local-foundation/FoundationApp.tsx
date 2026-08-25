@@ -567,7 +567,7 @@ export function LocalFoundationApp() {
     <div className={`app-shell ${sidebarCollapsed ? 'app-shell--sidebar-collapsed' : ''}`} dir="rtl">
       <aside ref={sidebarRef} id="main-sidebar" role={mobileSidebarMode ? 'dialog' : undefined} aria-modal={mobileSidebarMode && mobileOpen ? true : undefined} aria-hidden={mobileSidebarMode && !mobileOpen ? true : undefined} aria-label={`منوی اصلی ${PRODUCT_NAME}`} className={`sidebar ${sidebarCollapsed ? 'sidebar--collapsed' : ''} ${mobileOpen ? 'sidebar--open' : ''}`}>
         <div className="brand-lockup">
-          <BrandMark variant={sidebarCollapsed && !mobileSidebarMode ? 'mark' : 'lockup'} />
+          <BrandMark variant={sidebarCollapsed && !mobileSidebarMode ? 'mark' : 'lockup'} tone="inverse" />
           <button
             className="icon-button sidebar-collapse-toggle"
             onClick={() => {setNavigationSearchActive(false);setSidebarCollapsed((value) => !value);}}
@@ -724,8 +724,8 @@ function Dashboard({state, navigate, destinations, usage, onDestination}: {
   return (
     <div className="page-stack">
       <section className="hero-card">
-        <BrandMark variant="mark" decorative className="hero-brand-watermark" />
         <div className="hero-copy">
+          <BrandMark variant="lockup" tone="inverse" decorative className="hero-brand-heading" />
           <span className="eyebrow"><span className="pulse-dot pulse-dot--light" /> {PRODUCT_NAME} آماده کار است</span>
           <h2>سلام {user.name.split(' ')[0]}،<br /><em>{PRODUCT_TAGLINE}</em></h2>
           <p>با نقش «{user.roleTitle}» وارد شده‌اید. منو و اقدام‌ها فقط بر اساس مجوز، محدوده و سیاست‌های واقعی همین کاربر محاسبه می‌شوند.</p>
@@ -735,9 +735,8 @@ function Dashboard({state, navigate, destinations, usage, onDestination}: {
             {auditVisible && <button className="button button--ghost-light" onClick={() => navigate('audit')}>دیدن ردپای رویدادها</button>}
           </div>
         </div>
-        <div className="identity-orbit">
-          <div className="orbit-ring orbit-ring--one" /><div className="orbit-ring orbit-ring--two" />
-          <div className="orbit-center" style={{background: user.accent}}><span>{user.initials}</span><small>{scopeLabel(user.scope)}</small></div>
+        <div className="hero-visual" aria-hidden="true">
+          <BrandMark variant="mark" tone="inverse" decorative className="hero-brand-large" />
           <div className="orbit-chip orbit-chip--top"><Shield size={15} /> {user.permissions.length.toLocaleString('en-US')} مجوز</div>
           <div className="orbit-chip orbit-chip--bottom"><Fingerprint size={15} /> Actor مستقل</div>
         </div>
@@ -1346,7 +1345,7 @@ function AuthPortal({currentUser, busy, globalError, onClearError, onClose, onRe
 
   return <main className="auth-page" dir="rtl">
     <section className="auth-showcase" aria-label={`معرفی سامانه ${PRODUCT_NAME}`}>
-      <BrandMark variant="lockup" showTagline className="auth-brand" />
+      <BrandMark variant="lockup" tone="inverse" showTagline className="auth-brand" />
       <div className="auth-showcase-copy">
         <span className="auth-kicker"><i /> محیط امن و محلی سازمان</span>
         <h1>همه‌چیز برای یک<br/><em>روز کاری منظم</em></h1>
