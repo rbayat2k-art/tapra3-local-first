@@ -28,7 +28,8 @@ import {FormValidationSummary, OptionalLabel, RequiredLabel, validateRequired} f
 import {SortHeader, useSortableRows, type SortColumn} from './Sorting';
 import {formatPersianDateTime} from './PersianDate';
 import {ProfileCompletionGate} from './ProfileCompletionGate';
-import {isProfileComplete, type ProfileCompletionInput} from './profileCompletion';
+import {type ProfileCompletionInput} from './profileCompletion';
+import {personnelCompletionSummary} from './personnelDocuments';
 import {MyAccountPage} from './MyAccountPage';
 import {dashboardCapabilitiesFor, type DashboardCapability} from './organizationAccess';
 import {digitsOnly, normalizeIranianMobile} from '../utils/operationalFormat';
@@ -65,7 +66,7 @@ const NAVIGATION: NavigationItem[] = [
   {id: 'units', title: 'واحدهای سازمانی', subtitle: 'ساختار، والد و مسئول', icon: GitBranch, anyPermissions: ['organization.units.view'], group: 'سازمان'},
   {id: 'branches', title: 'شعبه', subtitle: 'شعبه‌های شرکت به‌صورت مستقل', icon: Building2, anyPermissions: ['organization.units.view'], group: 'سازمان'},
   {id: 'positions', title: 'سمت‌ها', subtitle: 'جایگاه‌های سازمانی', icon: BriefcaseBusiness, anyPermissions: ['organization.positions.view'], group: 'سازمان'},
-  {id: 'personnel', title: 'پرسنل', subtitle: 'پرونده شغلی، فروش و صف تغییرات', icon: ContactRound, anyPermissions: ['organization.personnel.view', 'organization.personnel.changes.review'], group: 'سازمان'},
+  {id: 'personnel', title: 'پرسنل', subtitle: 'پرونده شغلی، فروش و صف تغییرات', icon: ContactRound, anyPermissions: ['organization.personnel.view', 'organization.personnel.changes.review', 'organization.personnel.documents.queue.view'], group: 'سازمان'},
   {id: 'sales-structures', title: 'ساختار فروش', subtitle: 'شعب، سرپرستان کال‌سنتر و زنجیره فروش', icon: Headphones, anyPermissions: ['organization.personnel.view'], group: 'سازمان'},
   {id: 'users', title: 'کاربران', subtitle: 'سازمان · کاربران', icon: UsersRound, anyPermissions: ['foundation.users.view'], group: 'سازمان'},
   {id: 'roles', title: 'نقش‌ها و دسترسی‌ها', subtitle: 'مجوز و محدوده مؤثر', icon: KeyRound, anyPermissions: ['organization.roles.view'], group: 'سازمان'},
@@ -352,9 +353,10 @@ export function LocalFoundationApp() {
   const currentNavigation = NAVIGATION.find((item) => item.id === page) ?? NAVIGATION[0];
   const currentPageTitle = page === 'account-security' ? 'حساب و امنیت' : currentNavigation.title;
   const activePersonnel = foundation.personnel.find((person) => person.id === user.personnelId || person.linkedUserId === user.id);
-  const profileIncomplete = !isProfileComplete(activePersonnel);
+  const profileIncomplete = !personnelCompletionSummary(activePersonnel, foundation.operationalRecords).complete;
+  const profileCompletionDeferred = Boolean(foundation.session.profileCompletionDeferredUntil && new Date(foundation.session.profileCompletionDeferredUntil).getTime() > Date.now());
 
-  if (profileIncomplete) return <ProfileCompletionGate state={foundation} busy={busy === 'profile-completion'} externalError={error} onSubmit={(input: ProfileCompletionInput) => run('profile-completion', () => service.completeOwnPersonnelProfile(input), 'اطلاعات الزامی پرونده تکمیل شد. اکنون می‌توانید از سامانه استفاده کنید.')} onSignOut={() => void signOut()} onEndQa={foundation.session.actingAdminUserId ? () => void endQaSession() : undefined}/>;
+  if (profileIncomplete && !profileCompletionDeferred && !foundation.session.actingAdminUserId) return <ProfileCompletionGate state={foundation} service={service} execute={run} busy={Boolean(busy)} externalError={error} externalStatus={toast} onSubmit={(input: ProfileCompletionInput) => run('profile-completion', () => service.completeOwnPersonnelProfile(input), 'اطلاعات و مدارک الزامی پرونده تکمیل شد. اکنون می‌توانید از سامانه استفاده کنید.')} onDefer={() => run('profile-defer', () => service.deferOwnPersonnelProfileCompletion(), 'یادآوری تکمیل پرونده برای هفت روز به تعویق افتاد.')} onSignOut={() => void signOut()} onEndQa={foundation.session.actingAdminUserId ? () => void endQaSession() : undefined}/>;
 
   return (
     <div className={`app-shell ${sidebarCollapsed ? 'app-shell--sidebar-collapsed' : ''}`} dir="rtl">
@@ -650,11 +652,12 @@ function DataPage({state, onExport, onEncrypted, onRestore, onReset, onGenerateQ
   const persona = state.activeUser;
   const mayExport = can(persona, 'foundation.data.export');
   const mayManage = can(persona, 'foundation.data.manage');
+  const hasSensitiveDocuments = state.operationalRecords.some((record) => record.moduleId === 'personnel-document' && typeof record.payload.fileRef === 'string');
   return (
     <div className="page-stack">
       <PageIntro icon={Database} eyebrow="Local data controls" title="پشتیبان‌گیری و بازیابی روی همین دستگاه" description="داده عملیاتی فقط در IndexedDB است. ترجیحات ظاهری تنها داده‌هایی هستند که در localStorage نگهداری می‌شوند." />
       <div className="data-grid">
-        <DataAction icon={Download} tone="violet" title="خروجی ساده" text="Snapshot نسخه‌دار با checksum بسازید." action="دریافت فایل JSON" disabled={!mayExport} onClick={onExport} />
+        <DataAction icon={Download} tone="violet" title="خروجی ساده" text={hasSensitiveDocuments ? 'به دلیل وجود مدارک هویتی غیرفعال است؛ خروجی رمزگذاری‌شده بگیرید.' : 'Snapshot نسخه‌دار با checksum بسازید.'} action={hasSensitiveDocuments ? 'نیازمند رمزگذاری' : 'دریافت فایل JSON'} disabled={!mayExport || hasSensitiveDocuments} onClick={onExport} />
         <DataAction icon={LockKeyhole} tone="blue" title="خروجی رمزگذاری‌شده" text="AES-GCM با رمزی که فقط شما می‌دانید." action="انتخاب رمز و دریافت" disabled={!mayExport} onClick={onEncrypted} />
         <DataAction icon={Upload} tone="green" title="بازیابی پشتیبان" text="فایل ساده یا رمزگذاری‌شده را اعتبارسنجی کنید." action="انتخاب فایل" disabled={!mayManage} onClick={onRestore} />
         <DataAction icon={RotateCcw} tone="danger" title="بازنشانی محلی" text="بازگشت به Seed قطعی ERP V1 بدون حذف تنظیمات ظاهری." action="بازنشانی داده" disabled={!mayManage} onClick={onReset} />
@@ -663,7 +666,7 @@ function DataPage({state, onExport, onEncrypted, onRestore, onReset, onGenerateQ
         <PanelHeading eyebrow="سلامت ذخیره‌سازی" title="وضعیت پایگاه داده این مرورگر" subtitle="آخرین وضعیت پس از هر Command دوباره از Adapter خوانده می‌شود." />
         <div className="storage-grid">
           <StorageDatum label="نام پایگاه" value="tapra2_local" mono />
-          <StorageDatum label="نسخه Schema" value="۵" />
+          <StorageDatum label="نسخه Schema" value={FOUNDATION_SCHEMA_VERSION.toLocaleString('fa-IR')} />
           <StorageDatum label="کاربران" value={state.users.length.toLocaleString('en-US')} />
           <StorageDatum label="رویدادهای Audit" value={state.audits.length.toLocaleString('en-US')} />
           <StorageDatum label="آخرین ثبت" value={formatDateTime(state.lastPersistedAt)} />

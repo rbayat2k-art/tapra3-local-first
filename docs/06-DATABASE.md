@@ -1,6 +1,6 @@
 # مدل داده و IndexedDB
 
-> **وضعیت سند:** `Verified` | **DB:** `tapra2_local` | **Schema:** 10
+> **وضعیت سند:** `Verified` | **DB:** `tapra2_local` | **Schema:** 11
 
 ## قرارداد ذخیره‌سازی
 

@@ -4,19 +4,28 @@ import {FormValidationSummary, OptionalLabel, RequiredLabel} from './FormValidat
 import type {FoundationState} from './model';
 import {missingProfileFields, validateRequiredProfile, type ProfileCompletionInput} from './profileCompletion';
 import {digitsOnly, normalizeBankCard, normalizeIranianMobile} from '../utils/operationalFormat';
+import type {LocalFoundationService} from './service';
+import {PersonnelDocumentsSection} from './PersonnelDocumentsSection';
+import {missingPersonnelDocuments, personnelVerificationSummary} from './personnelDocuments';
 
 interface Props {
   state: FoundationState;
   busy: boolean;
   externalError?: string | null;
+  externalStatus?: string | null;
   onSubmit: (input: ProfileCompletionInput) => Promise<boolean>;
   onSignOut: () => void;
   onEndQa?: () => void;
+  service: LocalFoundationService;
+  execute: (label: string, work: () => Promise<FoundationState>, success: string) => Promise<boolean>;
+  onDefer: () => Promise<boolean>;
 }
 
-export function ProfileCompletionGate({state, busy, externalError, onSubmit, onSignOut, onEndQa}: Props) {
+export function ProfileCompletionGate({state, busy, externalError, externalStatus, onSubmit, onSignOut, onEndQa, service, execute, onDefer}: Props) {
   const personnel = state.personnel.find((item) => item.id === state.activeUser.personnelId || item.linkedUserId === state.activeUser.id);
   const initialMissing = missingProfileFields(personnel);
+  const missingDocuments = personnel ? missingPersonnelDocuments(state.operationalRecords, personnel.id) : [];
+  const verification = personnelVerificationSummary(personnel, state.operationalRecords);
   const [form, setForm] = useState<ProfileCompletionInput>(() => ({
     nationalId: personnel?.nationalId ?? '',
     gender: personnel?.gender ?? 'unspecified',
@@ -41,11 +50,12 @@ export function ProfileCompletionGate({state, busy, externalError, onSubmit, onS
     <section className="profile-completion-card">
       <header className="profile-completion-heading">
         <span className="profile-completion-lock"><LockKeyhole size={24}/></span>
-        <div><span>تکمیل پرونده پرسنلی</span><h2 id="profile-completion-title">برای ادامه، اطلاعات الزامی خود را کامل کنید</h2><p>{state.activeUser.name}، تا زمانی که موارد زیر تکمیل و ذخیره نشوند، دسترسی به بخش‌های سامانه امکان‌پذیر نیست.</p></div>
+        <div><span>سطح {verification.level.toLocaleString('fa-IR')} · {verification.label}</span><h2 id="profile-completion-title">پرونده خود را کامل‌تر و قابل اعتمادتر کنید</h2><p>{state.activeUser.name}، می‌توانید اکنون تکمیل کنید یا بدون حذف دسترسی‌های فعلی، آن را برای هفت روز به بعد موکول کنید.</p></div>
       </header>
 
       {!personnel ? <div className="profile-completion-blocked"><AlertTriangle size={22}/><div><strong>پرونده پرسنلی به حساب شما متصل نیست</strong><p>برای اتصال پرونده با ادمین سازمان تماس بگیرید. تا آن زمان فقط می‌توانید از حساب خارج شوید.</p></div></div> : <>
-        <div className="profile-completion-notice"><AlertTriangle size={20}/><div><strong>{initialMissing.length.toLocaleString('en-US')} مورد الزامی نیاز به تکمیل دارد</strong><span>{initialMissing.map((item) => item.label).join('، ')}</span></div></div>
+        <div className="profile-completion-notice"><AlertTriangle size={20}/><div><strong>{(initialMissing.length + missingDocuments.length).toLocaleString('en-US')} مورد الزامی نیاز به تکمیل دارد</strong><span>{[...initialMissing.map((item) => item.label), ...missingDocuments.map((item) => item.label)].join('، ') || 'همه موارد الزامی تکمیل شده‌اند'}</span></div><button type="button" className="button button--secondary profile-completion-defer-shortcut" disabled={busy} onClick={() => void onDefer()}>فعلاً وارد می‌شوم؛ بعداً تکمیل می‌کنم</button></div>
+        {externalStatus && <div className="notice notice--success" role="status" aria-live="polite"><BadgeCheck size={18}/><span>{externalStatus}</span></div>}
         <FormValidationSummary errors={[...errors, ...(externalError ? [externalError] : [])]}/>
         <div className="profile-completion-sections">
           <ProfileSection icon={<UserRound size={19}/>} title="اطلاعات فردی و تماس">
@@ -65,11 +75,12 @@ export function ProfileCompletionGate({state, busy, externalError, onSubmit, onS
             <div className="profile-sensitive-note"><ShieldCheck size={18}/><span>مقدارهای بانکی در گزارش ممیزی نمایش داده نمی‌شوند؛ فقط وقوع تکمیل پرونده ثبت می‌شود.</span></div>
           </ProfileSection>
         </div>
+        <PersonnelDocumentsSection state={state} service={service} execute={execute} personnelId={personnel.id} mode="gate"/>
       </>}
 
       <footer className="profile-completion-actions">
         <div>{onEndQa && <button type="button" className="button button--secondary" onClick={onEndQa}>بازگشت به دسترسی ادمین</button>}<button type="button" className="button button--ghost" onClick={onSignOut}><LogOut size={17}/> خروج از حساب</button></div>
-        {personnel && <button type="button" className="button button--primary" disabled={busy} onClick={() => void submit()}><BadgeCheck size={18}/>{busy ? 'در حال ذخیره…' : 'ذخیره و ورود به سامانه'}</button>}
+        {personnel && <div><button type="button" className="button button--secondary" disabled={busy || Boolean(state.session.actingAdminUserId)} onClick={() => void onDefer()}>فعلاً وارد می‌شوم؛ بعداً تکمیل می‌کنم</button><button type="button" className="button button--primary" disabled={busy || missingDocuments.length > 0} onClick={() => void submit()}><BadgeCheck size={18}/>{busy ? 'در حال ذخیره…' : missingDocuments.length ? 'ابتدا مدارک اجباری را بارگذاری کنید' : 'ذخیره و ورود به سامانه'}</button></div>}
       </footer>
     </section>
   </div>;

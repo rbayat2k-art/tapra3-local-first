@@ -16,18 +16,23 @@ export const ORGANIZATION_ROLE_GRANTS: Record<string, PermissionCode[]> = {
     'organization.units.view', 'organization.positions.view',
     'organization.personnel.view', 'organization.personnel.manage',
     'organization.personnel.banking.view', 'organization.personnel.banking.manage',
+    'organization.personnel.documents.queue.view', 'organization.personnel.documents.content.read',
+    'organization.personnel.documents.manage',
   ],
   'role-hr-manager': [
     'foundation.dashboard.view', 'foundation.preferences.manage', 'organization.overview.view',
     'organization.units.view', 'organization.positions.view', 'foundation.users.view', 'organization.roles.view',
     'organization.personnel.view', 'organization.personnel.manage', 'organization.personnel.changes.review',
     'organization.personnel.banking.view', 'organization.personnel.banking.manage',
+    'organization.personnel.documents.queue.view', 'organization.personnel.documents.content.read',
+    'organization.personnel.documents.manage',
   ],
   'role-personnel-reviewer': [
     'foundation.dashboard.view', 'foundation.preferences.manage', 'organization.overview.view',
     'organization.units.view', 'organization.positions.view',
     'organization.personnel.view', 'organization.personnel.changes.review',
     'organization.personnel.banking.view',
+    'organization.personnel.documents.queue.view', 'organization.personnel.documents.content.read',
   ],
   'role-user-manager': [
     'foundation.dashboard.view', 'foundation.preferences.manage', 'organization.overview.view',

@@ -4,9 +4,9 @@
 
 ## مجموعه فعال
 
-Vitest فقط `src/local-foundation/**/*.test.ts` را در محیط Node اجرا می‌کند. هنگام این بررسی ۱۲۴ تست فعال در ۲۲ فایل وجود داشت.
+Vitest فقط `src/local-foundation/**/*.test.ts` را در محیط Node اجرا می‌کند. هنگام این بررسی ۱۳۸ تست فعال در ۲۴ فایل وجود داشت.
 
-`Verified` — اجرای نهایی در 2026-08-24: ۲۲ فایل تست موفق، ۱۲۴ تست موفق، بدون failure. این اجرا تست rollback تراکنش نهایی تحویل دارایی، انقضای مستقل OTP، مهاجرت افزایشی workflow و کنترل‌های دسترسی recruitment/lifecycle را نیز شامل می‌شود.
+`Verified` — اجرای نهایی در 2026-08-25: ۲۴ فایل تست موفق، ۱۳۸ تست موفق، بدون failure. این اجرا علاوه بر مسیرهای قبلی، validation فایل مدارک پرسنلی، جداسازی محتوای حساس، scope/ownership، rollback اتمیک، تعویق تکمیل و مهاجرت idempotent schema 10 به 11 را پوشش می‌دهد.
 
 ## پوشش رفتاری موجود
 
@@ -32,7 +32,7 @@ npm run build
 
 ## شکاف‌ها
 
-- `Verified` — تست E2E مرورگر، visual regression، accessibility automation، performance/load، coverage threshold و mutation testing وجود ندارد.
+- `Verified` — ۸ سناریوی Playwright برای ورود، accessibility، گردش‌کار، هفت خانواده پنجره عملیاتی، دارایی پرسنل و صف/مدارک پرسنلی وجود دارد؛ visual regression، performance/load، coverage threshold و mutation testing هنوز وجود ندارد.
 - `Unknown` — ماتریس رسمی مرورگر/موبایل و سقف ۵۰۰ کاربر به benchmark خودکار تبدیل نشده است.
 - `Planned` — Playwright برای flowهای Admin/Requester/Approver/Treasury، تست multi-tab واقعی، quota/restore، print snapshot و dataset بزرگ.
 

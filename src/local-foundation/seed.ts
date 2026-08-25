@@ -33,6 +33,7 @@ export const ADMIN_OPERATIONAL_PERMISSIONS: PermissionCode[] = [
   'organization.users.password.manage', 'organization.roles.view', 'organization.roles.manage', 'organization.roles.assign',
   'organization.personnel.view', 'organization.personnel.manage', 'organization.personnel.changes.review', 'organization.personnel.banking.view',
   'organization.personnel.banking.manage', 'organization.personnel.account.manage',
+  'organization.personnel.documents.queue.view', 'organization.personnel.documents.content.read', 'organization.personnel.documents.manage',
   'crm.customers.view', 'crm.customers.create', 'crm.customers.edit', 'crm.customers.status.manage',
   'crm.customers.merge', 'crm.customers.import',
   'organization.registrations.view', 'organization.registrations.review', 'foundation.qa.manage',
@@ -165,7 +166,7 @@ export const LOCAL_USERS: LocalUser[] = [
 ];
 
 const personnel = (input: Omit<PersonnelRecord, 'createdAt' | 'updatedAt' | 'gender' | 'maritalStatus' | 'employmentType' | 'startDate' | 'primaryMobile' | 'branchUnitId' | 'movements' | 'salesCompensationHistory'> & Partial<Pick<PersonnelRecord, 'gender' | 'maritalStatus' | 'employmentType' | 'startDate' | 'primaryMobile' | 'branchUnitId' | 'movements' | 'salesCompensationHistory'>>): PersonnelRecord => {
-  const record: PersonnelRecord = {gender: 'unspecified', maritalStatus: 'unspecified', employmentType: 'تمام‌وقت', startDate: '2024-01-01', primaryMobile: '', branchUnitId: 'unit-branch-central', movements: [], createdAt: SEED_TIME, updatedAt: SEED_TIME, ...input};
+  const record: PersonnelRecord = {companyId: COMPANY_ID, gender: 'unspecified', maritalStatus: 'unspecified', employmentType: 'تمام‌وقت', startDate: '2024-01-01', primaryMobile: '', branchUnitId: 'unit-branch-central', movements: [], createdAt: SEED_TIME, updatedAt: SEED_TIME, ...input};
   if (record.salesHierarchyLevel && !record.salesAssignmentStartDate) record.salesAssignmentStartDate = record.startDate;
   const initialCompensation = createDefaultSalesCompensationRecord(record, SEED_TIME);
   return initialCompensation && !record.salesCompensationHistory?.length ? {...record, salesCompensationHistory: [initialCompensation]} : record;
@@ -260,6 +261,9 @@ export const PERMISSION_CATALOG: PermissionCatalogItem[] = [
   {code: 'organization.personnel.banking.view', label: 'مشاهده اطلاعات بانکی', description: 'نمایش کنترل‌شده اطلاعات بانکی پرسنل', domain: 'organization', available: true},
   {code: 'organization.personnel.banking.manage', label: 'ویرایش اطلاعات بانکی', description: 'ثبت و ویرایش اطلاعات بانکی پرسنل', domain: 'organization', available: true},
   {code: 'organization.personnel.account.manage', label: 'مدیریت حساب پرسنل', description: 'ایجاد یا کنترل حساب کاربری مرتبط', domain: 'organization', available: true},
+  {code: 'organization.personnel.documents.queue.view', label: 'مشاهده نواقص مدارک پرسنلی', description: 'مشاهده صف محاسباتی اطلاعات و مدارک اجباری ناقص در محدوده مجاز', domain: 'organization', available: true},
+  {code: 'organization.personnel.documents.content.read', label: 'مشاهده محتوای مدارک پرسنلی', description: 'دریافت کنترل‌شده فایل مدارک هویتی در محدوده مجاز', domain: 'organization', available: true},
+  {code: 'organization.personnel.documents.manage', label: 'مدیریت مدارک پرسنلی', description: 'بارگذاری و جایگزینی نسخه‌دار مدارک برای پرسنل مجاز', domain: 'organization', available: true},
   {code: 'foundation.audit.view', label: 'مشاهده ممیزی', description: 'مشاهده تاریخچه اقدام‌ها', domain: 'management', available: true},
   {code: 'foundation.data.export', label: 'خروجی پشتیبان', description: 'دریافت Snapshot محلی', domain: 'management', available: true},
   {code: 'crm.customers.view', label: 'مشاهده مشتریان', description: 'مشاهده فهرست و Customer 360', domain: 'crm', available: true},

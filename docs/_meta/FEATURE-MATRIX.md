@@ -15,7 +15,7 @@
 | بازیابی حساب | کاربر | `RegistrationPage.tsx` | recovery/reminder؛ Audit | تطبیق username/mobile | کد موجود — `Implemented-Unverified` | SMS فقط preview محلی |
 | QA login | Admin/QA | User detail | `loginAsUser`, `endQaSession` | `foundation.users.qa_login`، بدون bypass | `authorization.test.ts` — `Verified` | فقط local acceptance |
 | تنظیمات ظاهر | هر کاربر | Visual settings | localStorage فقط UI preference | schema ساده preference | build/typecheck — `Implemented-Unverified` | بین دستگاه‌ها sync نمی‌شود |
-| Snapshot | Admin مجاز | Backup/Restore | export/import، 96 store | schema/store/checksum؛ AES-GCM اختیاری | storage path + build — `Verified` | backup خودکار ندارد |
+| Snapshot | Admin مجاز | Backup/Restore | export/import، 97 store | schema/store/checksum؛ AES-GCM اختیاری؛ فایل مدارک فقط در خروجی رمزگذاری‌شده | storage path + build — `Verified` | backup خودکار ندارد |
 | Audit/Event | Admin/Auditor | Audit page | `audit_events`, `domain_events` | actor/effective user/correlation | authorization/domain tests — `Verified` | tamper-proof سروری نیست |
 | Notification | کاربران | Bell/notification list | `notifications` | فقط recipient | purchase tests — `Verified` | Push خارجی ندارد |
 | Navigation | همه | Shell/sidebar/query route | History API | permission-aware | `navigationUrl.test.ts` — `Verified` | router framework ندارد |

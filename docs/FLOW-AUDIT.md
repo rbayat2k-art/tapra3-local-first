@@ -32,7 +32,7 @@
 | زیربخش‌ها و تعریف گردش‌کار | ۶۷ | `erpCatalog.ts` |
 | گردش‌کار تخصصی | ۳ | درخواست خرید، خزانه، مساعده |
 | Storeهای عملیاتی | ۹۵ | `FOUNDATION_STORES` در `model.ts` |
-| نسخه Schema | ۹ | `FOUNDATION_SCHEMA_VERSION` |
+| نسخه Schema | ۱۱ | `FOUNDATION_SCHEMA_VERSION` |
 | متدهای Async سرویس محلی | ۶۸ | `service.ts` |
 | نقش‌های Seed | ۸۴ | صفحه نقش‌ها در اجرای محلی |
 | کاربران Seed | ۲۷ | داشبورد/صفحه کاربران در اجرای محلی |

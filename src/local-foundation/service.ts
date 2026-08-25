@@ -5,7 +5,7 @@ import type {
   OrganizationalUnit, PermissionCode, PersonnelMovement, PersonnelMovementKind, PersonnelProfileChangeField,
   PersonnelProfileChangeRequest, PersonnelProfileChangeValues, PersonnelRecord, SalesStructure, SecurityRole, SnapshotManifest, ScopeType, UserStatus,
   OperationalRecord, OperationalRecordHistory, RegistrationRequest, QaDatasetManifest, ProjectionRecord, WorkflowDefinition, WorkflowApprovalStageDefinition, WorkflowRouteVariantDefinition,
-  FoundationStoreName, UserNotification,
+  FoundationStoreName, PersonnelDocumentFile, UserNotification,
 } from './model';
 import {FOUNDATION_SCHEMA_VERSION, FOUNDATION_SEED_VERSION, FOUNDATION_STORES} from './model';
 import {
@@ -26,13 +26,18 @@ import {activeWorkflowFor, approvalStagesForRoute, defaultApprovalStages, roleId
 import {createDefaultSalesCompensationRecord, validateSalesCompensationInput, type SalesCompensationInput} from './salesCompensation';
 import {canRequestWorkforceForBranch, resolveWorkforceRequestScope} from './salesManagementScope';
 import {normalizePositionUnitIds, positionSupportsUnit} from './unitPosition';
+import {
+  PERSONNEL_DOCUMENT_PERMISSION_MANAGE, PERSONNEL_DOCUMENT_PERMISSION_READ,
+  activePersonnelDocuments, missingPersonnelDocuments, personnelDocumentDefinition,
+  validatePersonnelDocumentFile, type PersonnelDocumentUploadInput,
+} from './personnelDocuments';
 
 export interface UnitInput {name: string; type: string; parentId?: string; managerUserId?: string; description: string;}
 export interface PositionInput {title: string; description: string; unitIds?: string[];}
 export interface UserInput {name: string; username: string; unitId: string; positionId: string; branchUnitId?: string; managerUserId?: string; roleIds: string[]; password?: string; personnelId?: string; permissionGrants?: PermissionCode[]; permissionDenials?: PermissionCode[];}
 export interface SelfCredentialChangeInput {currentPassword: string; username: string; newPassword?: string;}
 export interface RoleInput {name: string; description: string; scope: ScopeType; permissions: PermissionCode[];}
-export type PersonnelInput = Omit<PersonnelRecord, 'id' | 'createdAt' | 'updatedAt' | 'linkedUserId' | 'movements' | 'salesCompensationHistory' | 'lifecycleHistory' | 'pendingLifecycleChange'>;
+export type PersonnelInput = Omit<PersonnelRecord, 'id' | 'companyId' | 'createdAt' | 'updatedAt' | 'linkedUserId' | 'movements' | 'salesCompensationHistory' | 'lifecycleHistory' | 'pendingLifecycleChange'>;
 export type {SalesCompensationInput} from './salesCompensation';
 export interface PersonnelAssignmentChangeInput {kind: PersonnelMovementKind; targetId: string; targetPositionId?: string; effectiveDate: string; previousEndDate?: string; newStartDate?: string; reason: string;}
 export interface PersonnelEndInput {effectiveDate: string; departureInitiator: 'employee' | 'organization'; reason: string; handoffNotes?: string;}
@@ -430,7 +435,36 @@ export class LocalFoundationService {
     });
     const previousSession = (existing.sessions[0] as FoundationSession | undefined);
     const activeUserId = (seeded.users as LocalUser[]).some((user) => user.id === previousSession?.activeUserId) ? previousSession!.activeUserId : LOCAL_USERS[0].id;
-    seeded.sessions = [{id: 'active-session', activeUserId, signedOutAt: previousSession?.signedOutAt, switchedAt: now, version: (previousSession?.version ?? 3) + 1} satisfies FoundationSession];
+    seeded.sessions = [{id: 'active-session', activeUserId, signedOutAt: previousSession?.signedOutAt, profileCompletionDeferredUntil: previousSession?.profileCompletionDeferredUntil, switchedAt: now, version: (previousSession?.version ?? 3) + 1} satisfies FoundationSession];
+    const migratedDocumentFiles = [...(seeded.personnel_document_files as PersonnelDocumentFile[])];
+    const migratedFileIds = new Set(migratedDocumentFiles.map((item) => item.id));
+    const migratedDocuments: OperationalRecord[] = [];
+    for (const document of seeded.personnel_documents as OperationalRecord[]) {
+      const rawDataUrl = typeof document.payload.fileDataUrl === 'string' ? document.payload.fileDataUrl : undefined;
+      if (!rawDataUrl) {
+        migratedDocuments.push({...document, payload: removeSensitiveFileData(document.payload) as OperationalRecord['payload']});
+        continue;
+      }
+      const fileId = typeof document.payload.fileRef === 'string' ? document.payload.fileRef : `personnel-document-file-${document.id}`;
+      const ownerPersonnelId = document.ownerPersonnelId;
+      const protectedPersonnelId = ownerPersonnelId ?? `unresolved-owner:${document.id}`;
+      if (!migratedFileIds.has(fileId)) {
+        const file: PersonnelDocumentFile = {
+          id: fileId, recordId: document.id, personnelId: protectedPersonnelId, companyId: document.companyId,
+          mimeType: typeof document.payload.fileType === 'string' ? document.payload.fileType : legacyDataUrlMime(rawDataUrl),
+          size: typeof document.payload.fileSize === 'number' ? document.payload.fileSize : legacyDataUrlSize(rawDataUrl),
+          checksumSha256: await sha256DataUrlContent(rawDataUrl), dataUrl: rawDataUrl,
+          createdAt: document.createdAt, updatedAt: document.updatedAt,
+        };
+        migratedDocumentFiles.push(file); migratedFileIds.add(fileId);
+      }
+      migratedDocuments.push({...document, payload: {...(removeSensitiveFileData(document.payload) as OperationalRecord['payload']), fileRef: fileId, legacyUnclassified: true, legacyOwnerUnresolved: !ownerPersonnelId} as OperationalRecord['payload']});
+    }
+    seeded.personnel_documents = migratedDocuments;
+    seeded.personnel_document_files = migratedDocumentFiles;
+    seeded.workflow_history = (seeded.workflow_history as OperationalRecordHistory[]).map((item) => item.moduleId === 'personnel-document'
+      ? {...item, snapshot: removeSensitiveFileData(item.snapshot) as Record<string, unknown>}
+      : item);
     const systemMetaIds = new Set(['schemaVersion', 'seedVersion', 'seededAt', 'lastPersistedAt']);
     const preservedMeta = (existing.meta as MetaRecord[]).filter((item) => !systemMetaIds.has(item.id));
     seeded.meta = [...preservedMeta, {id: 'schemaVersion', value: FOUNDATION_SCHEMA_VERSION}, {id: 'seedVersion', value: FOUNDATION_SEED_VERSION}, {id: 'lastPersistedAt', value: now}];
@@ -458,7 +492,15 @@ export class LocalFoundationService {
       ? {...session, signedOutAt: session.switchedAt}
       : session;
     const normalizedAudits = audits.map((event) => ({...event, effectiveUserId: event.effectiveUserId ?? (event as AuditEvent & {effectivePersonaId?: string}).effectivePersonaId ?? activeUser.id}));
-    const operationalRecords = operationalParts.flat().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    const allOperationalRecords = operationalParts.flat();
+    const operationalRecords = allOperationalRecords.filter((record) => {
+      if (record.moduleId !== 'personnel-document') return true;
+      const target = personnel.find((item) => item.id === record.ownerPersonnelId);
+      if (!target) return false;
+      if (activeUser.personnelId === target.id || target.linkedUserId === activeUser.id) return true;
+      const permission = [PERSONNEL_DOCUMENT_PERMISSION_READ, PERSONNEL_DOCUMENT_PERMISSION_MANAGE, 'organization.personnel.documents.queue.view'].find((candidate) => activeUser.permissions.includes(candidate));
+      return Boolean(permission && authorize({persona: activeUser, permission, action: 'view', resource: this.personnelResource({users, activeUser} as FoundationState, target)}).allowed);
+    }).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     return {users, activeUser, session: effectiveSession, units: units.sort((a, b) => a.order - b.order || a.name.localeCompare(b.name, 'fa')), positions: positions.sort((a, b) => a.title.localeCompare(b.title, 'fa')), roles: roles.sort((a, b) => Number(b.protected) - Number(a.protected) || a.name.localeCompare(b.name, 'fa')), personnel: personnel.sort((a, b) => a.personnelCode.localeCompare(b.personnelCode, 'fa')), personnelProfileChangeRequests: profileChangeRequests.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), salesStructures: salesStructures.sort((a, b) => salesStructureSupervisorName(a, personnel).localeCompare(salesStructureSupervisorName(b, personnel), 'fa')), customers: customers.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), customerImports: customerImports.sort((a, b) => b.createdAt.localeCompare(a.createdAt)), workflows, workflowVersions, operationalRecords, operationalHistory: history.sort((a, b) => b.occurredAt.localeCompare(a.occurredAt)), notifications: notifications.filter((item) => item.userId === activeUser.id).sort((a, b) => b.createdAt.localeCompare(a.createdAt)), registrationRequests: registrations.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), qaDataset: qaManifests.find((item) => item.id === 'large-qa') ?? {id: 'large-qa', status: 'empty', roleCount: 0, userCount: 0, seed: 'tapra2-large-qa-v1'}, projections, audits: normalizedAudits.sort((a, b) => b.sequence - a.sequence), recordCount: records.length + personnel.length + profileChangeRequests.length + salesStructures.length + customers.length + operationalRecords.length + notifications.length, lastPersistedAt: typeof persistedAt?.value === 'string' ? persistedAt.value : effectiveSession.switchedAt};
   }
 
@@ -663,7 +705,7 @@ export class LocalFoundationService {
     validatePersonnelInput(inputWithSystemCode, state);
     const now = new Date().toISOString();
     const normalizedInput = normalizePersonnelInput(inputWithSystemCode);
-    const baseRecord: PersonnelRecord = {...normalizedInput, id: newId('personnel'), movements: [], lifecycleHistory: [{id: newId('employment-event'), kind: 'employment_started', effectiveDate: normalizedInput.startDate, reason: 'ایجاد پرونده و شروع همکاری', actorId: actor.actorId, actorName: actor.name, recordedAt: now, employmentType: normalizedInput.employmentType, unitId: normalizedInput.unitId, positionId: normalizedInput.positionId, branchUnitId: normalizedInput.branchUnitId, managerPersonnelId: normalizedInput.managerPersonnelId}], createdAt: now, updatedAt: now};
+    const baseRecord: PersonnelRecord = {...normalizedInput, id: newId('personnel'), companyId: actor.companyId, movements: [], lifecycleHistory: [{id: newId('employment-event'), kind: 'employment_started', effectiveDate: normalizedInput.startDate, reason: 'ایجاد پرونده و شروع همکاری', actorId: actor.actorId, actorName: actor.name, recordedAt: now, employmentType: normalizedInput.employmentType, unitId: normalizedInput.unitId, positionId: normalizedInput.positionId, branchUnitId: normalizedInput.branchUnitId, managerPersonnelId: normalizedInput.managerPersonnelId}], createdAt: now, updatedAt: now};
     const initialCompensation = createDefaultSalesCompensationRecord(baseRecord, now, actor.actorId, actor.name);
     const record: PersonnelRecord = initialCompensation ? {...baseRecord, salesCompensationHistory: [initialCompensation]} : baseRecord;
     await this.storage.put('personnel', record);
@@ -856,8 +898,105 @@ export class LocalFoundationService {
     return this.loadState();
   }
 
+  private personnelResource(state: FoundationState, personnel: PersonnelRecord) {
+    const linkedUser = state.users.find((user) => user.id === personnel.linkedUserId || user.personnelId === personnel.id);
+    const unitCompanyIds = [...new Set(state.users.filter((user) => user.unitId === personnel.unitId).map((user) => user.companyId))];
+    const companyId = personnel.companyId ?? linkedUser?.companyId ?? (unitCompanyIds.length === 1 ? unitCompanyIds[0] : `unresolved-company:${personnel.id}`);
+    return {id: personnel.id, companyId, unitId: personnel.unitId, ownerId: linkedUser?.actorId, createdBy: 'system', state: personnel.employmentStatus};
+  }
+
+  private assertPersonnelDocumentAccess(state: FoundationState, personnel: PersonnelRecord, permission: string): void {
+    const actor = state.activeUser;
+    if (!actor.permissions.includes(permission)) throw new Error('مجوز لازم برای مدارک پرسنلی را ندارید.');
+    const decision = authorize({persona: actor, permission, resource: this.personnelResource(state, personnel), action: permission === PERSONNEL_DOCUMENT_PERMISSION_MANAGE ? 'edit' : 'view'});
+    if (!decision.allowed) throw new Error(decision.reasonFa);
+  }
+
+  async savePersonnelDocument(personnelId: string, input: PersonnelDocumentUploadInput): Promise<FoundationState> {
+    const state = await this.loadState();
+    const effectiveUser = state.activeUser;
+    if (state.session.actingAdminUserId) throw new Error('ثبت مدرک هویتی در حالت مشاهده دسترسی مجاز نیست؛ کاربر باید مستقیماً وارد شود.');
+    const personnel = state.personnel.find((item) => item.id === personnelId);
+    if (!personnel) throw new Error('پرونده پرسنلی پیدا نشد.');
+    if (effectiveUser.status !== 'active' || personnel.employmentStatus === 'ended') throw new Error('برای حساب یا همکاری غیرفعال امکان ثبت مدرک وجود ندارد.');
+    const ownPersonnel = effectiveUser.personnelId === personnel.id || personnel.linkedUserId === effectiveUser.id;
+    if (!ownPersonnel) this.assertPersonnelDocumentAccess(state, personnel, PERSONNEL_DOCUMENT_PERMISSION_MANAGE);
+    const definition = personnelDocumentDefinition(input.kind);
+    const validated = await validatePersonnelDocumentFile(input.kind, input);
+    const currentDocuments = activePersonnelDocuments(state.operationalRecords, personnel.id);
+    const requestedReplacement = input.replaceDocumentId
+      ? currentDocuments.find((record) => record.id === input.replaceDocumentId && record.payload.documentKind === input.kind)
+      : undefined;
+    if (input.replaceDocumentId && !requestedReplacement) throw new Error('نسخه فعالی که باید جایگزین شود پیدا نشد.');
+    const implicitReplacement = !definition.repeatable
+      ? currentDocuments.find((record) => record.payload.documentKind === input.kind)
+      : undefined;
+    const replaced = requestedReplacement ?? implicitReplacement;
+    const now = new Date().toISOString();
+    const recordId = newId('personnel-document');
+    const fileId = newId('personnel-document-file');
+    const module = ERP_MODULES.find((item) => item.id === 'personnel-document');
+    if (!module) throw new Error('ماژول مدارک پرسنلی آماده نیست.');
+    const record: OperationalRecord = {
+      id: recordId, moduleId: 'personnel-document', domain: module.domain,
+      trackingCode: `DOC-${new Date().getFullYear()}-${recordId.slice(-8).toUpperCase()}`,
+      title: `${definition.label} — ${personnel.firstName} ${personnel.lastName}`,
+      description: definition.description, status: 'linked', priority: definition.required ? 'high' : 'normal',
+      companyId: this.personnelResource(state, personnel).companyId, unitId: personnel.unitId, branchUnitId: personnel.branchUnitId,
+      ownerPersonnelId: personnel.id, assigneeUserId: effectiveUser.id,
+      createdByActorId: effectiveUser.actorId, createdByUserId: effectiveUser.id, updatedByActorId: effectiveUser.actorId,
+      version: 1,
+      payload: {
+        documentKind: input.kind, documentLabel: definition.label, required: definition.required,
+        fileRef: fileId, fileName: validated.fileName, mimeType: validated.mimeType, fileSize: validated.size,
+        checksumSha256: validated.checksumSha256, uploadedAt: now, uploadedByUserId: effectiveUser.id,
+        uploadedByName: effectiveUser.name, uploadedBySelfService: ownPersonnel,
+        replacesDocumentId: replaced?.id ?? null,
+      },
+      createdAt: now, updatedAt: now,
+    };
+    const file: PersonnelDocumentFile = {id: fileId, recordId, personnelId: personnel.id, companyId: record.companyId, mimeType: validated.mimeType, size: validated.size, checksumSha256: validated.checksumSha256, dataUrl: validated.dataUrl, createdAt: now, updatedAt: now};
+    const replacedRecord = replaced ? {...replaced, status: 'replaced', payload: {...replaced.payload, replacedByDocumentId: recordId}, updatedByActorId: effectiveUser.actorId, updatedAt: now, version: replaced.version + 1} : undefined;
+    const auditActor = await this.resolveAuditActor(effectiveUser);
+    const correlationId = newId('correlation');
+    await this.storage.transaction(['personnel_documents', 'personnel_document_files', 'workflow_history', 'audit_events', 'domain_events', 'meta'], 'readwrite', async (tx) => {
+      const activeSameKind = (await tx.getAll<OperationalRecord>('personnel_documents')).filter((item) => item.ownerPersonnelId === personnel.id && item.status === 'linked' && item.payload.documentKind === input.kind);
+      if (!definition.repeatable && (replaced ? activeSameKind.some((item) => item.id !== replaced.id) : activeSameKind.length > 0)) {
+        throw new Error('نسخه مدرک در تب دیگری تغییر کرده است. صفحه را تازه‌سازی کنید.');
+      }
+      if (replaced) {
+        const latest = await tx.get<OperationalRecord>('personnel_documents', replaced.id);
+        if (!latest || latest.version !== replaced.version || latest.status !== 'linked') throw new Error('نسخه مدرک در تب دیگری تغییر کرده است. صفحه را تازه‌سازی کنید.');
+        await tx.put('personnel_documents', replacedRecord!);
+      }
+      const audits = await tx.getAll<AuditEvent>('audit_events');
+      await tx.put('personnel_documents', record);
+      await tx.put('personnel_document_files', file);
+      await tx.put('workflow_history', {id: newId('history'), recordId, moduleId: 'personnel-document', sequence: 1, eventType: replaced ? 'corrected' : 'created', actorId: effectiveUser.actorId, actorName: effectiveUser.name, effectiveUserId: effectiveUser.id, snapshot: {documentKind: input.kind, required: definition.required, checksumSha256: validated.checksumSha256, replacesDocumentId: replaced?.id ?? null}, occurredAt: now} satisfies OperationalRecordHistory);
+      await tx.put('audit_events', {id: newId('audit'), sequence: nextSequence(audits), companyId: record.companyId, category: 'authorization', action: replaced ? 'organization.personnel.document_replaced' : 'organization.personnel.document_uploaded', actorId: auditActor.actorId, actorName: auditActor.name, effectiveUserId: effectiveUser.id, occurredAt: now, summary: `${definition.label} پرونده «${personnel.firstName} ${personnel.lastName}» ${replaced ? 'جایگزین' : 'ثبت'} شد.`, outcome: 'success', correlationId, metadata: {personnelId: personnel.id, recordId, documentKind: input.kind, completedBySelfService: ownPersonnel, replacedDocumentId: replaced?.id ?? null}} satisfies AuditEvent);
+      await tx.put('domain_events', {id: newId('event'), aggregateType: 'personnel-document', aggregateId: recordId, eventType: replaced ? 'PersonnelDocumentReplaced' : 'PersonnelDocumentUploaded', actorId: auditActor.actorId, occurredAt: now, correlationId, payload: {personnelId: personnel.id, documentKind: input.kind, required: definition.required, checksumSha256: validated.checksumSha256, effectiveUserId: effectiveUser.id}} satisfies DomainEvent);
+      await tx.put('meta', {id: 'lastPersistedAt', value: now});
+    });
+    return this.loadState();
+  }
+
+  async getPersonnelDocumentFile(recordId: string): Promise<PersonnelDocumentFile> {
+    const state = await this.loadState();
+    if (state.session.actingAdminUserId) throw new Error('دریافت مدرک هویتی در حالت مشاهده دسترسی مجاز نیست.');
+    const record = state.operationalRecords.find((item) => item.id === recordId && item.moduleId === 'personnel-document');
+    if (!record || typeof record.payload.fileRef !== 'string') throw new Error('فایل مدرک پیدا نشد.');
+    const personnel = state.personnel.find((item) => item.id === record.ownerPersonnelId);
+    if (!personnel) throw new Error('پرونده مرتبط پیدا نشد.');
+    const ownPersonnel = state.activeUser.personnelId === personnel.id || personnel.linkedUserId === state.activeUser.id;
+    if (!ownPersonnel) this.assertPersonnelDocumentAccess(state, personnel, PERSONNEL_DOCUMENT_PERMISSION_READ);
+    const file = await this.storage.get<PersonnelDocumentFile>('personnel_document_files', record.payload.fileRef);
+    if (!file || file.recordId !== record.id || file.personnelId !== personnel.id) throw new Error('محتوای فایل با پرونده مطابقت ندارد.');
+    return file;
+  }
+
   async completeOwnPersonnelProfile(input: ProfileCompletionInput): Promise<FoundationState> {
     const state = await this.loadState();
+    if (state.session.actingAdminUserId) throw new Error('تکمیل پرونده در حالت مشاهده دسترسی مجاز نیست؛ کاربر باید مستقیماً وارد شود.');
     const effectiveUser = state.activeUser;
     const actor = state.session.actingAdminUserId ? state.users.find((user) => user.id === state.session.actingAdminUserId) ?? effectiveUser : effectiveUser;
     const existing = state.personnel.find((person) => person.id === effectiveUser.personnelId || person.linkedUserId === effectiveUser.id);
@@ -877,9 +1016,40 @@ export class LocalFoundationService {
     if (errors.length) throw new Error(errors[0]);
     if (!isValidIranianNationalId(normalizedProfile.nationalId)) throw new Error('کد ملی معتبر نیست.');
     if (state.personnel.some((person) => person.id !== existing.id && normalizeNationalId(person.nationalId) === normalizedProfile.nationalId)) throw new Error('این کد ملی قبلاً برای پرونده دیگری ثبت شده است.');
+    const missingDocuments = missingPersonnelDocuments(state.operationalRecords, existing.id);
+    if (missingDocuments.length) throw new Error(`مدارک اجباری پرونده کامل نیست: ${missingDocuments.map((item) => item.label).join('، ')}.`);
     const updated: PersonnelRecord = {...existing, ...normalizedProfile, updatedAt: new Date().toISOString()};
-    await this.storage.put('personnel', updated);
-    await this.appendAudit({actor, effectiveUser, category: 'authorization', action: 'organization.personnel.profile_completed', summary: `اطلاعات الزامی پرونده «${updated.firstName} ${updated.lastName}» تکمیل شد.`, outcome: 'success', metadata: {personnelId: updated.id, completedBySelfService: true}});
+    const now = updated.updatedAt;
+    const auditActor = await this.resolveAuditActor(effectiveUser);
+    const correlationId = newId('correlation');
+    await this.storage.transaction(['personnel', 'audit_events', 'domain_events', 'meta'], 'readwrite', async (tx) => {
+      const audits = await tx.getAll<AuditEvent>('audit_events');
+      await tx.put('personnel', updated);
+      await tx.put('audit_events', {id: newId('audit'), sequence: nextSequence(audits), companyId: effectiveUser.companyId, category: 'authorization', action: 'organization.personnel.profile_completed', actorId: auditActor.actorId, actorName: auditActor.name, effectiveUserId: effectiveUser.id, occurredAt: now, summary: `اطلاعات الزامی پرونده «${updated.firstName} ${updated.lastName}» تکمیل شد.`, outcome: 'success', correlationId, metadata: {personnelId: updated.id, completedBySelfService: true}} satisfies AuditEvent);
+      await tx.put('domain_events', {id: newId('event'), aggregateType: 'personnel', aggregateId: updated.id, eventType: 'PersonnelProfileCompleted', actorId: auditActor.actorId, occurredAt: now, correlationId, payload: {effectiveUserId: effectiveUser.id}} satisfies DomainEvent);
+      await tx.put('meta', {id: 'lastPersistedAt', value: now});
+    });
+    return this.loadState();
+  }
+
+  async deferOwnPersonnelProfileCompletion(): Promise<FoundationState> {
+    const state = await this.loadState();
+    const user = state.activeUser;
+    if (state.session.actingAdminUserId) throw new Error('تعویق تکمیل پرونده در حالت مشاهده دسترسی مجاز نیست.');
+    if (!user.personnelId && !state.personnel.some((person) => person.linkedUserId === user.id)) throw new Error('پرونده پرسنلی به این حساب متصل نشده است.');
+    const now = new Date();
+    const deferredUntil = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString();
+    const occurredAt = now.toISOString();
+    const correlationId = newId('correlation');
+    await this.storage.transaction(['sessions', 'meta', 'audit_events', 'domain_events'], 'readwrite', async (tx) => {
+      const audits = await tx.getAll<AuditEvent>('audit_events');
+      const session: FoundationSession = {...state.session, profileCompletionDeferredUntil: deferredUntil, version: state.session.version + 1};
+      await tx.put('sessions', session);
+      await tx.put('meta', {id: `profileCompletionDeferredUntil:${user.id}`, value: deferredUntil});
+      await tx.put('meta', {id: 'lastPersistedAt', value: occurredAt});
+      await tx.put('audit_events', {id: newId('audit'), sequence: nextSequence(audits), companyId: user.companyId, category: 'authorization', action: 'organization.personnel.profile_completion_deferred', actorId: user.actorId, actorName: user.name, effectiveUserId: user.id, occurredAt, summary: `تکمیل پرونده «${user.name}» برای هفت روز به تعویق افتاد.`, outcome: 'info', correlationId, metadata: {userId: user.id, deferredUntil}} satisfies AuditEvent);
+      await tx.put('domain_events', {id: newId('event'), aggregateType: 'personnel', aggregateId: user.personnelId ?? user.id, eventType: 'PersonnelProfileCompletionDeferred', actorId: user.actorId, occurredAt, correlationId, payload: {userId: user.id, deferredUntil}} satisfies DomainEvent);
+    });
     return this.loadState();
   }
 
@@ -1207,7 +1377,8 @@ export class LocalFoundationService {
     const correlationId = newId('correlation');
     await this.storage.transaction(['sessions', 'audit_events', 'domain_events', 'meta'], 'readwrite', async (tx) => {
       const audits = await tx.getAll<AuditEvent>('audit_events');
-      const session: FoundationSession = {id: 'active-session', activeUserId: target.id, switchedAt: now, version: state.session.version + 1};
+      const deferred = await tx.get<MetaRecord>('meta', `profileCompletionDeferredUntil:${target.id}`);
+      const session: FoundationSession = {id: 'active-session', activeUserId: target.id, profileCompletionDeferredUntil: typeof deferred?.value === 'string' ? deferred.value : undefined, switchedAt: now, version: state.session.version + 1};
       const audit: AuditEvent = {id: newId('audit'), sequence: nextSequence(audits), companyId: target.companyId, category: 'session', action: 'organization.session.signed_in', actorId: target.actorId, actorName: target.name, effectiveUserId: target.id, occurredAt: now, summary: `کاربر «${target.name}» با حساب محلی وارد شد.`, reason: 'ورود مستقیم کاربر', outcome: 'success', correlationId, metadata: {username: target.username, previousUserId: previous.id}};
       await Promise.all([
         tx.put('sessions', session), tx.put('audit_events', audit),
@@ -1683,6 +1854,7 @@ export class LocalFoundationService {
   private async createOperationalRecordInternal(moduleId: string, input: OperationalRecordInput, allowSpecialized: boolean): Promise<FoundationState> {
     const module = ERP_MODULES.find((item) => item.id === moduleId); if (!module) throw new Error('ماژول عملیاتی پیدا نشد.');
     if (moduleId === 'recruitment-case' && !allowSpecialized) throw new Error('پرونده جذب فقط از مسیر اختصاصی اعلام نیاز نیرو قابل ایجاد است.');
+    if (moduleId === 'personnel-document' && !allowSpecialized) throw new Error('مدرک پرسنلی فقط از بخش «مدارک پرسنلی» پرونده یا حساب خود فرد ثبت می‌شود.');
     const state = await this.loadState(); const effectiveUser = state.activeUser;
     requirePermission(effectiveUser, permissionFor(moduleId, 'create'), 'مجوز ایجاد رکورد در این ماژول را ندارید.');
     const preparedInput = moduleId === 'purchase-request' ? preparePurchaseRequestInput(state, input) : input;
@@ -1743,6 +1915,7 @@ export class LocalFoundationService {
 
   async updateOperationalRecord(moduleId: string, recordId: string, expectedVersion: number, input: Partial<OperationalRecordInput>): Promise<FoundationState> {
     const module = ERP_MODULES.find((item) => item.id === moduleId); if (!module) throw new Error('ماژول عملیاتی پیدا نشد.');
+    if (moduleId === 'personnel-document') throw new Error('جایگزینی مدرک فقط از بخش «مدارک پرسنلی» انجام می‌شود تا نسخه قبلی حفظ شود.');
     const state = await this.loadState(); const effectiveUser = state.activeUser; requirePermission(effectiveUser, permissionFor(moduleId, 'edit'), 'مجوز ویرایش این رکورد را ندارید.');
     const record = state.operationalRecords.find((item) => item.id === recordId && item.moduleId === moduleId); if (!record) throw new Error('رکورد پیدا نشد.');
     this.assertRecordScope(effectiveUser, record, 'edit'); if (record.version !== expectedVersion) throw new Error('این رکورد در تب دیگری تغییر کرده است. تازه‌سازی کنید و دوباره تلاش کنید.');
@@ -1757,6 +1930,7 @@ export class LocalFoundationService {
   }
 
   async transitionOperationalRecord(moduleId: string, recordId: string, transitionId: string, reason = '', idempotencyKey?: string): Promise<FoundationState> {
+    if (moduleId === 'personnel-document') throw new Error('گردش مدرک پرسنلی فقط از بخش تخصصی مدارک مدیریت می‌شود.');
     const module = ERP_MODULES.find((item) => item.id === moduleId); if (!module) throw new Error('ماژول عملیاتی پیدا نشد.');
     const state = await this.loadState(); const effectiveUser = state.activeUser; const record = state.operationalRecords.find((item) => item.id === recordId && item.moduleId === moduleId); if (!record) throw new Error('رکورد پیدا نشد.');
     const workflow = workflowForRecord(state, module, record);
@@ -2125,6 +2299,7 @@ export class LocalFoundationService {
   }
 
   async assignOperationalRecord(moduleId: string, recordId: string, assigneeUserId: string, reason: string): Promise<FoundationState> {
+    if (moduleId === 'personnel-document') throw new Error('تخصیص مدرک پرسنلی از مسیر عمومی مجاز نیست.');
     const module = ERP_MODULES.find((item) => item.id === moduleId); if (!module) throw new Error('ماژول عملیاتی پیدا نشد.');
     const state = await this.loadState(); const effectiveUser = state.activeUser; requirePermission(effectiveUser, permissionFor(moduleId, 'manage'), 'مجوز تخصیص این رکورد را ندارید.');
     const record = state.operationalRecords.find((item) => item.id === recordId); const target = state.users.find((item) => item.id === assigneeUserId && item.status === 'active'); if (!record || !target) throw new Error('رکورد یا کاربر مقصد معتبر نیست.'); if (reason.trim().length < 3) throw new Error('دلیل تخصیص را وارد کنید.');
@@ -2177,7 +2352,7 @@ export class LocalFoundationService {
       if (profileErrors.length) throw new Error(`درخواست قدیمی ناقص است: ${profileErrors[0]}`);
       const primary = state.roles.find((role) => role.id === roleIds[0])!;
       const [firstName, ...lastParts] = request.fullName.split(/\s+/); const personnelId = newId('personnel'); const userId = newId('user');
-      const personnel: PersonnelRecord = {id: personnelId, personnelCode: nextPersonnelCode(state.personnel), firstName, lastName: lastParts.join(' ') || 'ثبت‌نام', nationalId: request.nationalId, gender: request.gender, maritalStatus: 'unspecified', primaryMobile: request.mobile, secondaryMobile: request.secondaryMobile, personalEmail: request.email, province: request.province, city: request.city, address: request.address, postalCode: request.postalCode, bankName: request.bankName, cardNumber: request.cardNumber, employmentStatus: 'active', employmentType: 'در انتظار تعیین نوع همکاری', startDate: now.slice(0,10), unitId: 'unit-management', positionId: 'position-specialist', linkedUserId: userId, createdAt: now, updatedAt: now};
+      const personnel: PersonnelRecord = {id: personnelId, companyId: COMPANY_ID, personnelCode: nextPersonnelCode(state.personnel), firstName, lastName: lastParts.join(' ') || 'ثبت‌نام', nationalId: request.nationalId, gender: request.gender, maritalStatus: 'unspecified', primaryMobile: request.mobile, secondaryMobile: request.secondaryMobile, personalEmail: request.email, province: request.province, city: request.city, address: request.address, postalCode: request.postalCode, bankName: request.bankName, cardNumber: request.cardNumber, employmentStatus: 'active', employmentType: 'در انتظار تعیین نوع همکاری', startDate: now.slice(0,10), unitId: 'unit-management', positionId: 'position-specialist', linkedUserId: userId, createdAt: now, updatedAt: now};
       const user = resolveUserAccess({id: userId, actorId: newId('actor'), name: request.fullName, username: request.requestedUsername, passwordHash: await hashPassword(initialPassword), passwordUpdatedAt: now, roleId: primary.id, roleIds, roles: [], roleTitle: primary.name, status: 'active', isAdmin: false, description: primary.description, companyId: COMPANY_ID, unitId: personnel.unitId, positionId: personnel.positionId, personnelId, scope: primary.scope, permissions: [], accent: avatarColor(state.users.length), initials: makeInitials(request.fullName)}, state.roles);
       await this.storage.transaction(['personnel','users'], 'readwrite', async (tx) => {await tx.put('personnel', personnel); await tx.put('users', user);}); updated = {...updated, status: 'activated', linkedPersonnelId: personnelId, linkedUserId: userId};
     }
@@ -2243,7 +2418,27 @@ export class LocalFoundationService {
   }
 
   async inspectAuthorization(request: AuthorizationRequest): Promise<{decision: AuthorizationDecision; state: FoundationState}> { const decision = authorize(request); await this.appendAudit({actor: request.persona, effectiveUser: request.persona, category: 'authorization', action: request.permission, summary: decision.allowed ? 'آزمایش دسترسی با موفقیت عبور کرد.' : 'آزمایش دسترسی طبق سیاست رد شد.', reason: decision.reasonFa, outcome: decision.allowed ? 'success' : 'denied', metadata: {decisionCode: decision.code, requestedAction: request.action ?? 'view'}}); return {decision, state: await this.loadState()}; }
-  async exportSnapshot(password?: string): Promise<SnapshotManifest | EncryptedSnapshot> { const state = await this.loadState(); await this.appendAudit({actor: state.activeUser, effectiveUser: state.activeUser, category: 'data', action: password ? 'foundation.backup.encrypted' : 'foundation.backup.export', summary: password ? 'پشتیبان رمزگذاری‌شده ایجاد شد.' : 'پشتیبان محلی ایجاد شد.', outcome: 'success'}); const snapshot = await this.storage.exportSnapshot(); return password ? encryptSnapshot(snapshot, password) : snapshot; }
+  async exportSnapshot(password?: string): Promise<SnapshotManifest | EncryptedSnapshot> {
+    const state = await this.loadState();
+    if (state.session.actingAdminUserId) throw new Error('دریافت پشتیبان در حالت مشاهده دسترسی مجاز نیست.');
+    requirePermission(state.activeUser, 'foundation.data.export', 'مجوز دریافت پشتیبان داده را ندارید.');
+    const sensitiveFiles = await this.storage.getAll<PersonnelDocumentFile>('personnel_document_files');
+    if (sensitiveFiles.length) {
+      if (!password) throw new Error('به دلیل وجود مدارک هویتی، فقط پشتیبان رمزگذاری‌شده مجاز است.');
+      const contentPermission = state.activeUser.permissions.includes(PERSONNEL_DOCUMENT_PERMISSION_READ)
+        ? PERSONNEL_DOCUMENT_PERMISSION_READ
+        : state.activeUser.permissions.includes(PERSONNEL_DOCUMENT_PERMISSION_MANAGE) ? PERSONNEL_DOCUMENT_PERMISSION_MANAGE : undefined;
+      if (!contentPermission) throw new Error('برای پشتیبان‌گیری از مدارک هویتی، مجوز صریح مشاهده محتوای مدارک لازم است.');
+      for (const personnelId of new Set(sensitiveFiles.map((file) => file.personnelId))) {
+        const personnel = state.personnel.find((item) => item.id === personnelId);
+        if (!personnel) throw new Error('پشتیبان‌گیری به دلیل وجود فایل بدون پرونده معتبر متوقف شد.');
+        this.assertPersonnelDocumentAccess(state, personnel, contentPermission);
+      }
+    }
+    await this.appendAudit({actor: state.activeUser, effectiveUser: state.activeUser, category: 'data', action: password ? 'foundation.backup.encrypted' : 'foundation.backup.export', summary: password ? 'پشتیبان رمزگذاری‌شده ایجاد شد.' : 'پشتیبان محلی ایجاد شد.', outcome: 'success'});
+    const snapshot = await this.storage.exportSnapshot();
+    return password ? encryptSnapshot(snapshot, password) : snapshot;
+  }
   async importSnapshot(input: unknown, password?: string): Promise<FoundationState> { const before = await this.loadState(); let snapshot: SnapshotManifest; if (isEncryptedSnapshot(input)) {if (!password) throw new Error('این پشتیبان رمزگذاری شده است؛ رمز را وارد کنید.'); snapshot = await decryptSnapshot(input, password);} else {validateSnapshotShape(input); snapshot = input;} await this.storage.importSnapshot(snapshot); const restored = await this.loadState(); await this.appendAudit({actor: before.activeUser, effectiveUser: restored.activeUser, category: 'data', action: 'foundation.backup.restored', summary: 'داده محلی از فایل پشتیبان بازیابی شد.', outcome: 'success', metadata: {restoredSeedVersion: snapshot.seedVersion, restoredUserId: restored.activeUser.id}}); return this.loadState(); }
   async reset(): Promise<FoundationState> { const before = await this.loadState(); await this.storage.replaceAll(createSeedData()); const seededAdmin = (await this.storage.getAll<LocalUser>('users'))[0]; await this.appendAudit({actor: before.activeUser, effectiveUser: seededAdmin, category: 'data', action: 'foundation.local.reset', summary: 'داده‌های محلی به سناریوی قطعی ERP V1 بازنشانی شد.', reason: 'بازنشانی دستی پذیرش محصول', outcome: 'success', metadata: {seedVersion: FOUNDATION_SEED_VERSION}}); return this.loadState(); }
 
@@ -2478,4 +2673,32 @@ function makeInitials(name: string) { return name.trim().split(/\s+/).slice(0, 2
 function usernameFromName(name: string) { return `user.${name.length}`; }
 function avatarColor(index: number) { return ['#6957d9', '#0d9488', '#0284c7', '#7c3aed', '#d97706', '#e11d48'][index % 6]; }
 function nextSequence(audits: AuditEvent[]) { return audits.reduce((maximum, event) => Math.max(maximum, event.sequence), 0) + 1; }
+
+function removeSensitiveFileData(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(removeSensitiveFileData);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .filter(([key]) => key !== 'fileDataUrl' && key !== 'dataUrl')
+    .map(([key, item]) => [key, removeSensitiveFileData(item)]));
+}
+
+function legacyDataUrlMime(value: string): string {
+  return /^data:([^;,]+)[;,]/.exec(value)?.[1] ?? 'application/octet-stream';
+}
+
+function legacyDataUrlSize(value: string): number {
+  const encoded = value.split(',')[1];
+  if (!encoded) return 0;
+  try { return atob(encoded).length; } catch { return 0; }
+}
+
+async function sha256DataUrlContent(value: string): Promise<string> {
+  const encoded = value.split(',')[1];
+  if (!encoded) throw new Error('محتوای فایل قدیمی معتبر نیست.');
+  let binary: string;
+  try { binary = atob(encoded); } catch { throw new Error('محتوای فایل قدیمی قابل خواندن نیست.'); }
+  const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
 export function isEncryptedSnapshot(value: unknown): value is EncryptedSnapshot { return Boolean(value && typeof value === 'object' && (value as EncryptedSnapshot).format === 'tapra2-local-snapshot-encrypted'); }

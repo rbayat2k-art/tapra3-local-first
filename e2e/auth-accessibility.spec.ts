@@ -12,9 +12,16 @@ async function expectNoSeriousAccessibilityViolations(page: Page) {
 
 async function openSignedOutPortal(page: Page) {
   await page.goto('/');
-  await expect(page.getByRole('heading', {name: /سلام|خوش آمدید/}).first()).toBeVisible({timeout: 15_000});
+  await expect(page.getByRole('heading', {name: /سلام|خوش آمدید|پرونده خود را کامل‌تر/}).first()).toBeVisible({timeout: 15_000});
+  const initialDefer = page.getByRole('button', {name: 'فعلاً وارد می‌شوم؛ بعداً تکمیل می‌کنم'}).first();
+  if (await initialDefer.isVisible()) {
+    await initialDefer.click();
+    await expect(page.getByRole('heading', {name: /سلام/})).toBeVisible();
+  }
   const dashboardHeading = page.getByRole('heading', {name: /سلام/});
   if (await dashboardHeading.isVisible()) {
+    const defer = page.getByRole('button', {name: 'فعلاً وارد می‌شوم؛ بعداً تکمیل می‌کنم'}).first();
+    if (await defer.isVisible()) await defer.click();
     await page.locator('.account-trigger').click();
     await page.getByRole('button', {name: /خروج از سامانه/}).first().click();
     const dialog = page.getByRole('dialog');
@@ -29,6 +36,8 @@ async function signInAsAdmin(page: Page) {
   await page.locator('input[autocomplete="current-password"]').fill('Tapra2@123');
   await page.getByRole('button', {name: 'ورود به سامانه'}).click();
   await expect(page.getByRole('heading', {name: /سلام/})).toBeVisible();
+  const defer = page.getByRole('button', {name: 'فعلاً وارد می‌شوم؛ بعداً تکمیل می‌کنم'}).first();
+  if (await defer.isVisible()) await defer.click();
 }
 
 test('ورود محلی پس از بارگذاری دوباره حفظ می‌شود', async ({page}) => {

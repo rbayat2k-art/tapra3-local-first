@@ -42,7 +42,7 @@ flowchart LR
   SVC --> SNAP["snapshot.ts"]
   SVC --> STORE["storage.ts"]
   STORE --> REG["storeRegistry.ts"]
-  STORE --> DB[("96 stores")]
+  STORE --> DB[("97 stores")]
 ```
 
 ## ۴. Request Sequence

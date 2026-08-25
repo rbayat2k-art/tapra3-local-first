@@ -3,12 +3,23 @@ import {expect, test, type Page} from '@playwright/test';
 
 async function signInAsAdmin(page: Page) {
   await page.goto('/');
-  await expect(page.getByRole('heading', {name: /سلام|خوش آمدید/}).first()).toBeVisible({timeout: 15_000});
-  if (await page.getByRole('heading', {name: /سلام/}).isVisible()) return;
+  await expect(page.getByRole('heading', {name: /سلام|خوش آمدید|پرونده خود را کامل‌تر/}).first()).toBeVisible({timeout: 15_000});
+  const initialDefer = page.getByRole('button', {name: 'فعلاً وارد می‌شوم؛ بعداً تکمیل می‌کنم'}).first();
+  if (await initialDefer.isVisible()) {
+    await initialDefer.click();
+    await expect(page.getByRole('heading', {name: /سلام/})).toBeVisible();
+  }
+  if (await page.getByRole('heading', {name: /سلام/}).isVisible()) {
+    const defer = page.getByRole('button', {name: 'فعلاً وارد می‌شوم؛ بعداً تکمیل می‌کنم'}).first();
+    if (await defer.isVisible()) await defer.click();
+    return;
+  }
   await page.getByPlaceholder('username').fill('admin');
   await page.locator('input[autocomplete="current-password"]').fill('Tapra2@123');
   await page.getByRole('button', {name: 'ورود به سامانه'}).click();
   await expect(page.getByRole('heading', {name: /سلام/})).toBeVisible();
+  const defer = page.getByRole('button', {name: 'فعلاً وارد می‌شوم؛ بعداً تکمیل می‌کنم'}).first();
+  if (await defer.isVisible()) await defer.click();
 }
 
 async function expectNoSeriousAccessibilityViolations(page: Page, selector: string) {

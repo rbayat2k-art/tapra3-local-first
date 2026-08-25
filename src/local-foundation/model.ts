@@ -1,6 +1,6 @@
-export const FOUNDATION_SCHEMA_VERSION = 10;
+export const FOUNDATION_SCHEMA_VERSION = 11;
 export const FOUNDATION_DB_NAME = 'tapra2_local';
-export const FOUNDATION_SEED_VERSION = 'complete-local-erp-v1.28-unit-position-catalog';
+export const FOUNDATION_SEED_VERSION = 'complete-local-erp-v1.29-personnel-documents';
 
 export type ScopeType = 'COMPANY' | 'UNIT' | 'TEAM' | 'SELF' | 'RECORD';
 /** Permission codes are registry-driven and always use domain.resource.action. */
@@ -141,6 +141,8 @@ export interface PersonnelMovement {
 
 export interface PersonnelRecord {
   id: string;
+  /** Persisted tenant provenance. Legacy records may omit it and are resolved fail-closed. */
+  companyId?: string;
   personnelCode: string;
   firstName: string;
   lastName: string;
@@ -321,6 +323,8 @@ export interface FoundationSession {
   activeUserId: string;
   actingAdminUserId?: string;
   qaStartedAt?: string;
+  /** Per-user reminder deferral; it never grants permissions or changes completion truth. */
+  profileCompletionDeferredUntil?: string;
   signedOutAt?: string;
   switchedAt: string;
   version: number;
@@ -511,6 +515,20 @@ export interface OperationalRecordHistory {
   occurredAt: string;
 }
 
+/** Raw identity-document content. It is intentionally excluded from FoundationState. */
+export interface PersonnelDocumentFile {
+  id: string;
+  recordId: string;
+  personnelId: string;
+  companyId: string;
+  mimeType: string;
+  size: number;
+  checksumSha256: string;
+  dataUrl: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface RegistrationRequest {
   id: string;
   trackingCode: string;
@@ -630,6 +648,7 @@ export const FOUNDATION_STORES = [
   'performance_reviews',
   'training_records',
   'personnel_documents',
+  'personnel_document_files',
   'recruitment_cases',
   'leads',
   'lead_assignments',

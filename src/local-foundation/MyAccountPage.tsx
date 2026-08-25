@@ -1,7 +1,7 @@
 import {useMemo, useState, type ReactNode} from 'react';
 import {
   BadgeDollarSign, Banknote, BriefcaseBusiness, Check, ChevronDown, CircleAlert, Clock3, ContactRound,
-  FileClock, IdCard, MapPin, PackageCheck, PencilLine, Phone, Send, ShieldCheck, UserRound, X, type LucideIcon,
+  FileClock, Files, IdCard, MapPin, PackageCheck, PencilLine, Phone, Send, ShieldCheck, UserRound, X, type LucideIcon,
 } from 'lucide-react';
 import type {
   FoundationState, PersonnelProfileChangeField, PersonnelProfileChangeRequest, PersonnelProfileChangeValues, PersonnelRecord,
@@ -16,6 +16,7 @@ import {
 } from '../utils/operationalFormat';
 import {currentSalesCompensation, orderedSalesCompensationHistory, salesCompensationModeLabel} from './salesCompensation';
 import {MyAssetsSection} from './MyAssetsSection';
+import {PersonnelDocumentsSection} from './PersonnelDocumentsSection';
 
 type Execute = (label: string, work: () => Promise<FoundationState>, success: string) => Promise<boolean>;
 
@@ -66,6 +67,9 @@ export function MyAccountPage({state, service, execute}: {state: FoundationState
         </AccountSection>
         <AccountSection icon={BriefcaseBusiness} title="همکاری و جایگاه" subtitle="اطلاعات خواندنی سازمانی">
           <FactGrid><Fact label="وضعیت همکاری" value={personnel.employmentStatus === 'active' ? 'فعال' : personnel.employmentStatus === 'ending_scheduled' ? 'پایان زمان‌بندی‌شده' : personnel.employmentStatus === 'rehire_scheduled' ? 'بازگشت زمان‌بندی‌شده' : 'خاتمه‌یافته'}/><Fact label="نوع همکاری" value={personnel.employmentType}/><Fact label="تاریخ شروع" value={formatPersianDate(personnel.startDate)}/><Fact label="واحد سازمانی" value={unit}/><Fact label="سمت سازمانی" value={position}/><Fact label="شعبه استقرار" value={branch}/><Fact label="مدیر مستقیم" value={manager ? `${manager.firstName} ${manager.lastName}` : undefined}/><Fact label="محل کار" value={personnel.workLocation}/></FactGrid>
+        </AccountSection>
+        <AccountSection icon={Files} title="مدارک و تصویر پرسنلی" subtitle="مدارک اجباری، عکس و فایل‌های تکمیلی" open>
+          <PersonnelDocumentsSection state={state} service={service} execute={execute} personnelId={personnel.id}/>
         </AccountSection>
         <AccountSection icon={PackageCheck} title="دارایی‌ها و اموال من" subtitle="دارایی‌های تحت اختیار، تأییدها و سابقه عودت" open={state.operationalRecords.some((item) => item.ownerPersonnelId === personnel.id && ['fixed-asset', 'asset-transfer', 'asset-maintenance'].includes(item.moduleId))}>
           <MyAssetsSection state={state} service={service} execute={execute} personnelId={personnel.id} readOnly={Boolean(state.session.actingAdminUserId)}/>
