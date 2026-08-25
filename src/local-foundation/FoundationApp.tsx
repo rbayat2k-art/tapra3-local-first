@@ -4,7 +4,7 @@ import {
   BriefcaseBusiness, Database, Download, Eye, FileClock, FileJson, Fingerprint, FlaskConical, GitBranch, HardDrive, KeyRound, LayoutDashboard,
   LockKeyhole, LogIn, LogOut, Menu, MessageSquareText, Monitor, Moon, MoreVertical, Palette, Pencil, Phone, RotateCcw, ScrollText, Shield, ShieldCheck,
   SlidersHorizontal, Sparkles, Sun, Upload, UserCheck, UserCog, UserPlus, UserRound, UserX, UsersRound, Workflow, X, Network, ContactRound, EyeOff,
-  PanelRightClose, PanelRightOpen, Headphones, Search,
+  PanelRightClose, PanelRightOpen, Headphones, Search, Layers3,
   type LucideIcon,
 } from 'lucide-react';
 import {authorize, can} from './authorization';
@@ -42,7 +42,7 @@ import {DEFAULT_PREFERENCES, normalizeUiPreferences, type UiPreferences} from '.
 import {WorkflowAdminPage} from './WorkflowAdminPage';
 import {RecruitmentPage} from './RecruitmentPage';
 import {NavigationSearch, type NavigationSearchDestination} from './NavigationSearch';
-import {requestWorkspaceNavigation} from './windowWorkspaceGuard';
+import {notifyWorkspaceTabActivated, requestWorkspaceTabClose} from './windowWorkspaceGuard';
 import {
   frequentNavigationDestinations,
   incrementNavigationUsage,
@@ -150,15 +150,50 @@ function loadPreferences(): UiPreferences {
   catch { return DEFAULT_PREFERENCES; }
 }
 
+interface WorkspaceTab {
+  id: string;
+  destinationId: string;
+  page: PageId;
+  url: string;
+  title: string;
+}
+
+function currentRouteText() { return `${window.location.pathname}${window.location.search}${window.location.hash}`; }
+function absoluteRouteUrl(route: string) { return new URL(route, window.location.origin).href; }
+function workspaceTabIdFromUrl(href: string) {
+  const url = new URL(href, window.location.origin);
+  const page = url.searchParams.get('page')?.trim() || 'dashboard';
+  const moduleId = url.searchParams.get('module')?.trim();
+  const categoryId = url.searchParams.get('category')?.trim();
+  if (moduleId) return `module:${moduleId}`;
+  if (page === 'personnel' && categoryId === 'changes') return 'view:personnel-changes';
+  if (page === 'personnel' && categoryId === 'incomplete') return 'view:personnel-incomplete';
+  if (categoryId) return `page:${page}:category:${categoryId}`;
+  return `page:${page}`;
+}
+
 export function LocalFoundationApp() {
   const [foundation, setFoundation] = useState<FoundationState | null>(null);
-  const [page, setPageState] = useState<PageId>(() => pageFromUrl(window.location.href));
-  const [routeRevision, setRouteRevision] = useState(0);
+  const initialPage = pageFromUrl(window.location.href);
+  const initialWorkspaceUrl = currentRouteText();
+  const initialWorkspaceTabId = workspaceTabIdFromUrl(window.location.href);
+  const [page, setPageState] = useState<PageId>(initialPage);
+  const [workspaceTabs, setWorkspaceTabs] = useState<WorkspaceTab[]>([{
+    id: initialWorkspaceTabId,
+    destinationId: initialWorkspaceTabId,
+    page: initialPage,
+    url: initialWorkspaceUrl,
+    title: initialPage,
+  }]);
+  const [activeWorkspaceTabId, setActiveWorkspaceTabId] = useState(initialWorkspaceTabId);
   const setPage = useCallback((nextPage: PageId) => {
     const nextUrl = pageRouteUrl(window.location.href, nextPage);
-    if (`${window.location.pathname}${window.location.search}${window.location.hash}` !== nextUrl) window.history.pushState({page: nextPage}, '', nextUrl);
+    const nextId = `page:${nextPage}`;
+    if (currentRouteText() !== nextUrl) window.history.pushState({page: nextPage, workspaceTabId: nextId}, '', nextUrl);
+    setWorkspaceTabs([{id: nextId, destinationId: nextId, page: nextPage, url: nextUrl, title: nextPage}]);
+    setActiveWorkspaceTabId(nextId);
     setPageState(nextPage);
-    setRouteRevision((value) => value + 1);
+    window.setTimeout(() => notifyWorkspaceTabActivated(nextId), 0);
   }, []);
   const [preferences, setPreferences] = useState<UiPreferences>(loadPreferences);
   const [accountOpen, setAccountOpen] = useState(false);
@@ -303,25 +338,65 @@ export function LocalFoundationApp() {
     const destination = navigationDestinations.find((item) => item.id === requested.id);
     if (!destination) return;
     const nextUrl = destinationRouteUrl(window.location.href, destination.page, destination.moduleId, destination.categoryId);
+    const existingTab = workspaceTabs.find((tab) => tab.id === destination.id);
+    const routeToOpen = existingTab?.url ?? nextUrl;
     const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
-    if (currentUrl !== nextUrl && !requestWorkspaceNavigation()) return;
-    if (currentUrl !== nextUrl) {
-      window.history.pushState({page: destination.page, module: destination.moduleId, category: destination.categoryId}, '', nextUrl);
+    if (currentUrl !== routeToOpen) {
+      window.history.pushState({page: destination.page, module: destination.moduleId, category: destination.categoryId, workspaceTabId: destination.id}, '', routeToOpen);
     }
+    setWorkspaceTabs((current) => {
+      const nextTab: WorkspaceTab = {id: destination.id, destinationId: destination.id, page: destination.page, url: nextUrl, title: destination.title};
+      return current.some((tab) => tab.id === destination.id)
+        ? current
+        : [...current, nextTab];
+    });
+    setActiveWorkspaceTabId(destination.id);
     setPageState(destination.page);
-    setRouteRevision((value) => value + 1);
+    window.setTimeout(() => notifyWorkspaceTabActivated(destination.id), 0);
     const shouldMoveFocusToPage = mobileSidebarMode && mobileOpen;
     setMobileOpen(false);
     setNavigationSearchActive(false);
     if (options?.track !== false) trackNavigationDestination(destination);
     if (shouldMoveFocusToPage) window.setTimeout(() => document.getElementById('main-page-heading')?.focus(), 0);
-  }, [mobileOpen, mobileSidebarMode, navigationDestinations, trackNavigationDestination]);
+  }, [mobileOpen, mobileSidebarMode, navigationDestinations, trackNavigationDestination, workspaceTabs]);
 
   const navigateToPage = useCallback((nextPage: PageId) => {
     const destination = navigationDestinations.find((item) => item.id === `page:${nextPage}`);
     if (destination) openNavigationDestination(destination);
     else setPage(nextPage);
   }, [navigationDestinations, openNavigationDestination, setPage]);
+
+  const activateWorkspaceTab = useCallback((tab: WorkspaceTab) => {
+    if (tab.id === activeWorkspaceTabId) return;
+    window.history.pushState({page: tab.page, workspaceTabId: tab.id}, '', tab.url);
+    setActiveWorkspaceTabId(tab.id);
+    setPageState(tab.page);
+    window.setTimeout(() => notifyWorkspaceTabActivated(tab.id), 0);
+    setAccountOpen(false);
+    setNotificationOpen(false);
+    window.setTimeout(() => document.getElementById('main-page-heading')?.focus(), 0);
+  }, [activeWorkspaceTabId]);
+
+  const closeWorkspaceTab = useCallback((tabId: string) => {
+    if (workspaceTabs.length <= 1 || !requestWorkspaceTabClose(tabId)) return;
+    const closingIndex = workspaceTabs.findIndex((tab) => tab.id === tabId);
+    const remaining = workspaceTabs.filter((tab) => tab.id !== tabId);
+    setWorkspaceTabs(remaining);
+    if (tabId !== activeWorkspaceTabId) return;
+    const next = remaining[Math.min(Math.max(closingIndex, 0), remaining.length - 1)];
+    setActiveWorkspaceTabId(next.id);
+    setPageState(next.page);
+    window.history.pushState({page: next.page, workspaceTabId: next.id}, '', next.url);
+    window.setTimeout(() => notifyWorkspaceTabActivated(next.id), 0);
+  }, [activeWorkspaceTabId, workspaceTabs]);
+
+  const updateWorkspaceTabUrl = useCallback((tabId: string, nextUrl: string) => {
+    setWorkspaceTabs((current) => {
+      const tab = current.find((item) => item.id === tabId);
+      return !tab || tab.url === nextUrl ? current : current.map((item) => item.id === tabId ? {...item, url: nextUrl} : item);
+    });
+    if (tabId === activeWorkspaceTabId && currentRouteText() !== nextUrl) window.history.replaceState({...window.history.state, workspaceTabId: tabId}, '', nextUrl);
+  }, [activeWorkspaceTabId]);
 
   const trackModuleNavigation = useCallback((moduleId: string) => {
     const destination = navigationDestinations.find((item) => item.id === `module:${moduleId}`);
@@ -339,12 +414,29 @@ export function LocalFoundationApp() {
 
   useEffect(() => {
     const restorePageFromUrl = () => {
-      setPageState(pageFromUrl(window.location.href));
-      setRouteRevision((value) => value + 1);
+      const restoredPage = pageFromUrl(window.location.href);
+      const restoredId = workspaceTabIdFromUrl(window.location.href);
+      const restoredUrl = currentRouteText();
+      setWorkspaceTabs((current) => current.some((tab) => tab.id === restoredId)
+        ? current.map((tab) => tab.id === restoredId ? {...tab, page: restoredPage, url: restoredUrl} : tab)
+        : [...current, {id: restoredId, destinationId: restoredId, page: restoredPage, url: restoredUrl, title: restoredPage}]);
+      setActiveWorkspaceTabId(restoredId);
+      setPageState(restoredPage);
+      window.setTimeout(() => notifyWorkspaceTabActivated(restoredId), 0);
     };
     window.addEventListener('popstate', restorePageFromUrl);
     return () => window.removeEventListener('popstate', restorePageFromUrl);
   }, []);
+
+  useEffect(() => {
+    const handleRequestedTabActivation = (event: Event) => {
+      const tabId = (event as CustomEvent<{tabId?: string}>).detail?.tabId;
+      const tab = workspaceTabs.find((item) => item.id === tabId);
+      if (tab) activateWorkspaceTab(tab);
+    };
+    window.addEventListener('workspace:request-tab-activation', handleRequestedTabActivation);
+    return () => window.removeEventListener('workspace:request-tab-activation', handleRequestedTabActivation);
+  }, [activateWorkspaceTab, workspaceTabs]);
 
   useEffect(() => {
     const media = window.matchMedia('(max-width: 920px)');
@@ -427,10 +519,28 @@ export function LocalFoundationApp() {
   useEffect(() => {
     if (!foundation || page === resolvedPage) return;
     const nextUrl = pageRouteUrl(window.location.href, resolvedPage);
-    window.history.replaceState({page: resolvedPage}, '', nextUrl);
+    const nextId = `page:${resolvedPage}`;
+    window.history.replaceState({page: resolvedPage, workspaceTabId: nextId}, '', nextUrl);
+    setWorkspaceTabs((current) => {
+      const replacement = {id: nextId, destinationId: nextId, page: resolvedPage, url: nextUrl, title: NAVIGATION.find((item) => item.id === resolvedPage)?.title ?? resolvedPage};
+      return current
+        .filter((tab) => tab.id !== nextId || tab.id === activeWorkspaceTabId)
+        .map((tab) => tab.id === activeWorkspaceTabId ? replacement : tab);
+    });
+    setActiveWorkspaceTabId(nextId);
     setPageState(resolvedPage);
-    setRouteRevision((value) => value + 1);
-  }, [foundation, page, resolvedPage]);
+    window.setTimeout(() => notifyWorkspaceTabActivated(nextId), 0);
+  }, [activeWorkspaceTabId, foundation, page, resolvedPage]);
+
+  useEffect(() => {
+    if (!navigationDestinations.length) return;
+    setWorkspaceTabs((current) => current.map((tab) => {
+      const destination = navigationDestinations.find((item) => item.id === tab.destinationId);
+      const fallback = NAVIGATION.find((item) => item.id === tab.page)?.title;
+      const title = destination?.title ?? fallback ?? tab.title;
+      return title === tab.title ? tab : {...tab, title};
+    }));
+  }, [navigationDestinations]);
 
   useEffect(() => {
     const activeGroup = visibleNavigation.find((item) => item.id === resolvedPage)?.group;
@@ -579,7 +689,8 @@ export function LocalFoundationApp() {
 
   const user = foundation.activeUser;
   const currentNavigation = NAVIGATION.find((item) => item.id === resolvedPage) ?? NAVIGATION[0];
-  const currentPageTitle = resolvedPage === 'account-security' ? 'حساب و امنیت' : currentNavigation.title;
+  const activeWorkspaceTab = workspaceTabs.find((tab) => tab.id === activeWorkspaceTabId);
+  const currentPageTitle = resolvedPage === 'account-security' ? 'حساب و امنیت' : activeWorkspaceTab?.title || currentNavigation.title;
   const activePersonnel = foundation.personnel.find((person) => person.id === user.personnelId || person.linkedUserId === user.id);
   const profileIncomplete = !personnelCompletionSummary(activePersonnel, foundation.operationalRecords).complete;
   const profileCompletionDeferred = Boolean(foundation.session.profileCompletionDeferredUntil && new Date(foundation.session.profileCompletionDeferredUntil).getTime() > Date.now());
@@ -677,32 +788,58 @@ export function LocalFoundationApp() {
           </div>
         </header>
 
+        <WorkspaceTabStrip
+          tabs={workspaceTabs}
+          activeId={activeWorkspaceTabId}
+          destinations={navigationDestinations}
+          onActivate={activateWorkspaceTab}
+          onClose={closeWorkspaceTab}
+        />
+
         {foundation.session.actingAdminUserId && <div className="access-view-banner"><Eye size={19} /><span>در حال مشاهده با دسترسی: <strong>{userDisplayLabel(foundation.activeUser,foundation)}</strong></span><button onClick={endQaSession}>بازگشت به دسترسی ادمین <ArrowLeft size={16} /></button></div>}
 
         <div className="page-frame">
           {error && <div className="notice notice--danger global-operation-error" role="alert" aria-live="assertive"><CircleAlert size={19} /><span>{error}</span><button type="button" aria-label="بستن پیام خطا" onClick={() => setError(null)}>بستن</button></div>}
-          {resolvedPage === 'dashboard' && <Dashboard state={foundation} navigate={navigateToPage} destinations={navigationDestinations} usage={navigationUsage} onDestination={openNavigationDestination} />}
-          {resolvedPage === 'organization' && <OrganizationOverviewPage state={foundation} />}
-          {resolvedPage === 'units' && <UnitsPage state={foundation} service={service} execute={run} />}
-          {resolvedPage === 'branches' && <BranchesPage state={foundation} service={service} execute={run} />}
-          {resolvedPage === 'positions' && <PositionsPage state={foundation} service={service} execute={run} />}
-          {resolvedPage === 'personnel' && <PersonnelPage key={`personnel:${routeRevision}`} state={foundation} service={service} execute={run} />}
-          {resolvedPage === 'sales-structures' && <SalesStructuresPage state={foundation} service={service} execute={run} />}
-          {resolvedPage === 'users' && <UsersPage state={foundation} onEdit={setEditUser} onLogin={loginAsUser} onStatus={(target, status) => run('user-status', () => service.setUserStatus(target.id, userConcurrencyToken(target), status), `وضعیت «${target.name}» به‌روزرسانی شد.`)} />}
-          {resolvedPage === 'roles' && <RolesPage state={foundation} service={service} execute={run} />}
-          {resolvedPage === 'registrations' && <RegistrationPage state={foundation} service={service} execute={run} />}
-          {resolvedPage === 'recruitment' && <RecruitmentPage state={foundation} service={service} execute={run} />}
-          {resolvedPage === 'customers' && <CustomersPage state={foundation} service={service} execute={run} />}
-          {DOMAIN_PAGE_MODULES[resolvedPage] && <ErpWorkspacePage key={`${resolvedPage}:${routeRevision}`} state={foundation} moduleIds={DOMAIN_PAGE_MODULES[resolvedPage]} service={service} execute={run} onNavigateModule={trackModuleNavigation} />}
-          {resolvedPage === 'reports' && <ReportsPage state={foundation} />}
-          {resolvedPage === 'workflow-admin' && <WorkflowAdminPage state={foundation} execute={run} service={service} />}
-          {resolvedPage === 'my-account' && <MyAccountPage state={foundation} service={service} execute={run} />}
-          {resolvedPage === 'account-security' && <AccountSecurityPage user={user} busy={busy === 'own-credentials'} onSubmit={(input) => run('own-credentials', () => service.changeOwnCredentials(userConcurrencyToken(user), input), 'نام کاربری و تنظیمات امنیتی حساب ذخیره شد.')} />}
-          {resolvedPage === 'appearance' && <AppearancePage preferences={preferences} onChange={setPreferences} />}
-          {resolvedPage === 'policy' && <PolicyLab state={foundation} onState={setFoundation} />}
-          {resolvedPage === 'audit' && <AuditPage state={foundation} />}
-          {resolvedPage === 'data' && (
-            <DataPage
+          {workspaceTabs.map((tab) => <section
+            key={tab.id}
+            className="workspace-page-panel"
+            data-workspace-page-id={tab.id}
+            hidden={tab.id !== activeWorkspaceTabId}
+            aria-hidden={tab.id !== activeWorkspaceTabId}
+          >
+            {tab.page === 'dashboard' && <Dashboard state={foundation} navigate={navigateToPage} destinations={navigationDestinations} usage={navigationUsage} onDestination={openNavigationDestination} />}
+            {tab.page === 'organization' && <OrganizationOverviewPage state={foundation} />}
+            {tab.page === 'units' && <UnitsPage state={foundation} service={service} execute={run} />}
+            {tab.page === 'branches' && <BranchesPage state={foundation} service={service} execute={run} />}
+            {tab.page === 'positions' && <PositionsPage state={foundation} service={service} execute={run} />}
+            {tab.page === 'personnel' && <PersonnelPage state={foundation} service={service} execute={run} routeUrl={absoluteRouteUrl(tab.url)} onRouteChange={(nextUrl) => updateWorkspaceTabUrl(tab.id, nextUrl)} />}
+            {tab.page === 'sales-structures' && <SalesStructuresPage state={foundation} service={service} execute={run} />}
+            {tab.page === 'users' && <UsersPage state={foundation} onEdit={setEditUser} onLogin={loginAsUser} onStatus={(target, status) => run('user-status', () => service.setUserStatus(target.id, userConcurrencyToken(target), status), `وضعیت «${target.name}» به‌روزرسانی شد.`)} />}
+            {tab.page === 'roles' && <RolesPage state={foundation} service={service} execute={run} />}
+            {tab.page === 'registrations' && <RegistrationPage state={foundation} service={service} execute={run} />}
+            {tab.page === 'recruitment' && <RecruitmentPage state={foundation} service={service} execute={run} />}
+            {tab.page === 'customers' && <CustomersPage state={foundation} service={service} execute={run} />}
+            {DOMAIN_PAGE_MODULES[tab.page] && <ErpWorkspacePage
+              state={foundation}
+              moduleIds={DOMAIN_PAGE_MODULES[tab.page]}
+              service={service}
+              execute={run}
+              routeUrl={absoluteRouteUrl(tab.url)}
+              onRouteChange={(nextUrl) => updateWorkspaceTabUrl(tab.id, nextUrl)}
+              onOpenModule={(moduleId) => {
+                const destination = navigationDestinations.find((item) => item.moduleId === moduleId);
+                if (destination) openNavigationDestination(destination);
+              }}
+              onNavigateModule={trackModuleNavigation}
+            />}
+            {tab.page === 'reports' && <ReportsPage state={foundation} />}
+            {tab.page === 'workflow-admin' && <WorkflowAdminPage state={foundation} execute={run} service={service} />}
+            {tab.page === 'my-account' && <MyAccountPage state={foundation} service={service} execute={run} />}
+            {tab.page === 'account-security' && <AccountSecurityPage user={user} busy={busy === 'own-credentials'} onSubmit={(input) => run('own-credentials', () => service.changeOwnCredentials(userConcurrencyToken(user), input), 'نام کاربری و تنظیمات امنیتی حساب ذخیره شد.')} />}
+            {tab.page === 'appearance' && <AppearancePage preferences={preferences} onChange={setPreferences} />}
+            {tab.page === 'policy' && <PolicyLab state={foundation} onState={setFoundation} />}
+            {tab.page === 'audit' && <AuditPage state={foundation} />}
+            {tab.page === 'data' && <DataPage
               state={foundation}
               onExport={() => exportBackup()}
               onEncrypted={() => setBackupOpen(true)}
@@ -712,9 +849,9 @@ export function LocalFoundationApp() {
               onResetQa={() => run('qa-reset', () => service.resetLargeQaDataset(), 'داده آزمون حجیم حذف شد.')}
               onRebuild={() => run('projection-rebuild', () => service.rebuildProjections(), 'Projectionها بازسازی شدند.')}
               onRunQa={() => run('qa-scenarios', () => service.runQaScenarios(), 'سناریوهای یکپارچگی اجرا و در Audit ثبت شدند.')}
-            />
-          )}
-          {resolvedPage === 'qa' && <QaGuide state={foundation} navigate={navigateToPage} />}
+            />}
+            {tab.page === 'qa' && <QaGuide state={foundation} navigate={navigateToPage} />}
+          </section>)}
         </div>
       </main>
 
@@ -730,6 +867,44 @@ export function LocalFoundationApp() {
       {toast && <div className="toast" role="status" aria-live="polite"><BadgeCheck size={20} /><span>{toast}</span></div>}
     </div>
   );
+}
+
+function WorkspaceTabStrip({tabs, activeId, destinations, onActivate, onClose}: {
+  tabs: WorkspaceTab[];
+  activeId: string;
+  destinations: NavigationSearchDestination[];
+  onActivate: (tab: WorkspaceTab) => void;
+  onClose: (tabId: string) => void;
+}) {
+  return <nav className="workspace-page-tabs" aria-label="تب‌های میزکار">
+    <div className="workspace-page-tabs__heading"><Layers3 size={17}/><span>میزکار</span></div>
+    <div className="workspace-page-tabs__list" aria-label="صفحه‌های باز">
+      {tabs.map((tab) => {
+        const destination = destinations.find((item) => item.id === tab.destinationId);
+        const navigation = NAVIGATION.find((item) => item.id === tab.page);
+        const Icon = destination?.icon ?? navigation?.icon ?? Layers3;
+        const active = tab.id === activeId;
+        return <div key={tab.id} className={`workspace-page-tab ${active ? 'workspace-page-tab--active' : ''}`}>
+          <button
+            type="button"
+            aria-current={active ? 'page' : undefined}
+            onClick={() => onActivate(tab)}
+            title={tab.title}
+          >
+            <Icon size={16}/>
+            <span><strong>{tab.title}</strong><small>{destination?.group ?? navigation?.group ?? 'شاهراه'}</small></span>
+          </button>
+          {tabs.length > 1 && <button
+            type="button"
+            className="workspace-page-tab__close"
+            aria-label={`بستن تب ${tab.title}`}
+            title={`بستن تب ${tab.title}`}
+            onClick={() => onClose(tab.id)}
+          ><X size={14}/></button>}
+        </div>;
+      })}
+    </div>
+  </nav>;
 }
 
 function Dashboard({state, navigate, destinations, usage, onDestination}: {

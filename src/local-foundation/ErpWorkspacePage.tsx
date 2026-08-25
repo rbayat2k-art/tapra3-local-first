@@ -25,28 +25,33 @@ interface Props {
   moduleIds: string[];
   service: LocalFoundationService;
   execute: (label: string, work: () => Promise<FoundationState>, success: string) => Promise<boolean>;
+  routeUrl?: string;
+  onRouteChange?: (url: string) => void;
+  onOpenModule?: (moduleId: string) => void;
   onNavigateModule?: (moduleId: string) => void;
 }
 
 const fa = (value: number) => value.toLocaleString('en-US');
 
-export function ErpWorkspacePage({state, moduleIds, service, execute, onNavigateModule}: Props) {
+export function ErpWorkspacePage({state, moduleIds, service, execute, routeUrl = window.location.href, onRouteChange, onOpenModule, onNavigateModule}: Props) {
   const modules = ERP_MODULES.filter((item) => moduleIds.includes(item.id)).map((item) => workflowWithActivePolicy(state, item));
   const visible = modules.filter((item) => can(state.activeUser, permissionFor(item.id, 'view')));
-  const requestedModule = workspaceParam(window.location.href, 'module');
+  const requestedModule = workspaceParam(routeUrl, 'module');
   const [activeId, setActiveId] = useState(visible.some((item) => item.id === requestedModule) ? requestedModule : visible[0]?.id ?? modules[0]?.id ?? '');
   const active = visible.find((item) => item.id === activeId) ?? visible[0];
   const resolvedActiveModuleId = active?.id;
-  const [query, setQuery] = useState(() => workspaceParam(window.location.href, 'q'));
-  const [status, setStatus] = useState(() => workspaceParam(window.location.href, 'status') || 'all');
-  const [cartableId, setCartableId] = useState(() => workspaceParam(window.location.href, 'cartable'));
+  const [query, setQuery] = useState(() => workspaceParam(routeUrl, 'q'));
+  const [status, setStatus] = useState(() => workspaceParam(routeUrl, 'status') || 'all');
+  const [cartableId, setCartableId] = useState(() => workspaceParam(routeUrl, 'cartable'));
   const [selected, setSelected] = useState<OperationalRecord | null>(null);
   const [editing, setEditing] = useState<OperationalRecord | 'new' | null>(null);
   const [treasuryEditRequested, setTreasuryEditRequested] = useState(false);
   useEffect(() => {
     if (!requestedModule || !resolvedActiveModuleId || requestedModule === resolvedActiveModuleId) return;
-    window.history.replaceState(window.history.state, '', workspaceRouteUrl(window.location.href, {module: resolvedActiveModuleId, cartable: null, status: null, q: null}));
-  }, [requestedModule, resolvedActiveModuleId]);
+    const nextUrl = workspaceRouteUrl(routeUrl, {module: resolvedActiveModuleId, cartable: null, status: null, q: null});
+    if (onRouteChange) onRouteChange(nextUrl);
+    else window.history.replaceState(window.history.state, '', nextUrl);
+  }, [onRouteChange, requestedModule, resolvedActiveModuleId, routeUrl]);
   if (!active) return <EmptyAccess />;
   const records = state.operationalRecords.filter((item) => item.moduleId === active.id && (active.id !== 'treasury-execution' || isTreasuryRecordVisibleToUser(item, state)) && (active.id !== 'employee-advance' || isEmployeeAdvanceVisible(item, state)) && authorize({
     persona: state.activeUser,
@@ -63,11 +68,18 @@ export function ErpWorkspacePage({state, moduleIds, service, execute, onNavigate
     && (moduleId !== 'treasury-execution' || isTreasuryRecordVisibleToUser(item, state))
     && (moduleId !== 'employee-advance' || isEmployeeAdvanceVisible(item, state))
     && authorize({persona: state.activeUser, permission: permissionFor(moduleId, 'view'), action: 'view', resource: operationalRecordResource(state.activeUser, item)}).allowed).length;
-  const updateWorkspaceUrl = (update: WorkspaceRouteUpdate) => window.history.replaceState(window.history.state, '', workspaceRouteUrl(window.location.href, update));
+  const updateWorkspaceUrl = (update: WorkspaceRouteUpdate) => {
+    const nextUrl = workspaceRouteUrl(routeUrl, update);
+    if (onRouteChange) onRouteChange(nextUrl);
+    else window.history.replaceState(window.history.state, '', nextUrl);
+  };
   return (
     <div className="page-stack erp-workspace">
       <section className="page-intro erp-intro"><div className="page-intro__icon"><FileClock size={24}/></div><div><span className="eyebrow">گردش‌کار عملیاتی · نسخه‌دار</span><h2>{active.group}</h2><p>{active.description}</p></div><div className="erp-intro__actions"><span className="scope-badge">{state.activeUser.roleTitle}</span>{active.id !== 'offboarding' && can(state.activeUser, permissionFor(active.id,'create')) && <button className="button button--primary" onClick={() => setEditing('new')}><Plus size={18}/> ایجاد {active.singular}</button>}</div></section>
-      <div className="module-tabs" role="tablist" aria-label="زیربخش‌ها">{visible.map((module) => <button role="tab" aria-selected={module.id===active.id} className={module.id===active.id?'active':''} key={module.id} onClick={() => {setActiveId(module.id);setSelected(null);setTreasuryEditRequested(false);setStatus('all');setCartableId('');setQuery('');updateWorkspaceUrl({module:module.id,cartable:null,status:null,q:null});onNavigateModule?.(module.id);}}><strong>{module.title}</strong><span>{fa(visibleModuleRecordCount(module.id))}</span></button>)}</div>
+      <div className="module-tabs" role="tablist" aria-label="زیربخش‌ها">{visible.map((module) => <button role="tab" aria-selected={module.id===active.id} className={module.id===active.id?'active':''} key={module.id} onClick={() => {
+        if (module.id !== active.id && onOpenModule) {onOpenModule(module.id);return;}
+        setActiveId(module.id);setSelected(null);setTreasuryEditRequested(false);setStatus('all');setCartableId('');setQuery('');updateWorkspaceUrl({module:module.id,cartable:null,status:null,q:null});onNavigateModule?.(module.id);
+      }}><strong>{module.title}</strong><span>{fa(visibleModuleRecordCount(module.id))}</span></button>)}</div>
       {active.productDecisionRequired && <div className="decision-note"><CircleAlert size={19}/><div><strong>نیازمند تصمیم محصول پیش از عملیات واقعی</strong><span>{active.productDecisionRequired}</span></div></div>}
       <section className="metric-grid metric-grid--compact"><MiniMetric label="کل رکوردها" value={fa(records.length)}/><MiniMetric label="در جریان" value={fa(records.filter((item)=>!['completed','closed','paid','delivered','cancelled','rejected'].includes(item.status)).length)}/><MiniMetric label="سررسید گذشته" value={fa(overdue)}/><MiniMetric label="نسخه گردش‌کار" value={`V${active.workflow.version.toLocaleString('en-US')}`}/></section>
       <section className="panel operational-list">

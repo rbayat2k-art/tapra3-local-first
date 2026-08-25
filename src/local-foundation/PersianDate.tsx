@@ -1,4 +1,4 @@
-import {useEffect, useRef} from 'react';
+import {useCallback, useEffect, useRef} from 'react';
 import DatePicker, {type DateObject, type DatePickerRef} from 'react-multi-date-picker';
 import persian from 'react-date-object/calendars/persian';
 import persianEn from 'react-date-object/locales/persian_en';
@@ -52,13 +52,28 @@ interface PersianDateInputProps {
 export function PersianDateInput({value = '', onChange, disabled = false, required = false, invalid = false, ariaLabel = 'انتخاب تاریخ شمسی', min}: PersianDateInputProps) {
   const pickerValue = value && !Number.isNaN(parseDate(value).getTime()) ? parseDate(value) : null;
   const pickerRef = useRef<DatePickerRef>(null);
+  const calendarOpenRef = useRef(false);
   const unregisterOverlayRef = useRef<(() => void) | null>(null);
   const dialogPortal = useRecordDialogPortal();
-  useEffect(() => () => unregisterOverlayRef.current?.(), []);
-  const closeCalendar = () => {
+  const closeCalendar = useCallback(() => {
     pickerRef.current?.closeCalendar();
     requestAnimationFrame(() => pickerRef.current?.querySelector<HTMLElement>('input')?.focus());
-  };
+  }, []);
+  useEffect(() => {
+    const closeCalendarBeforeParentDialog = (event: KeyboardEvent) => {
+      const calendarVisible = pickerRef.current?.isOpen
+        || Boolean(dialogPortal?.portalTarget?.querySelector('.rmdp-wrapper.tapra-persian-calendar'));
+      if (event.key !== 'Escape' || (!calendarOpenRef.current && !calendarVisible)) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      closeCalendar();
+    };
+    window.addEventListener('keydown', closeCalendarBeforeParentDialog, true);
+    return () => {
+      window.removeEventListener('keydown', closeCalendarBeforeParentDialog, true);
+      unregisterOverlayRef.current?.();
+    };
+  }, [closeCalendar, dialogPortal?.portalTarget]);
   return <DatePicker
     ref={pickerRef}
     value={pickerValue}
@@ -77,10 +92,12 @@ export function PersianDateInput({value = '', onChange, disabled = false, requir
     portal
     portalTarget={dialogPortal?.portalTarget}
     onOpen={() => {
+      calendarOpenRef.current = true;
       unregisterOverlayRef.current?.();
       unregisterOverlayRef.current = dialogPortal?.registerOverlay(closeCalendar) ?? null;
     }}
     onClose={() => {
+      calendarOpenRef.current = false;
       unregisterOverlayRef.current?.();
       unregisterOverlayRef.current = null;
     }}

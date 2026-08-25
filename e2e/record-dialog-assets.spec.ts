@@ -77,9 +77,8 @@ test('پرونده پرسنلی دارایی‌ها و سوابق را فقط‌
   await auditorRow.getByRole('button', {name: 'ورود به دسترسی کاربر'}).click();
   await expect(page.locator('.access-view-banner')).toContainText('فرهاد زمانی');
   await page.goto('/?page=personnel');
-  await page.locator('.record-identity').first().click();
-  const restrictedDialog = page.getByRole('dialog').filter({hasText: 'پرونده پرسنلی'});
-  await expect(restrictedDialog.getByRole('button', {name: /دارایی‌ها و اموال/})).toHaveCount(0);
+  await expect(page).toHaveURL(/page=personnel&category=changes/);
+  await expect(page.locator('.record-identity')).toHaveCount(0);
 });
 
 test('خطای سرویس روی پنجره باز دیده می‌شود و ورودی کاربر حفظ می‌شود', async ({page, context}) => {

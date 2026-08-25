@@ -39,10 +39,13 @@ test('پنجره پاک با کلیک بیرون بسته می‌شود و فر�
   await expect(dialog).toBeHidden();
 
   await page.getByRole('button', {name: /نمای امروز وضعیت/}).click();
-  await expect(page).toHaveURL(/page=personnel/);
-  await expect(bar).toContainText('برای جلوگیری از حذف اطلاعات');
+  await expect(page).toHaveURL(/page=dashboard/);
+  const pageTabs = page.getByRole('navigation', {name: 'تب‌های میزکار'});
+  await expect(pageTabs.locator('.workspace-page-tab > button:first-child').filter({hasText: 'پرسنل'})).toBeVisible();
+  await expect(pageTabs.locator('.workspace-page-tab > button:first-child').filter({hasText: 'نمای امروز'})).toBeVisible();
 
-  await bar.getByRole('tab', {name: /ایجاد پرسنل جدید/}).click();
+  await bar.locator('[data-window-tab]').filter({hasText: 'ایجاد پرسنل جدید'}).click();
+  await expect(page).toHaveURL(/page=personnel/);
   await expect(dialog).toBeVisible();
   await expect(firstName).toHaveValue('آزمایشی');
 
@@ -53,6 +56,32 @@ test('پنجره پاک با کلیک بیرون بسته می‌شود و فر�
   await bar.getByRole('button', {name: 'بستن و حذف تغییرات'}).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(page.getByRole('region', {name: 'پنجره‌های باز'})).toHaveCount(0);
+});
+
+test('تب‌های میزکار مانند مرورگر بین صفحه‌ها جابه‌جا می‌شوند و فرم نیمه‌کاره را نگه می‌دارند', async ({page}) => {
+  test.setTimeout(75_000);
+  await signInAsAdmin(page);
+  await page.goto('/?page=personnel');
+
+  await page.getByRole('button', {name: /نمای امروز وضعیت/}).click();
+  const pageTabs = page.getByRole('navigation', {name: 'تب‌های میزکار'});
+  await pageTabs.locator('.workspace-page-tab > button:first-child').filter({hasText: 'پرسنل'}).click();
+  await page.getByRole('button', {name: 'پرسنل جدید'}).click();
+  const dialog = page.getByRole('dialog');
+  const firstName = dialog.locator('label.field-label').filter({hasText: 'نام'}).first().locator('input');
+  await firstName.fill('فرم نیمه‌کاره تب‌ها');
+
+  await pageTabs.locator('.workspace-page-tab > button:first-child').filter({hasText: 'نمای امروز'}).click();
+  await expect(page).toHaveURL(/page=dashboard/);
+  await expect(dialog).toBeHidden();
+
+  await pageTabs.locator('.workspace-page-tab > button:first-child').filter({hasText: 'پرسنل'}).click();
+  await expect(page).toHaveURL(/page=personnel/);
+  await expect(dialog).toBeVisible();
+  await expect(firstName).toHaveValue('فرم نیمه‌کاره تب‌ها');
+
+  await page.getByRole('navigation', {name: 'تب‌های میزکار'}).getByRole('button', {name: /بستن تب پرسنل/}).click();
+  await expect(page.getByRole('region', {name: 'پنجره‌های باز'})).toContainText('این تب یک فرم ذخیره‌نشده دارد');
 });
 
 test('منوی حساب و پنجره خواندنی با کلیک بیرون بسته می‌شوند', async ({page}) => {
@@ -81,6 +110,6 @@ test('فرم‌های عملیاتی قدیمی نیز بیرون پنجره ک�
 
   const bar = page.getByRole('region', {name: 'پنجره‌های باز'});
   await expect(bar).toContainText('ایجاد درخواست مرخصی');
-  await bar.getByRole('tab', {name: /ایجاد درخواست مرخصی/}).click();
+  await bar.locator('[data-window-tab]').filter({hasText: 'ایجاد درخواست مرخصی'}).click();
   await expect(title).toHaveValue('مرخصی آزمایشی حفظ پنجره');
 });

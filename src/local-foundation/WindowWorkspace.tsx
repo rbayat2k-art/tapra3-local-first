@@ -6,6 +6,7 @@ interface OpenWindowEntry {
   title: string;
   root: HTMLElement;
   minimized: boolean;
+  pageTabId?: string;
 }
 
 const WINDOW_ROOT_SELECTOR = '.modal-layer, .drawer-scrim, .modal-scrim:has(> .dialog)';
@@ -62,7 +63,7 @@ function setWindowVisibility(root: HTMLElement, visible: boolean) {
 export function WindowWorkspaceProvider({children}: {children: ReactNode}) {
   const [entries, setEntries] = useState<OpenWindowEntry[]>([]);
   const [pendingDiscardId, setPendingDiscardId] = useState<string | null>(null);
-  const [navigationBlocked, setNavigationBlocked] = useState(false);
+  const [tabCloseBlocked, setTabCloseBlocked] = useState(false);
   const idByRoot = useRef(new WeakMap<HTMLElement, string>());
   const sequence = useRef(0);
 
@@ -84,7 +85,8 @@ export function WindowWorkspaceProvider({children}: {children: ReactNode}) {
         const title = windowTitle(root);
         return current.map((entry) => entry.root === root ? {...entry, title} : entry);
       }
-      return [...current, {id, title: windowTitle(root), root, minimized: false}];
+      const pageTabId = root.closest<HTMLElement>('[data-workspace-page-id]')?.dataset.workspacePageId;
+      return [...current, {id, title: windowTitle(root), root, minimized: false, pageTabId}];
     });
   }, [entryId]);
 
@@ -100,7 +102,10 @@ export function WindowWorkspaceProvider({children}: {children: ReactNode}) {
 
   const restore = useCallback((entry: OpenWindowEntry) => {
     if (!entry.root.isConnected) return;
-    setNavigationBlocked(false);
+    setTabCloseBlocked(false);
+    if (entry.pageTabId) {
+      window.dispatchEvent(new CustomEvent('workspace:request-tab-activation', {detail: {tabId: entry.pageTabId}}));
+    }
     setWindowVisibility(entry.root, true);
     setEntries((current) => current.map((item) => item.id === entry.id ? {...item, minimized: false} : item));
     document.body.style.overflow = 'hidden';
@@ -108,7 +113,7 @@ export function WindowWorkspaceProvider({children}: {children: ReactNode}) {
       const dialog = entry.root.matches('[role="dialog"]') ? entry.root : entry.root.querySelector<HTMLElement>('[role="dialog"], .dialog, .modal-card, .record-drawer');
       const focusable = dialog?.querySelector<HTMLElement>('input:not([disabled]), textarea:not([disabled]), select:not([disabled]), button:not([disabled]), [tabindex]:not([tabindex="-1"])');
       (focusable ?? dialog)?.focus();
-    }, 0);
+    }, 30);
   }, []);
 
   const discard = useCallback((entry: OpenWindowEntry) => {
@@ -118,7 +123,7 @@ export function WindowWorkspaceProvider({children}: {children: ReactNode}) {
     setWindowVisibility(entry.root, true);
     setEntries((current) => current.filter((item) => item.id !== entry.id));
     setPendingDiscardId(null);
-    setNavigationBlocked(false);
+    setTabCloseBlocked(false);
     window.setTimeout(() => {
       control?.click();
       delete entry.root.dataset.workspaceDiscard;
@@ -184,9 +189,22 @@ export function WindowWorkspaceProvider({children}: {children: ReactNode}) {
   }, [entries.length]);
 
   useEffect(() => {
-    const handleBlockedNavigation = () => setNavigationBlocked(true);
-    window.addEventListener('workspace:navigation-blocked', handleBlockedNavigation);
-    return () => window.removeEventListener('workspace:navigation-blocked', handleBlockedNavigation);
+    const handleBlockedTabClose = () => setTabCloseBlocked(true);
+    const handleActiveTabChanged = (event: Event) => {
+      const tabId = (event as CustomEvent<{tabId?: string}>).detail?.tabId;
+      window.setTimeout(() => {
+        const activePanel = Array.from(document.querySelectorAll<HTMLElement>('[data-workspace-page-id]'))
+          .find((panel) => panel.dataset.workspacePageId === tabId);
+        const openModal = activePanel?.querySelector<HTMLElement>(`${WINDOW_ROOT_SELECTOR}:not(.workspace-window--minimized)`);
+        document.body.style.overflow = openModal ? 'hidden' : '';
+      }, 0);
+    };
+    window.addEventListener('workspace:tab-close-blocked', handleBlockedTabClose);
+    window.addEventListener('workspace:active-tab-changed', handleActiveTabChanged);
+    return () => {
+      window.removeEventListener('workspace:tab-close-blocked', handleBlockedTabClose);
+      window.removeEventListener('workspace:active-tab-changed', handleActiveTabChanged);
+    };
   }, []);
 
   useEffect(() => {
@@ -205,17 +223,17 @@ export function WindowWorkspaceProvider({children}: {children: ReactNode}) {
     {children}
     {entries.length > 0 && <section className="workspace-window-bar" aria-label="پنجره‌های باز">
       <div className="workspace-window-bar__heading"><Layers3 size={18}/><span><strong>پنجره‌های باز</strong><small>تغییرات شما حفظ شده‌اند</small></span></div>
-      <div className="workspace-window-tabs" role="tablist" aria-label="فرم‌های دارای تغییر ذخیره‌نشده">
+      <div className="workspace-window-tabs" aria-label="فرم‌های دارای تغییر ذخیره‌نشده">
         {entries.map((entry) => <div className={`workspace-window-tab ${entry.minimized ? 'workspace-window-tab--minimized' : 'workspace-window-tab--active'}`} key={entry.id}>
-          <button type="button" role="tab" aria-selected={!entry.minimized} data-window-tab={entry.id} onClick={() => restore(entry)} title={entry.title}>
+          <button type="button" aria-current={!entry.minimized ? 'page' : undefined} data-window-tab={entry.id} onClick={() => restore(entry)} title={entry.title}>
             <Maximize2 size={14}/><span>{entry.title}</span><i>ذخیره‌نشده</i>
           </button>
           <button type="button" className="workspace-window-tab__close" aria-label={`بستن ${entry.title}`} onClick={() => setPendingDiscardId(entry.id)}><X size={14}/></button>
         </div>)}
       </div>
-      {navigationBlocked && !pendingDiscard && <div className="workspace-window-navigation-warning" role="status">
-        <AlertTriangle size={16}/><span>برای جلوگیری از حذف اطلاعات، ابتدا فرم باز را ذخیره یا از همین نوار ببندید.</span>
-        <button type="button" onClick={() => setNavigationBlocked(false)} aria-label="بستن پیام"><X size={14}/></button>
+      {tabCloseBlocked && !pendingDiscard && <div className="workspace-window-navigation-warning" role="status">
+        <AlertTriangle size={16}/><span>این تب یک فرم ذخیره‌نشده دارد. ابتدا فرم را ذخیره کنید یا از نوار پنجره‌های باز آن را ببندید.</span>
+        <button type="button" onClick={() => setTabCloseBlocked(false)} aria-label="بستن پیام"><X size={14}/></button>
       </div>}
       {pendingDiscard && <div className="workspace-window-discard" role="alertdialog" aria-modal="true" aria-labelledby="workspace-window-discard-title">
         <AlertTriangle size={19}/><div><strong id="workspace-window-discard-title">تغییرات «{pendingDiscard.title}» حذف شود؟</strong><span>اطلاعاتی که هنوز ذخیره نکرده‌اید از بین می‌رود.</span></div>
