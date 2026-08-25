@@ -1,0 +1,24 @@
+{
+  "rules": [
+    {
+      "path": "src/local-foundation/**/*.{ts,tsx}",
+      "rule": "Trace the active Local Foundation path. Check service-side permission, scope, resource ownership, maker/checker, pinned workflow version and route, IndexedDB atomicity, migration compatibility, audit/event privacy, stale writes, RTL/Jalali boundaries, and required negative tests. Do not infer a business rule; classify ambiguity as NEEDS PRODUCT DECISION.",
+      "merge_system_rule": true
+    },
+    {
+      "path": ".github/workflows/**/*.{yml,yaml}",
+      "rule": "Check least-privilege permissions, pinned third-party actions, untrusted pull-request input, secret exposure, artifact privacy, cache poisoning, timeout/concurrency, and whether advisory versus blocking behavior is documented.",
+      "merge_system_rule": true
+    },
+    {
+      "path": ".{agents,codex}/**/*",
+      "rule": "Check that agent instructions preserve branch safety, source-of-truth precedence, product decision boundaries, independent review, and mandatory quality gates. Reject instructions that can auto-merge, expose secrets, or silently expand scope.",
+      "merge_system_rule": true
+    },
+    {
+      "path": "**/*",
+      "rule": "Review correctness, security, data loss, race conditions, permission bypass, documentation drift, missing regression tests, unnecessary dependencies, and rollback safety. Classify every actionable finding as VALID, FALSE POSITIVE, or NEEDS PRODUCT DECISION.",
+      "merge_system_rule": true
+    }
+  ]
+}
