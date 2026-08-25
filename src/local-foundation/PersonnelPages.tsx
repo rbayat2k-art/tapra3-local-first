@@ -33,6 +33,19 @@ const SALES_LEVELS: {id: SalesHierarchyLevel; label: string; shortLabel: string}
 ];
 const SALES_CHANNELS: {id: SalesChannel; label: string}[] = [{id: 'call_center', label: 'کال‌سنتر'}, {id: 'branch', label: 'فروش شعبه'}, {id: 'field', label: 'فروش میدانی'}, {id: 'partner', label: 'شبکه پذیرندگان'}];
 type PersonnelCategory = 'all' | 'sales' | 'changes' | 'incomplete';
+const PERSONNEL_CATEGORIES = new Set<PersonnelCategory>(['all', 'sales', 'changes', 'incomplete']);
+function personnelCategoryFromUrl(): PersonnelCategory | undefined {
+  try {
+    const value = new URL(window.location.href).searchParams.get('category') as PersonnelCategory | null;
+    return value && PERSONNEL_CATEGORIES.has(value) ? value : undefined;
+  } catch { return undefined; }
+}
+function replacePersonnelCategoryInUrl(category: PersonnelCategory) {
+  const url = new URL(window.location.href);
+  if (category === 'all') url.searchParams.delete('category');
+  else url.searchParams.set('category', category);
+  window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
+}
 
 export function PersonnelPage({state, service, execute}: Props) {
   const mayViewPersonnel = can(state.activeUser, 'organization.personnel.view');
@@ -41,7 +54,13 @@ export function PersonnelPage({state, service, execute}: Props) {
   const directReportIds = useMemo(() => new Set(state.personnel.filter((person) => person.managerPersonnelId === state.activeUser.personnelId || person.salesSupervisorPersonnelId === state.activeUser.personnelId).map((person) => person.id)), [state.personnel, state.activeUser.personnelId]);
   const mayViewDirectReports = directReportIds.size > 0;
   const [query, setQuery] = useState(''); const [status, setStatus] = useState('all'); const [unitId, setUnitId] = useState('all'); const [positionId, setPositionId] = useState('all'); const [employmentType, setEmploymentType] = useState('all');
-  const [category, setCategory] = useState<PersonnelCategory>(() => mayViewPersonnel || mayViewDirectReports ? 'all' : mayViewIncomplete ? 'incomplete' : 'changes'); const [salesLevel, setSalesLevel] = useState('all'); const [salesBranchId, setSalesBranchId] = useState('all');
+  const [category, setCategory] = useState<PersonnelCategory>(() => {
+    const requested = personnelCategoryFromUrl();
+    if (requested === 'changes' && mayReviewChanges) return requested;
+    if (requested === 'incomplete' && mayViewIncomplete) return requested;
+    if ((requested === 'all' || requested === 'sales') && (mayViewPersonnel || mayViewDirectReports)) return requested;
+    return mayViewPersonnel || mayViewDirectReports ? 'all' : mayViewIncomplete ? 'incomplete' : 'changes';
+  }); const [salesLevel, setSalesLevel] = useState('all'); const [salesBranchId, setSalesBranchId] = useState('all');
   const [editing, setEditing] = useState<PersonnelRecord | 'new' | null>(null); const [editingTab, setEditingTab] = useState<PersonnelTab>('employment'); const [accountFor, setAccountFor] = useState<PersonnelRecord | null>(null); const [statusUser, setStatusUser] = useState<{personnel: PersonnelRecord; status: UserStatus} | null>(null); const [movementFor, setMovementFor] = useState<{personnel: PersonnelRecord; kind: PersonnelMovementKind} | null>(null);
   const [endingFor, setEndingFor] = useState<PersonnelRecord | null>(null); const [rehiringFor, setRehiringFor] = useState<PersonnelRecord | null>(null); const [cancelEndingFor, setCancelEndingFor] = useState<PersonnelRecord | null>(null);
   const mayManage = can(state.activeUser, 'organization.personnel.manage');
@@ -72,11 +91,12 @@ export function PersonnelPage({state, service, execute}: Props) {
   ], [state.units, state.positions, state.users, state.personnel]);
   const {sortedRows: sortedPersonnel, sort, requestSort} = useSortableRows(visible, sortColumns, 'person', 'asc');
   useEffect(() => {
-    if (!mayViewPersonnel && !mayViewDirectReports && mayViewIncomplete && category !== 'incomplete') {setCategory('incomplete');return;}
-    if (!mayViewPersonnel && !mayViewDirectReports && !mayViewIncomplete && mayReviewChanges && category !== 'changes') {setCategory('changes');return;}
-    if (!mayReviewChanges && category === 'changes') setCategory('all');
-    if (!mayViewIncomplete && category === 'incomplete') setCategory('all');
+    if (!mayViewPersonnel && !mayViewDirectReports && mayViewIncomplete && category !== 'incomplete') {setCategory('incomplete');replacePersonnelCategoryInUrl('incomplete');return;}
+    if (!mayViewPersonnel && !mayViewDirectReports && !mayViewIncomplete && mayReviewChanges && category !== 'changes') {setCategory('changes');replacePersonnelCategoryInUrl('changes');return;}
+    if (!mayReviewChanges && category === 'changes') {setCategory('all');replacePersonnelCategoryInUrl('all');}
+    if (!mayViewIncomplete && category === 'incomplete') {setCategory('all');replacePersonnelCategoryInUrl('all');}
   }, [mayViewPersonnel, mayViewDirectReports, mayReviewChanges, mayViewIncomplete, category]);
+  useEffect(() => { replacePersonnelCategoryInUrl(category); }, [category]);
   return <div className="page-stack personnel-page">
     <section className="page-intro org-page-intro"><span className="page-intro-icon"><ContactRound size={24} /></span><div><span>سازمان / پرسنل</span><h2>پرسنل سازمان</h2><p>پرونده شغلی افراد مستقل از حساب کاربری نگهداری می‌شود؛ پایان همکاری یا غیرفعال‌شدن حساب هیچ رکوردی را حذف نمی‌کند.</p></div>{(mayExport || mayManage) && <div className="page-intro-action action-cluster">{mayExport && <button className="button button--secondary" title="خروجی جامع همه پرسنل و تاریخچه گردش" onClick={() => void execute('personnel-export', async () => {const result = await downloadPersonnelWorkbook(state, mayExportBanking); return service.recordPersonnelExport(result.personnelCount, result.movementCount, result.includesBanking);}, 'فایل Excel جامع پرسنل دریافت و رویداد آن در ممیزی ثبت شد.')}><Download size={18} /> خروجی پرسنل</button>}{mayManage && <button className="org-primary-action" onClick={() => {setEditingTab('personal');setEditing('new');}}><Plus size={18} /> پرسنل جدید</button>}</div>}</section>
     <div className="personnel-category-tabs" role="tablist" aria-label="دسته‌بندی پرسنل">{mayViewPersonnel && <button role="tab" aria-selected={category === 'all'} className={category === 'all' ? 'active' : ''} onClick={() => setCategory('all')}><UsersRound size={18}/><span><strong>همه پرسنل</strong><small>{state.personnel.length.toLocaleString('en-US')} پرونده سازمانی</small></span></button>}{mayViewPersonnel && <button role="tab" aria-selected={category === 'sales'} className={category === 'sales' ? 'active' : ''} onClick={() => setCategory('sales')}><Crown size={18}/><span><strong>پرسنل فروش</strong><small>{salesPersonnel.length.toLocaleString('en-US')} عضو شبکه فروش</small></span></button>}{mayViewIncomplete && <button role="tab" aria-selected={category === 'incomplete'} className={category === 'incomplete' ? 'active' : ''} onClick={() => setCategory('incomplete')}><Files size={18}/><span><strong>نواقص پرونده</strong><small>{incompletePersonnelCount.toLocaleString('en-US')} نیازمند تکمیل</small></span></button>}{mayReviewChanges && <button role="tab" aria-selected={category === 'changes'} className={category === 'changes' ? 'active' : ''} onClick={() => setCategory('changes')}><ClipboardCheck size={18}/><span><strong>صف تغییرات</strong><small>{state.personnelProfileChangeRequests.filter((request) => request.status === 'submitted').length.toLocaleString('en-US')} در انتظار بررسی</small></span></button>}</div>

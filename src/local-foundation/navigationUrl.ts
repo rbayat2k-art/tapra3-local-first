@@ -10,7 +10,16 @@ export function pageFromUrl(href: string): string {
 export function pageRouteUrl(href: string, page: string): string {
   const url = new URL(href);
   url.searchParams.set('page', page);
-  for (const key of ['module', 'cartable', 'status', 'q']) url.searchParams.delete(key);
+  for (const key of ['module', 'cartable', 'status', 'q', 'category']) url.searchParams.delete(key);
+  return routeText(url);
+}
+
+export function destinationRouteUrl(href: string, page: string, moduleId?: string, categoryId?: string): string {
+  const url = new URL(href);
+  url.searchParams.set('page', page);
+  for (const key of ['module', 'cartable', 'status', 'q', 'category']) url.searchParams.delete(key);
+  if (moduleId) url.searchParams.set('module', moduleId);
+  if (categoryId) url.searchParams.set('category', categoryId);
   return routeText(url);
 }
 

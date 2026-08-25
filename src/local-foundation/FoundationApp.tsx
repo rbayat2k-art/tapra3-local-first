@@ -29,13 +29,21 @@ import {SortHeader, useSortableRows, type SortColumn} from './Sorting';
 import {formatPersianDateTime} from './PersianDate';
 import {ProfileCompletionGate} from './ProfileCompletionGate';
 import {type ProfileCompletionInput} from './profileCompletion';
-import {personnelCompletionSummary} from './personnelDocuments';
+import {PERSONNEL_DOCUMENT_PERMISSION_QUEUE, personnelCompletionSummary} from './personnelDocuments';
 import {MyAccountPage} from './MyAccountPage';
 import {dashboardCapabilitiesFor, type DashboardCapability} from './organizationAccess';
 import {digitsOnly, normalizeIranianMobile} from '../utils/operationalFormat';
-import {pageFromUrl, pageRouteUrl} from './navigationUrl';
+import {destinationRouteUrl, pageFromUrl, pageRouteUrl} from './navigationUrl';
 import {WorkflowAdminPage} from './WorkflowAdminPage';
 import {RecruitmentPage} from './RecruitmentPage';
+import {NavigationSearch, type NavigationSearchDestination} from './NavigationSearch';
+import {
+  frequentNavigationDestinations,
+  incrementNavigationUsage,
+  loadNavigationUsage,
+  saveNavigationUsage,
+  type NavigationUsageEntry,
+} from './navigationDiscovery';
 
 type PageId = string;
 type ThemePreference = 'light' | 'dark' | 'system';
@@ -59,6 +67,25 @@ const DOMAIN_PAGE_MODULES: Record<string, string[]> = {
   warehouse: ['warehouse-master','location','inventory-item','receipt','reservation','transfer','adjustment','count','return','inventory-movement'], logistics: ['shipment','delivery'], service: ['service-case','service-evidence'], support: ['support-case','support-transaction'], contracts: ['contract'], assets: ['fixed-asset','asset-transfer','asset-maintenance'], tasks: ['task'], communications: ['chat','message'], letters: ['letter'], documents: ['document'],
 };
 const modulePermissions = (page: string) => (DOMAIN_PAGE_MODULES[page] ?? []).map((moduleId) => permissionFor(moduleId, 'view'));
+
+const PAGE_SEARCH_ALIASES: Record<string, string[]> = {
+  personnel: ['پرستل', 'کارکنان', 'پرونده پرسنلی'],
+  hcm: ['منابع انسانی', 'امور کارکنان'],
+  procurement: ['تدارکات', 'خرید'],
+  treasury: ['خزانه داری', 'پرداخت'],
+  'my-account': ['پروفایل من', 'حساب من'],
+};
+
+const MODULE_SEARCH_ALIASES: Record<string, string[]> = {
+  'employee-advance': ['مساعده', 'مساعده پرسنلی', 'درخواست مساعده'],
+  'purchase-request': ['درخواست خرید', 'خرید کالا', 'خرید خدمات'],
+  'personnel-document': ['مدارک پرسنلی', 'اسناد پرسنل'],
+  leave: ['مرخصی', 'درخواست مرخصی'],
+  mission: ['ماموریت', 'مأموریت'],
+  'treasury-execution': ['صف پرداخت', 'اجرای پرداخت'],
+};
+
+const NON_TRACKED_PAGE_IDS = new Set(['dashboard', 'my-account', 'appearance', 'policy', 'audit', 'data', 'qa']);
 
 const NAVIGATION: NavigationItem[] = [
   {id: 'dashboard', title: 'نمای امروز', subtitle: 'وضعیت بنیاد محلی', icon: LayoutDashboard, anyPermissions: ['foundation.dashboard.view'], group: 'کار روزانه'},
@@ -109,11 +136,15 @@ const LEGACY_UI_PREFERENCES_KEY = 'tapra2_ui_preferences_v1';
 const SIDEBAR_COLLAPSED_KEY = 'tapra2_sidebar_collapsed_v1';
 const SIDEBAR_GROUPS_KEY = 'tapra2_sidebar_groups_v1';
 const DEFAULT_PREFERENCES: UiPreferences = {theme: 'system', fontSize: 'large', density: 'comfortable', columnGap: 8, reduceMotion: false, highContrast: false};
+const safeLocalStorage = {
+  getItem(key: string): string | null { try { return window.localStorage.getItem(key); } catch { return null; } },
+  setItem(key: string, value: string): void { try { window.localStorage.setItem(key, value); } catch { /* Preferences remain usable for this session. */ } },
+};
 
 function loadPreferences(): UiPreferences {
   try {
-    const current = localStorage.getItem(UI_PREFERENCES_KEY);
-    const legacy = !current ? localStorage.getItem(LEGACY_UI_PREFERENCES_KEY) : null;
+    const current = safeLocalStorage.getItem(UI_PREFERENCES_KEY);
+    const legacy = !current ? safeLocalStorage.getItem(LEGACY_UI_PREFERENCES_KEY) : null;
     const stored = JSON.parse(current ?? legacy ?? '{}') as Partial<UiPreferences>;
     return {...DEFAULT_PREFERENCES, ...stored, columnGap: legacy && stored.columnGap === 4 ? 8 : stored.columnGap ?? DEFAULT_PREFERENCES.columnGap};
   }
@@ -123,10 +154,12 @@ function loadPreferences(): UiPreferences {
 export function LocalFoundationApp() {
   const [foundation, setFoundation] = useState<FoundationState | null>(null);
   const [page, setPageState] = useState<PageId>(() => pageFromUrl(window.location.href));
+  const [routeRevision, setRouteRevision] = useState(0);
   const setPage = useCallback((nextPage: PageId) => {
     const nextUrl = pageRouteUrl(window.location.href, nextPage);
     if (`${window.location.pathname}${window.location.search}${window.location.hash}` !== nextUrl) window.history.pushState({page: nextPage}, '', nextUrl);
     setPageState(nextPage);
+    setRouteRevision((value) => value + 1);
   }, []);
   const [preferences, setPreferences] = useState<UiPreferences>(loadPreferences);
   const [accountOpen, setAccountOpen] = useState(false);
@@ -136,10 +169,10 @@ export function LocalFoundationApp() {
   const [registrationOpen, setRegistrationOpen] = useState(false);
   const [editUser, setEditUser] = useState<LocalUser | 'new' | null>(null);
   const [mobileOpen, setMobileOpen] = useState(false);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === 'true');
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => safeLocalStorage.getItem(SIDEBAR_COLLAPSED_KEY) === 'true');
   const [expandedNavigationGroups, setExpandedNavigationGroups] = useState<Set<string>>(() => {
     try {
-      const stored = JSON.parse(localStorage.getItem(SIDEBAR_GROUPS_KEY) ?? '[]') as string[];
+      const stored = JSON.parse(safeLocalStorage.getItem(SIDEBAR_GROUPS_KEY) ?? '[]') as string[];
       return new Set(stored.length ? stored : ['کار روزانه']);
     } catch { return new Set(['کار روزانه']); }
   });
@@ -149,7 +182,24 @@ export function LocalFoundationApp() {
   const [resetOpen, setResetOpen] = useState(false);
   const [backupOpen, setBackupOpen] = useState(false);
   const [restoreInput, setRestoreInput] = useState<SnapshotManifest | EncryptedSnapshot | null>(null);
+  const [navigationUsageState, setNavigationUsageState] = useState<{ownerUserId: string | null; entries: NavigationUsageEntry[]}>({ownerUserId: null, entries: []});
+  const [navigationSearchActive, setNavigationSearchActive] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const sidebarRef = useRef<HTMLElement>(null);
+  const mainAreaRef = useRef<HTMLElement>(null);
+  const mobileMenuButtonRef = useRef<HTMLButtonElement>(null);
+  const mobileSidebarCloseRef = useRef<HTMLButtonElement>(null);
+  const [mobileSidebarMode, setMobileSidebarMode] = useState(() => window.matchMedia('(max-width: 920px)').matches);
+  const navigationIdentityId = foundation?.activeUser.id;
+  const navigationInQa = Boolean(foundation?.session.actingAdminUserId);
+  const navigationUsage = navigationIdentityId && !navigationInQa && navigationUsageState.ownerUserId === navigationIdentityId
+    ? navigationUsageState.entries
+    : [];
+
+  const closeMobileSidebar = useCallback(() => {
+    setMobileOpen(false);
+    window.setTimeout(() => mobileMenuButtonRef.current?.focus(), 0);
+  }, []);
 
   const visibleNavigation = useMemo(() => foundation
     ? NAVIGATION.filter((item) => {
@@ -164,6 +214,99 @@ export function LocalFoundationApp() {
     return Array.from(groups, ([group, items]) => ({group, items}));
   }, [visibleNavigation]);
 
+  const navigationDestinations = useMemo<NavigationSearchDestination[]>(() => {
+    if (!foundation) return [];
+    const visiblePageIds = new Set(visibleNavigation.map((item) => item.id));
+    const pages = visibleNavigation.map((item) => ({
+      id: `page:${item.id}`,
+      page: item.id,
+      title: item.title,
+      subtitle: item.subtitle,
+      group: item.group,
+      aliases: PAGE_SEARCH_ALIASES[item.id] ?? [],
+      icon: item.icon,
+      trackUsage: !NON_TRACKED_PAGE_IDS.has(item.id),
+    }));
+    const modules = Object.entries(DOMAIN_PAGE_MODULES).flatMap(([pageId, moduleIds]) => {
+      if (!visiblePageIds.has(pageId)) return [];
+      const parent = NAVIGATION.find((item) => item.id === pageId);
+      if (!parent) return [];
+      return ERP_MODULES
+        .filter((module) => moduleIds.includes(module.id) && can(foundation.activeUser, permissionFor(module.id, 'view')))
+        .map((module) => ({
+          id: `module:${module.id}`,
+          page: pageId,
+          moduleId: module.id,
+          title: module.title,
+          subtitle: module.description,
+          group: `${parent.title} · ${module.group}`,
+          aliases: [module.singular, ...(MODULE_SEARCH_ALIASES[module.id] ?? [])],
+          icon: parent.icon,
+          trackUsage: true,
+        }));
+    });
+    const personnelPage = NAVIGATION.find((item) => item.id === 'personnel');
+    const personnelViews: NavigationSearchDestination[] = personnelPage && visiblePageIds.has('personnel') ? [
+      ...(can(foundation.activeUser, 'organization.personnel.changes.review') ? [{
+        id: 'view:personnel-changes', page: 'personnel', categoryId: 'changes', title: 'صف تغییرات پرسنل',
+        subtitle: 'بررسی درخواست‌های تغییر اطلاعات پرسنلی', group: 'سازمان · پرسنل',
+        aliases: ['بررسی تغییرات پرسنل'], icon: personnelPage.icon, trackUsage: true,
+      }] : []),
+      ...(foundation.activeUser.permissions.includes(PERSONNEL_DOCUMENT_PERMISSION_QUEUE) ? [{
+        id: 'view:personnel-incomplete', page: 'personnel', categoryId: 'incomplete', title: 'نواقص پرونده پرسنلی',
+        subtitle: 'افراد نیازمند تکمیل اطلاعات یا مدارک', group: 'سازمان · پرسنل',
+        aliases: ['مدارک ناقص', 'اطلاعات ناقص پرسنل'], icon: personnelPage.icon, trackUsage: true,
+      }] : []),
+    ] : [];
+    return [...pages, ...modules, ...personnelViews];
+  }, [foundation, visibleNavigation]);
+
+  const resolvedPage = useMemo(() => {
+    if (!foundation) return page;
+    if (page === 'account-security' && !foundation.session.actingAdminUserId) return page;
+    if (visibleNavigation.some((item) => item.id === page)) return page;
+    return visibleNavigation.find((item) => item.id === 'dashboard')?.id
+      ?? visibleNavigation.find((item) => item.id === 'my-account')?.id
+      ?? 'my-account';
+  }, [foundation, page, visibleNavigation]);
+
+  const trackNavigationDestination = useCallback((destination: NavigationSearchDestination) => {
+    if (!foundation || foundation.session.actingAdminUserId || destination.trackUsage === false) return;
+    setNavigationUsageState((current) => {
+      const currentEntries = current.ownerUserId === foundation.activeUser.id ? current.entries : [];
+      const next = incrementNavigationUsage(currentEntries, destination.id);
+      saveNavigationUsage(foundation.activeUser.id, next, safeLocalStorage);
+      return {ownerUserId: foundation.activeUser.id, entries: next};
+    });
+  }, [foundation]);
+
+  const openNavigationDestination = useCallback((requested: NavigationSearchDestination, options?: {track?: boolean}) => {
+    const destination = navigationDestinations.find((item) => item.id === requested.id);
+    if (!destination) return;
+    const nextUrl = destinationRouteUrl(window.location.href, destination.page, destination.moduleId, destination.categoryId);
+    if (`${window.location.pathname}${window.location.search}${window.location.hash}` !== nextUrl) {
+      window.history.pushState({page: destination.page, module: destination.moduleId, category: destination.categoryId}, '', nextUrl);
+    }
+    setPageState(destination.page);
+    setRouteRevision((value) => value + 1);
+    const shouldMoveFocusToPage = mobileSidebarMode && mobileOpen;
+    setMobileOpen(false);
+    setNavigationSearchActive(false);
+    if (options?.track !== false) trackNavigationDestination(destination);
+    if (shouldMoveFocusToPage) window.setTimeout(() => document.getElementById('main-page-heading')?.focus(), 0);
+  }, [mobileOpen, mobileSidebarMode, navigationDestinations, trackNavigationDestination]);
+
+  const navigateToPage = useCallback((nextPage: PageId) => {
+    const destination = navigationDestinations.find((item) => item.id === `page:${nextPage}`);
+    if (destination) openNavigationDestination(destination);
+    else setPage(nextPage);
+  }, [navigationDestinations, openNavigationDestination, setPage]);
+
+  const trackModuleNavigation = useCallback((moduleId: string) => {
+    const destination = navigationDestinations.find((item) => item.id === `module:${moduleId}`);
+    if (destination) trackNavigationDestination(destination);
+  }, [navigationDestinations, trackNavigationDestination]);
+
   useEffect(() => {
     let active = true;
     service.initialize()
@@ -174,10 +317,70 @@ export function LocalFoundationApp() {
   }, []);
 
   useEffect(() => {
-    const restorePageFromUrl = () => setPageState(pageFromUrl(window.location.href));
+    const restorePageFromUrl = () => {
+      setPageState(pageFromUrl(window.location.href));
+      setRouteRevision((value) => value + 1);
+    };
     window.addEventListener('popstate', restorePageFromUrl);
     return () => window.removeEventListener('popstate', restorePageFromUrl);
   }, []);
+
+  useEffect(() => {
+    const media = window.matchMedia('(max-width: 920px)');
+    const update = () => setMobileSidebarMode(media.matches);
+    update();
+    media.addEventListener('change', update);
+    return () => media.removeEventListener('change', update);
+  }, []);
+
+  useEffect(() => {
+    const sidebar = sidebarRef.current;
+    const main = mainAreaRef.current;
+    if (!sidebar || !main) return;
+    if (!mobileSidebarMode) {
+      sidebar.removeAttribute('inert');
+      main.removeAttribute('inert');
+      return;
+    }
+    if (!mobileOpen) {
+      sidebar.setAttribute('inert', '');
+      main.removeAttribute('inert');
+      return;
+    }
+    sidebar.removeAttribute('inert');
+    main.setAttribute('inert', '');
+    window.setTimeout(() => mobileSidebarCloseRef.current?.focus(), 0);
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeMobileSidebar();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const focusable = Array.from(sidebar.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'))
+        .filter((element) => element.getClientRects().length > 0 && window.getComputedStyle(element).visibility !== 'hidden');
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    };
+    document.addEventListener('keydown', handleKeyDown, true);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown, true);
+      main.removeAttribute('inert');
+    };
+  }, [closeMobileSidebar, mobileOpen, mobileSidebarMode]);
+
+  useEffect(() => {
+    if (!navigationIdentityId || navigationInQa) {
+      setNavigationUsageState({ownerUserId: null, entries: []});
+      setNavigationSearchActive(false);
+      return;
+    }
+    setNavigationUsageState({ownerUserId: navigationIdentityId, entries: loadNavigationUsage(navigationIdentityId, safeLocalStorage)});
+    setNavigationSearchActive(false);
+  }, [navigationIdentityId, navigationInQa]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -193,29 +396,30 @@ export function LocalFoundationApp() {
     };
     apply();
     media.addEventListener('change', apply);
-    localStorage.setItem(UI_PREFERENCES_KEY, JSON.stringify(preferences));
+    safeLocalStorage.setItem(UI_PREFERENCES_KEY, JSON.stringify(preferences));
     return () => media.removeEventListener('change', apply);
   }, [preferences]);
 
   useEffect(() => {
-    if (!foundation) return;
-    if (page === 'account-security') return;
-    const isCurrentVisible = visibleNavigation.some((item) => item.id === page);
-    if (!isCurrentVisible) setPage('dashboard');
-  }, [foundation, page, visibleNavigation]);
+    if (!foundation || page === resolvedPage) return;
+    const nextUrl = pageRouteUrl(window.location.href, resolvedPage);
+    window.history.replaceState({page: resolvedPage}, '', nextUrl);
+    setPageState(resolvedPage);
+    setRouteRevision((value) => value + 1);
+  }, [foundation, page, resolvedPage]);
 
   useEffect(() => {
-    const activeGroup = visibleNavigation.find((item) => item.id === page)?.group;
+    const activeGroup = visibleNavigation.find((item) => item.id === resolvedPage)?.group;
     if (!activeGroup) return;
     setExpandedNavigationGroups((current) => current.has(activeGroup) ? current : new Set(current).add(activeGroup));
-  }, [page, visibleNavigation]);
+  }, [resolvedPage, visibleNavigation]);
 
   useEffect(() => {
-    localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(sidebarCollapsed));
+    safeLocalStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(sidebarCollapsed));
   }, [sidebarCollapsed]);
 
   useEffect(() => {
-    localStorage.setItem(SIDEBAR_GROUPS_KEY, JSON.stringify(Array.from(expandedNavigationGroups)));
+    safeLocalStorage.setItem(SIDEBAR_GROUPS_KEY, JSON.stringify(Array.from(expandedNavigationGroups)));
   }, [expandedNavigationGroups]);
 
   function toggleNavigationGroup(group: string) {
@@ -300,7 +504,7 @@ export function LocalFoundationApp() {
     setError(null);
     try {
       const snapshot = await service.exportSnapshot(password);
-      downloadJson(snapshot, password ? 'tapra2-backup-encrypted.json' : 'tapra2-backup.json');
+      downloadJson(snapshot, password ? 'tira-backup-encrypted.json' : 'tira-backup.json');
       setFoundation(await service.loadState());
       setToast(password ? 'پشتیبان رمزگذاری‌شده آماده شد.' : 'فایل پشتیبان آماده شد.');
       setBackupOpen(false);
@@ -326,8 +530,8 @@ export function LocalFoundationApp() {
   async function openNotification(notification: UserNotification) {
     setNotificationOpen(false);
     if (!notification.readAt) await run('notification-read', () => service.markNotificationRead(notification.id), 'اعلان خوانده شد.');
-    if (notification.relatedModuleId === 'treasury-execution') setPage('treasury');
-    else if (notification.relatedModuleId === 'purchase-request') setPage('procurement');
+    const destination = navigationDestinations.find((item) => item.moduleId === notification.relatedModuleId);
+    if (destination) openNavigationDestination(destination, {track: false});
   }
 
   if (busy === 'initializing') return <LoadingScreen />;
@@ -350,8 +554,8 @@ export function LocalFoundationApp() {
   </>;
 
   const user = foundation.activeUser;
-  const currentNavigation = NAVIGATION.find((item) => item.id === page) ?? NAVIGATION[0];
-  const currentPageTitle = page === 'account-security' ? 'حساب و امنیت' : currentNavigation.title;
+  const currentNavigation = NAVIGATION.find((item) => item.id === resolvedPage) ?? NAVIGATION[0];
+  const currentPageTitle = resolvedPage === 'account-security' ? 'حساب و امنیت' : currentNavigation.title;
   const activePersonnel = foundation.personnel.find((person) => person.id === user.personnelId || person.linkedUserId === user.id);
   const profileIncomplete = !personnelCompletionSummary(activePersonnel, foundation.operationalRecords).complete;
   const profileCompletionDeferred = Boolean(foundation.session.profileCompletionDeferredUntil && new Date(foundation.session.profileCompletionDeferredUntil).getTime() > Date.now());
@@ -360,31 +564,50 @@ export function LocalFoundationApp() {
 
   return (
     <div className={`app-shell ${sidebarCollapsed ? 'app-shell--sidebar-collapsed' : ''}`} dir="rtl">
-      <aside className={`sidebar ${sidebarCollapsed ? 'sidebar--collapsed' : ''} ${mobileOpen ? 'sidebar--open' : ''}`}>
+      <aside ref={sidebarRef} id="main-sidebar" role={mobileSidebarMode ? 'dialog' : undefined} aria-modal={mobileSidebarMode && mobileOpen ? true : undefined} aria-hidden={mobileSidebarMode && !mobileOpen ? true : undefined} aria-label="منوی اصلی تیرا" className={`sidebar ${sidebarCollapsed ? 'sidebar--collapsed' : ''} ${mobileOpen ? 'sidebar--open' : ''}`}>
         <div className="brand-lockup">
           <div className="brand-mark"><Sparkles size={21} /></div>
-          <div><strong>تپرا</strong><span>بنیاد محلی محصول</span></div>
+          <div><strong>تیرا</strong><span>بنیاد محلی محصول</span></div>
           <button
             className="icon-button sidebar-collapse-toggle"
-            onClick={() => setSidebarCollapsed((value) => !value)}
+            onClick={() => {setNavigationSearchActive(false);setSidebarCollapsed((value) => !value);}}
             title={sidebarCollapsed ? 'باز کردن منوی اصلی' : 'جمع کردن منوی اصلی'}
             aria-label={sidebarCollapsed ? 'باز کردن منوی اصلی' : 'جمع کردن منوی اصلی'}
             aria-expanded={!sidebarCollapsed}
           >
             {sidebarCollapsed ? <PanelRightOpen size={19} /> : <PanelRightClose size={19} />}
           </button>
-          <button className="icon-button sidebar-close" onClick={() => setMobileOpen(false)} aria-label="بستن منو"><X size={20} /></button>
+          <button ref={mobileSidebarCloseRef} className="icon-button sidebar-close" onClick={closeMobileSidebar} aria-label="بستن منو"><X size={20} /></button>
         </div>
 
         <div className="local-pill"><span className="pulse-dot" /><span>ERP محلی آماده آزمون</span><small>Master V1 · IndexedDB</small></div>
 
+        {(!sidebarCollapsed || mobileSidebarMode) && <NavigationSearch
+          key={`${user.id}:${foundation.session.actingAdminUserId ?? 'direct'}`}
+          destinations={navigationDestinations}
+          onSelect={openNavigationDestination}
+          onQueryStateChange={setNavigationSearchActive}
+        />}
+
         <nav className="main-navigation" aria-label="منوی اصلی">
-          {sidebarCollapsed ? visibleNavigation.map((item) => {
+          {sidebarCollapsed && !mobileSidebarMode ? <>
+            <button
+              type="button"
+              className="nav-item nav-item--icon-only sidebar-search-toggle"
+              title="جست‌وجوی منو و کارها"
+              aria-label="جست‌وجوی منو و کارها"
+              onClick={() => {
+                setSidebarCollapsed(false);
+                window.setTimeout(() => document.getElementById('sidebar-navigation-search')?.focus(), 0);
+              }}
+            ><Search size={21}/></button>
+            {visibleNavigation.map((item) => {
             const Icon = item.icon;
-            return <button key={item.id} title={`${item.title} — ${item.group}`} aria-label={item.title} className={`nav-item nav-item--icon-only ${page === item.id ? 'nav-item--active' : ''}`} onClick={() => { setPage(item.id); setMobileOpen(false); }}><Icon size={21} /></button>;
-          }) : groupedNavigation.map(({group, items}) => {
+            const destination = navigationDestinations.find((entry) => entry.id === `page:${item.id}`);
+            return <button key={item.id} title={`${item.title} — ${item.group}`} aria-label={item.title} aria-current={resolvedPage === item.id ? 'page' : undefined} className={`nav-item nav-item--icon-only ${resolvedPage === item.id ? 'nav-item--active' : ''}`} onClick={() => { if (destination) openNavigationDestination(destination); }}><Icon size={21} /></button>;
+          })}</> : !navigationSearchActive && groupedNavigation.map(({group, items}) => {
             const isExpanded = expandedNavigationGroups.has(group);
-            const hasActivePage = items.some((item) => item.id === page);
+            const hasActivePage = items.some((item) => item.id === resolvedPage);
             return <section className={`nav-group ${hasActivePage ? 'nav-group--active' : ''}`} key={group}>
               <button className="nav-group-trigger" onClick={() => toggleNavigationGroup(group)} aria-expanded={isExpanded} aria-controls={`nav-group-${items[0].id}`}>
                 <span>{group}</span>
@@ -394,10 +617,11 @@ export function LocalFoundationApp() {
               {isExpanded && <div className="nav-group-items" id={`nav-group-${items[0].id}`}>
                 {items.map((item) => {
                   const Icon = item.icon;
-                  return <button key={item.id} className={`nav-item ${page === item.id ? 'nav-item--active' : ''}`} onClick={() => { setPage(item.id); setMobileOpen(false); }}>
+                  const destination = navigationDestinations.find((entry) => entry.id === `page:${item.id}`);
+                  return <button key={item.id} aria-current={resolvedPage === item.id ? 'page' : undefined} className={`nav-item ${resolvedPage === item.id ? 'nav-item--active' : ''}`} onClick={() => { if (destination) openNavigationDestination(destination); }}>
                     <Icon size={20} />
                     <span><strong>{item.title}</strong><small>{item.subtitle}</small></span>
-                    {page === item.id && <ArrowLeft size={16} />}
+                    {resolvedPage === item.id && <ArrowLeft size={16} />}
                   </button>;
                 })}
               </div>}
@@ -411,13 +635,13 @@ export function LocalFoundationApp() {
         </div>
       </aside>
 
-      {mobileOpen && <button className="sidebar-scrim" onClick={() => setMobileOpen(false)} aria-label="بستن منو" />}
+      {mobileOpen && <button className="sidebar-scrim" onClick={closeMobileSidebar} aria-label="بستن منو" />}
 
-      <main className="main-area">
+      <main ref={mainAreaRef} className="main-area">
         <header className="topbar">
           <div className="topbar-title">
-            <button className="icon-button mobile-menu" onClick={() => {setSidebarCollapsed(false);setMobileOpen(true);}} aria-label="بازکردن منو"><Menu size={21} /></button>
-            <div><span>تپرا / {currentPageTitle}</span><h1>{currentPageTitle}</h1></div>
+            <button ref={mobileMenuButtonRef} className="icon-button mobile-menu" onClick={() => setMobileOpen(true)} aria-label="بازکردن منو" aria-expanded={mobileOpen} aria-controls="main-sidebar"><Menu size={21} /></button>
+            <div><span>تیرا / {currentPageTitle}</span><h1 id="main-page-heading" tabIndex={-1}>{currentPageTitle}</h1></div>
           </div>
           <div className="topbar-actions">
             <NotificationCenter notifications={foundation.notifications} open={notificationOpen} onToggle={() => {setNotificationOpen((value) => !value);setAccountOpen(false);}} onClose={() => setNotificationOpen(false)} onOpen={(notification) => {void openNotification(notification);}} onReadAll={() => {void run('notifications-read-all', () => service.markAllNotificationsRead(), 'همه اعلان‌ها خوانده شدند.');}} />
@@ -426,7 +650,7 @@ export function LocalFoundationApp() {
               <span><strong>{user.name}</strong><small>{user.roleTitle}</small></span>
               <ChevronDown size={17} />
             </button>
-            {accountOpen && <AccountMenu user={user} inQaSession={Boolean(foundation.session.actingAdminUserId)} onMyAccount={() => {setPage('my-account');setAccountOpen(false);}} onAccountSecurity={() => {setPage('account-security');setAccountOpen(false);}} onAppearance={() => { setPage('appearance'); setAccountOpen(false); }} onSwitchAccount={() => {setAccountOpen(false); setLoginOpen(true);}} onEndQa={endQaSession} onSignOut={() => {setAccountOpen(false);setLogoutOpen(true);}} onClose={() => setAccountOpen(false)} />}
+            {accountOpen && <AccountMenu user={user} inQaSession={Boolean(foundation.session.actingAdminUserId)} onMyAccount={() => {navigateToPage('my-account');setAccountOpen(false);}} onAccountSecurity={() => {navigateToPage('account-security');setAccountOpen(false);}} onAppearance={() => { navigateToPage('appearance'); setAccountOpen(false); }} onSwitchAccount={() => {setAccountOpen(false); setLoginOpen(true);}} onEndQa={endQaSession} onSignOut={() => {setAccountOpen(false);setLogoutOpen(true);}} onClose={() => setAccountOpen(false)} />}
           </div>
         </header>
 
@@ -434,27 +658,27 @@ export function LocalFoundationApp() {
 
         <div className="page-frame">
           {error && <div className="notice notice--danger global-operation-error" role="alert" aria-live="assertive"><CircleAlert size={19} /><span>{error}</span><button type="button" aria-label="بستن پیام خطا" onClick={() => setError(null)}>بستن</button></div>}
-          {page === 'dashboard' && <Dashboard state={foundation} navigate={setPage} />}
-          {page === 'organization' && <OrganizationOverviewPage state={foundation} />}
-          {page === 'units' && <UnitsPage state={foundation} service={service} execute={run} />}
-          {page === 'branches' && <BranchesPage state={foundation} service={service} execute={run} />}
-          {page === 'positions' && <PositionsPage state={foundation} service={service} execute={run} />}
-          {page === 'personnel' && <PersonnelPage state={foundation} service={service} execute={run} />}
-          {page === 'sales-structures' && <SalesStructuresPage state={foundation} service={service} execute={run} />}
-          {page === 'users' && <UsersPage state={foundation} onEdit={setEditUser} onLogin={loginAsUser} onStatus={(target, status) => run('user-status', () => service.setUserStatus(target.id, status), `وضعیت «${target.name}» به‌روزرسانی شد.`)} />}
-          {page === 'roles' && <RolesPage state={foundation} service={service} execute={run} />}
-          {page === 'registrations' && <RegistrationPage state={foundation} service={service} execute={run} />}
-          {page === 'recruitment' && <RecruitmentPage state={foundation} service={service} execute={run} />}
-          {page === 'customers' && <CustomersPage state={foundation} service={service} execute={run} />}
-          {DOMAIN_PAGE_MODULES[page] && <ErpWorkspacePage key={page} state={foundation} moduleIds={DOMAIN_PAGE_MODULES[page]} service={service} execute={run} />}
-          {page === 'reports' && <ReportsPage state={foundation} />}
-          {page === 'workflow-admin' && <WorkflowAdminPage state={foundation} execute={run} service={service} />}
-          {page === 'my-account' && <MyAccountPage state={foundation} service={service} execute={run} />}
-          {page === 'account-security' && <AccountSecurityPage user={user} busy={busy === 'own-credentials'} onSubmit={(input) => run('own-credentials', () => service.changeOwnCredentials(input), 'نام کاربری و تنظیمات امنیتی حساب ذخیره شد.')} />}
-          {page === 'appearance' && <AppearancePage preferences={preferences} onChange={setPreferences} />}
-          {page === 'policy' && <PolicyLab state={foundation} onState={setFoundation} />}
-          {page === 'audit' && <AuditPage state={foundation} />}
-          {page === 'data' && (
+          {resolvedPage === 'dashboard' && <Dashboard state={foundation} navigate={navigateToPage} destinations={navigationDestinations} usage={navigationUsage} onDestination={openNavigationDestination} />}
+          {resolvedPage === 'organization' && <OrganizationOverviewPage state={foundation} />}
+          {resolvedPage === 'units' && <UnitsPage state={foundation} service={service} execute={run} />}
+          {resolvedPage === 'branches' && <BranchesPage state={foundation} service={service} execute={run} />}
+          {resolvedPage === 'positions' && <PositionsPage state={foundation} service={service} execute={run} />}
+          {resolvedPage === 'personnel' && <PersonnelPage key={`personnel:${routeRevision}`} state={foundation} service={service} execute={run} />}
+          {resolvedPage === 'sales-structures' && <SalesStructuresPage state={foundation} service={service} execute={run} />}
+          {resolvedPage === 'users' && <UsersPage state={foundation} onEdit={setEditUser} onLogin={loginAsUser} onStatus={(target, status) => run('user-status', () => service.setUserStatus(target.id, status), `وضعیت «${target.name}» به‌روزرسانی شد.`)} />}
+          {resolvedPage === 'roles' && <RolesPage state={foundation} service={service} execute={run} />}
+          {resolvedPage === 'registrations' && <RegistrationPage state={foundation} service={service} execute={run} />}
+          {resolvedPage === 'recruitment' && <RecruitmentPage state={foundation} service={service} execute={run} />}
+          {resolvedPage === 'customers' && <CustomersPage state={foundation} service={service} execute={run} />}
+          {DOMAIN_PAGE_MODULES[resolvedPage] && <ErpWorkspacePage key={`${resolvedPage}:${routeRevision}`} state={foundation} moduleIds={DOMAIN_PAGE_MODULES[resolvedPage]} service={service} execute={run} onNavigateModule={trackModuleNavigation} />}
+          {resolvedPage === 'reports' && <ReportsPage state={foundation} />}
+          {resolvedPage === 'workflow-admin' && <WorkflowAdminPage state={foundation} execute={run} service={service} />}
+          {resolvedPage === 'my-account' && <MyAccountPage state={foundation} service={service} execute={run} />}
+          {resolvedPage === 'account-security' && <AccountSecurityPage user={user} busy={busy === 'own-credentials'} onSubmit={(input) => run('own-credentials', () => service.changeOwnCredentials(input), 'نام کاربری و تنظیمات امنیتی حساب ذخیره شد.')} />}
+          {resolvedPage === 'appearance' && <AppearancePage preferences={preferences} onChange={setPreferences} />}
+          {resolvedPage === 'policy' && <PolicyLab state={foundation} onState={setFoundation} />}
+          {resolvedPage === 'audit' && <AuditPage state={foundation} />}
+          {resolvedPage === 'data' && (
             <DataPage
               state={foundation}
               onExport={() => exportBackup()}
@@ -467,7 +691,7 @@ export function LocalFoundationApp() {
               onRunQa={() => run('qa-scenarios', () => service.runQaScenarios(), 'سناریوهای یکپارچگی اجرا و در Audit ثبت شدند.')}
             />
           )}
-          {page === 'qa' && <QaGuide state={foundation} navigate={setPage} />}
+          {resolvedPage === 'qa' && <QaGuide state={foundation} navigate={navigateToPage} />}
         </div>
       </main>
 
@@ -477,7 +701,7 @@ export function LocalFoundationApp() {
       {registrationOpen && <RegistrationDialog service={service} onClose={() => setRegistrationOpen(false)} onDone={(state) => {setFoundation(state);setRegistrationOpen(false);setToast('درخواست ثبت‌نام با کد پیگیری ثبت شد.');}} />}
       {logoutOpen && <ConfirmLogoutDialog busy={busy === 'sign-out'} user={foundation.activeUser} onClose={() => setLogoutOpen(false)} onConfirm={signOut} />}
       {resetOpen && <ResetDialog busy={busy === 'reset'} onClose={() => setResetOpen(false)} onConfirm={() => run('reset', () => service.reset(), 'داده‌ها به سناریوی اولیه بازگشتند.').then((succeeded) => {if (succeeded) setResetOpen(false);})} />}
-      {backupOpen && <PasswordDialog title="پشتیبان رمزگذاری‌شده" description="یک رمز حداقل ۸ نویسه‌ای انتخاب کنید. این رمز در تپرا ذخیره نمی‌شود." actionLabel="ساخت پشتیبان" busy={busy === 'backup'} onClose={() => setBackupOpen(false)} onSubmit={exportBackup} />}
+      {backupOpen && <PasswordDialog title="پشتیبان رمزگذاری‌شده" description="یک رمز حداقل ۸ نویسه‌ای انتخاب کنید. این رمز در تیرا ذخیره نمی‌شود." actionLabel="ساخت پشتیبان" busy={busy === 'backup'} onClose={() => setBackupOpen(false)} onSubmit={exportBackup} />}
       {restoreInput && <RestoreDialog input={restoreInput} busy={busy === 'restore'} onClose={() => setRestoreInput(null)} onSubmit={(password) => run('restore', () => service.importSnapshot(restoreInput, password), 'پشتیبان با موفقیت بازیابی شد.').then((succeeded) => {if (succeeded) setRestoreInput(null);})} />}
       {busy && busy !== 'initializing' && <div className="busy-indicator"><span /><b>در حال ثبت امن تغییرات…</b></div>}
       {toast && <div className="toast" role="status" aria-live="polite"><BadgeCheck size={20} /><span>{toast}</span></div>}
@@ -485,17 +709,24 @@ export function LocalFoundationApp() {
   );
 }
 
-function Dashboard({state, navigate}: {state: FoundationState; navigate: (page: PageId) => void}) {
+function Dashboard({state, navigate, destinations, usage, onDestination}: {
+  state: FoundationState;
+  navigate: (page: PageId) => void;
+  destinations: NavigationSearchDestination[];
+  usage: NavigationUsageEntry[];
+  onDestination: (destination: NavigationSearchDestination) => void;
+}) {
   const {activeUser: user} = state;
   const auditVisible = can(user, 'foundation.audit.view');
   const dataVisible = can(user, 'foundation.data.export') || can(user, 'foundation.data.manage');
   const workspaceItems = dashboardCapabilitiesFor(user);
+  const frequentItems = frequentNavigationDestinations(destinations, usage);
   return (
     <div className="page-stack">
       <section className="hero-card">
         <div className="hero-copy">
-          <span className="eyebrow"><span className="pulse-dot pulse-dot--light" /> بنیاد محلی تپرا فعال است</span>
-          <h2>سلام {user.name.split(' ')[0]}،<br /><em>این همان شروع تازه تپراست.</em></h2>
+          <span className="eyebrow"><span className="pulse-dot pulse-dot--light" /> بنیاد محلی تیرا فعال است</span>
+          <h2>سلام {user.name.split(' ')[0]}،<br /><em>این همان شروع تازه تیراست.</em></h2>
           <p>با نقش «{user.roleTitle}» وارد شده‌اید. منو و اقدام‌ها فقط بر اساس مجوز، محدوده و سیاست‌های واقعی همین کاربر محاسبه می‌شوند.</p>
           <div className="hero-actions">
             {can(user, 'organization.overview.view') && <button className="button button--light" onClick={() => navigate('organization')}>مشاهده سازمان <ArrowLeft size={17} /></button>}
@@ -518,12 +749,32 @@ function Dashboard({state, navigate}: {state: FoundationState; navigate: (page: 
         <Metric icon={LockKeyhole} tone="amber" value={scopeLabel(user.scope)} label="محدوده فعال" detail="Fail-closed در حالت ناشناخته" />
       </section>
 
+      <section className="panel frequent-navigation">
+        <PanelHeading eyebrow="مسیرهای شخصی شما" title="منوهای پرکاربرد من" subtitle="این فهرست فقط از مسیرهایی ساخته می‌شود که خودتان باز کرده‌اید و همیشه دوباره با مجوزهای فعلی شما کنترل می‌شود." />
+        {frequentItems.length ? <div className="role-workspace-grid frequent-navigation-grid">
+          {frequentItems.map(({destination, usage: itemUsage}) => {
+            const Icon = destination.icon;
+            return <button key={destination.id} type="button" onClick={() => onDestination(destination)}>
+              <span><Icon size={20}/></span>
+              <div><strong>{destination.title}</strong><small>{destination.subtitle}</small></div>
+              <b>{itemUsage.count.toLocaleString('fa-IR')} بار</b>
+              <ArrowLeft size={17}/>
+            </button>;
+          })}
+        </div> : <div className="frequent-navigation-empty"><Search size={24}/><div><strong>{state.session.actingAdminUserId ? 'در مشاهده آزمایشی، مسیرهای شخصی ثبت نمی‌شوند.' : 'هنوز مسیر پرکاربردی ساخته نشده است.'}</strong><span>{state.session.actingAdminUserId ? 'با بازگشت به حساب ادمین، پرکاربردهای همان حساب دوباره نمایش داده می‌شوند.' : 'از جست‌وجوی منو یا منوی اصلی استفاده کنید؛ مسیرهای پرتکرار شما اینجا ظاهر می‌شوند.'}</span></div></div>}
+      </section>
+
       <section className="panel role-workspace">
         <PanelHeading eyebrow="میزکار مبتنی بر نقش" title={`کارهای مجاز ${user.roleTitle}`} subtitle="این میان‌برها از مجوز مؤثر همین حساب ساخته شده‌اند؛ با تغییر نقش، خودکار کم یا زیاد می‌شوند." />
         <div className="role-workspace-grid">
           {workspaceItems.map((item) => {
             const Icon = dashboardCapabilityIcon(item.id);
-            return <button key={item.id} onClick={() => navigate(item.page)}>
+            const exactDestinationId = item.id === 'procurement' ? 'module:purchase-request'
+              : item.id === 'treasury' ? 'module:treasury-execution'
+                : item.id === 'personnel-review' ? 'view:personnel-changes'
+                  : `page:${item.page}`;
+            const exactDestination = destinations.find((destination) => destination.id === exactDestinationId);
+            return <button key={item.id} onClick={() => exactDestination ? onDestination(exactDestination) : navigate(item.page)}>
               <span><Icon size={20}/></span>
               <div><strong>{item.title}</strong><small>{item.description}</small></div>
               <b>{dashboardCapabilityMetric(item.id, state)}</b>
@@ -1077,8 +1328,8 @@ function AuthPortal({currentUser, busy, globalError, onClearError, onClose, onRe
   };
 
   return <main className="auth-page" dir="rtl">
-    <section className="auth-showcase" aria-label="معرفی سامانه تپرا">
-      <div className="auth-brand"><span><Sparkles size={25} /></span><div><strong>تپرا</strong><small>سامانه یکپارچه مدیریت سازمان</small></div></div>
+    <section className="auth-showcase" aria-label="معرفی سامانه تیرا">
+      <div className="auth-brand"><span><Sparkles size={25} /></span><div><strong>تیرا</strong><small>سامانه یکپارچه مدیریت سازمان</small></div></div>
       <div className="auth-showcase-copy">
         <span className="auth-kicker"><i /> محیط امن و محلی سازمان</span>
         <h1>همه‌چیز برای یک<br/><em>روز کاری منظم</em></h1>
@@ -1094,7 +1345,7 @@ function AuthPortal({currentUser, busy, globalError, onClearError, onClose, onRe
     <section className="auth-workspace">
       {onClose && <button className="auth-close" onClick={onClose} aria-label="بازگشت به سامانه"><X size={20}/></button>}
       <div className="auth-card">
-        <div className="auth-mobile-brand"><span><Sparkles size={20}/></span><strong>تپرا</strong></div>
+        <div className="auth-mobile-brand"><span><Sparkles size={20}/></span><strong>تیرا</strong></div>
         {mode !== 'login' && <button className="auth-back" onClick={() => changeMode('login')}><ArrowRight size={17}/> بازگشت به ورود</button>}
         <div className="auth-heading">
           <span>{mode === 'login' ? 'ورود به حساب کاربری' : mode === 'password' ? 'بازیابی رمز عبور' : 'یادآوری نام کاربری'}</span>
@@ -1150,7 +1401,7 @@ function RestoreDialog({input, busy, onClose, onSubmit}: {input: SnapshotManifes
   const encrypted = isEncryptedSnapshot(input);
   const [password, setPassword] = useState('');
   const [errors,setErrors]=useState<string[]>([]);const submit=()=>{const next=encrypted?validateRequired([{label:'رمز فایل',value:password,valid:(value)=>String(value).length>=8,message:'فیلد «رمز فایل» الزامی است و باید حداقل ۸ نویسه داشته باشد.'}]):[];setErrors(next);if(!next.length)onSubmit(encrypted?password:undefined);};
-  return <Modal onClose={onClose}><div className="modal-heading"><div><span>بازیابی کنترل‌شده</span><h2>{encrypted ? 'پشتیبان رمزگذاری‌شده' : 'پشتیبان محلی تپرا'}</h2><p>داده فعلی با محتوای فایل جایگزین می‌شود و رخداد بازیابی در Audit ثبت خواهد شد.</p></div><button className="icon-button" onClick={onClose}><X size={20} /></button></div><FormValidationSummary errors={errors}/>{encrypted && <label className="field-label"><RequiredLabel>رمز فایل</RequiredLabel><input aria-required="true" type="password" autoFocus value={password} onChange={(event) => setPassword(event.target.value)} placeholder="رمز پشتیبان" /></label>}<div className="restore-summary"><FileJson size={21} /><div><strong>اعتبارسنجی Schema و checksum</strong><span>قبل از جایگزینی داده به‌صورت خودکار انجام می‌شود.</span></div></div><div className="modal-actions"><button className="button button--secondary" onClick={onClose}>انصراف</button><button className="button button--primary" disabled={busy} onClick={submit}>تأیید و بازیابی</button></div></Modal>;
+  return <Modal onClose={onClose}><div className="modal-heading"><div><span>بازیابی کنترل‌شده</span><h2>{encrypted ? 'پشتیبان رمزگذاری‌شده' : 'پشتیبان محلی تیرا'}</h2><p>داده فعلی با محتوای فایل جایگزین می‌شود و رخداد بازیابی در Audit ثبت خواهد شد.</p></div><button className="icon-button" onClick={onClose}><X size={20} /></button></div><FormValidationSummary errors={errors}/>{encrypted && <label className="field-label"><RequiredLabel>رمز فایل</RequiredLabel><input aria-required="true" type="password" autoFocus value={password} onChange={(event) => setPassword(event.target.value)} placeholder="رمز پشتیبان" /></label>}<div className="restore-summary"><FileJson size={21} /><div><strong>اعتبارسنجی Schema و checksum</strong><span>قبل از جایگزینی داده به‌صورت خودکار انجام می‌شود.</span></div></div><div className="modal-actions"><button className="button button--secondary" onClick={onClose}>انصراف</button><button className="button button--primary" disabled={busy} onClick={submit}>تأیید و بازیابی</button></div></Modal>;
 }
 
 function ProbeCard({title, scenario, request, decision, onRun}: {title: string; scenario: string; request: Parameters<typeof service.inspectAuthorization>[0]; decision: AuthorizationDecision; onRun: () => void}) {
@@ -1179,7 +1430,7 @@ function GuardDot({label, passed}: {label: string; passed: boolean}) { return <s
 function DataAction({icon: Icon, tone, title, text, action, disabled, onClick}: {icon: LucideIcon; tone: string; title: string; text: string; action: string; disabled: boolean; onClick: () => void}) { return <article className={`data-action data-action--${tone}`}><span><Icon size={22} /></span><h3>{title}</h3><p>{text}</p><button disabled={disabled} onClick={onClick}>{disabled ? 'برای این کاربر مجاز نیست' : action}<ArrowLeft size={16} /></button></article>; }
 function StorageDatum({label, value, mono = false}: {label: string; value: string; mono?: boolean}) { return <div className="storage-datum"><span>{label}</span><strong className={mono ? 'mono' : ''}>{value}</strong></div>; }
 function Modal({children, onClose, wide = false}: {children: ReactNode; onClose: () => void; wide?: boolean}) { return <div className="modal-layer" role="dialog" aria-modal="true"><button className="modal-scrim" onClick={onClose} aria-label="بستن" /><section className={`modal-card ${wide ? 'modal-card--wide' : ''}`}>{children}</section></div>; }
-function LoadingScreen() { return <div className="loading-screen" dir="rtl"><div className="brand-mark"><Sparkles size={25} /></div><strong>تپرا در حال آماده‌سازی بنیاد محلی است</strong><span>داده‌های این دستگاه بررسی می‌شوند…</span><i /></div>; }
+function LoadingScreen() { return <div className="loading-screen" dir="rtl"><div className="brand-mark"><Sparkles size={25} /></div><strong>تیرا در حال آماده‌سازی بنیاد محلی است</strong><span>داده‌های این دستگاه بررسی می‌شوند…</span><i /></div>; }
 function FatalState({error}: {error: string}) { return <div className="fatal-state" dir="rtl"><CircleAlert size={30} /><h1>راه‌اندازی Foundation ممکن نشد</h1><p>{error}</p><button onClick={() => location.reload()}>تلاش دوباره</button></div>; }
 
 function scopeLabel(scope: QaPersona['scope']) { return ({COMPANY: 'کل شرکت', UNIT: 'واحد سازمانی', TEAM: 'تیم کاری', SELF: 'فقط خود', RECORD: 'رکورد مشخص'} as const)[scope]; }

@@ -25,7 +25,7 @@ export function salesAssignmentEffectiveStart(person: Pick<PersonnelRecord, 'sta
   return person.salesAssignmentStartDate || person.startDate;
 }
 
-export function createDefaultSalesCompensationRecord(person: Pick<PersonnelRecord, 'id' | 'salesHierarchyLevel' | 'startDate' | 'salesAssignmentStartDate'>, recordedAt: string, actorId = 'system', actorName = 'داده پایه تپرا'): SalesCompensationRecord | undefined {
+export function createDefaultSalesCompensationRecord(person: Pick<PersonnelRecord, 'id' | 'salesHierarchyLevel' | 'startDate' | 'salesAssignmentStartDate'>, recordedAt: string, actorId = 'system', actorName = 'داده پایه تیرا'): SalesCompensationRecord | undefined {
   const terms = defaultSalesCompensation(person.salesHierarchyLevel);
   if (!terms) return undefined;
   return {

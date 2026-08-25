@@ -174,6 +174,33 @@ button:disabled { cursor: not-allowed; }
 .local-pill small { direction: ltr; color: #6ee7b7; font-size: 9px; }
 .pulse-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #34d399; box-shadow: 0 0 0 5px rgba(52,211,153,.12); }
 .pulse-dot--light { background: #c4b5fd; box-shadow: 0 0 0 5px rgba(196,181,253,.12); }
+.navigation-search { position: relative; z-index: 2; margin: 0 13px 12px; }
+.navigation-search__field { display: grid; min-height: 46px; grid-template-columns: 21px minmax(0,1fr) auto; align-items: center; gap: 8px; padding: 0 12px; border: 1px solid rgba(255,255,255,.1); border-radius: 14px; color: #9aa4b6; background: rgba(255,255,255,.055); transition: border-color .18s ease, background .18s ease, box-shadow .18s ease; }
+.navigation-search__field:focus-within { border-color: rgba(156,140,255,.72); background: rgba(255,255,255,.085); box-shadow: 0 0 0 3px rgba(156,140,255,.12); }
+.navigation-search__field input { min-width: 0; width: 100%; border: 0; outline: 0; color: #fff; background: transparent; font-size: calc(13px * var(--ui-font-scale)); }
+.navigation-search__field input::placeholder { color: #b1bac8; }
+.navigation-search__field input::-webkit-search-cancel-button { display: none; }
+.navigation-search__field > button { display: grid; width: 30px; height: 30px; place-items: center; padding: 0; border: 0; border-radius: 9px; color: #aab3c3; background: rgba(255,255,255,.06); cursor: pointer; }
+.navigation-search__results { display: grid; gap: 5px; max-height: min(430px,55vh); overflow-y: auto; padding: 8px 2px 2px; }
+.navigation-search__result { display: grid; min-height: 64px; grid-template-columns: 36px minmax(0,1fr) 18px; align-items: center; gap: 9px; width: 100%; padding: 9px 10px; border: 1px solid rgba(255,255,255,.07); border-radius: 13px; color: #d7dce5; background: rgba(255,255,255,.035); text-align: right; cursor: pointer; }
+.navigation-search__result:hover,.navigation-search__result:focus-visible { border-color: rgba(156,140,255,.45); background: rgba(124,105,239,.14); outline: none; }
+.navigation-search__result > span { display: grid; width: 36px; height: 36px; place-items: center; border-radius: 11px; color: #c3bbff; background: rgba(124,105,239,.17); }
+.navigation-search__result > div { display: grid; min-width: 0; gap: 2px; }
+.navigation-search__result strong { display: -webkit-box; overflow: hidden; font-size: calc(14px * var(--ui-font-scale)); line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.navigation-search__result small { display: -webkit-box; overflow: hidden; color: #b1bac8; font-size: calc(11px * var(--ui-font-scale)); line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.navigation-search__result em { overflow: hidden; color: #929daf; font-size: calc(10px * var(--ui-font-scale)); font-style: normal; text-overflow: ellipsis; white-space: nowrap; }
+.navigation-search__result > svg { color: #7f8a9d; }
+.navigation-search__empty { display: grid; justify-items: center; gap: 6px; padding: 23px 12px; border: 1px dashed rgba(255,255,255,.1); border-radius: 13px; color: #8994a7; text-align: center; }
+.navigation-search__empty strong { color: #f2f4f7; font-size: calc(13px * var(--ui-font-scale)); }
+.navigation-search__empty span { color: #b1bac8; font-size: calc(11px * var(--ui-font-scale)); }
+:root[data-high-contrast="true"] .navigation-search__field,
+:root[data-high-contrast="true"] .navigation-search__result,
+:root[data-high-contrast="true"] .navigation-search__empty { border-color: rgba(255,255,255,.42); }
+:root[data-high-contrast="true"] .navigation-search__result small,
+:root[data-high-contrast="true"] .navigation-search__result em,
+:root[data-high-contrast="true"] .navigation-search__empty span { color: #e5e7eb; }
+:root[data-high-contrast="true"] .navigation-search__field input::placeholder { color: #e5e7eb; }
+.sidebar-search-toggle { margin-bottom: 7px; color: #c3bbff; border: 1px solid rgba(156,140,255,.18); background: rgba(124,105,239,.09); }
 .main-navigation { display: flex; flex: 1; flex-direction: column; gap: 7px; padding: 0 13px; }
 .nav-entry { display: flex; flex-direction: column; }
 .nav-entry + .nav-entry .nav-eyebrow { margin-top: 13px; }
@@ -324,6 +351,13 @@ button:disabled { cursor: not-allowed; }
 .role-workspace-grid small { overflow:hidden;color:var(--muted);font-size:calc(11px * var(--ui-font-scale));line-height:1.6;text-overflow:ellipsis;white-space:nowrap; }
 .role-workspace-grid b { display:grid;min-width:30px;height:30px;padding:0 7px;color:var(--primary);font-size:calc(12px * var(--ui-font-scale));border-radius:10px;background:var(--primary-soft);place-items:center; }
 .role-workspace-grid button>svg { color:var(--muted); }
+.frequent-navigation { overflow: hidden; }
+.frequent-navigation-grid b { min-width: 52px; white-space: nowrap; }
+.frequent-navigation-empty { display: flex; align-items: center; gap: 13px; min-height: 92px; margin-top: 18px; padding: 17px; border: 1px dashed var(--border-strong); border-radius: 17px; color: var(--muted); background: var(--surface-soft); }
+.frequent-navigation-empty > svg { flex: 0 0 auto; color: var(--primary); }
+.frequent-navigation-empty > div { display: grid; gap: 5px; }
+.frequent-navigation-empty strong { color: var(--text); font-size: calc(13px * var(--ui-font-scale)); }
+.frequent-navigation-empty span { font-size: calc(11px * var(--ui-font-scale)); line-height: 1.7; }
 .panel { padding: 23px; border: 1px solid var(--border); border-radius: 23px; background: var(--surface); box-shadow: var(--shadow-soft); }
 .panel-heading > span { color: var(--primary); font-size: 8px; font-weight: 900; letter-spacing: .2px; }
 .panel-heading h3 { margin: 6px 0 0; font-size: 16px; letter-spacing: -.4px; }
@@ -686,6 +720,7 @@ th .sort-header { padding: 8px 4px; }
 
 @media (max-width: 920px) {
   .sidebar { transform: translateX(105%); transition: transform .22s ease; box-shadow: -20px 0 60px rgba(0,0,0,.24); }
+  .sidebar.sidebar--collapsed { width: 286px; }
   .sidebar--open { transform: translateX(0); }
   .sidebar-collapse-toggle { display: none; }
   .sidebar-close, .mobile-menu { display: grid !important; }

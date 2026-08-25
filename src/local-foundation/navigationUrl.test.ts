@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {pageFromUrl, pageRouteUrl, workspaceParam, workspaceRouteUrl} from './navigationUrl';
+import {destinationRouteUrl, pageFromUrl, pageRouteUrl, workspaceParam, workspaceRouteUrl} from './navigationUrl';
 
 describe('URL-backed navigation', () => {
   it('reads the current page and falls back to dashboard', () => {
@@ -8,8 +8,18 @@ describe('URL-backed navigation', () => {
   });
 
   it('changes the main page and clears stale workspace state', () => {
-    expect(pageRouteUrl('http://localhost:3001/?page=treasury&module=treasury-execution&cartable=payer-recorded', 'procurement'))
+    expect(pageRouteUrl('http://localhost:3001/?page=treasury&module=treasury-execution&cartable=payer-recorded&category=changes', 'procurement'))
       .toBe('/?page=procurement');
+  });
+
+  it('opens an exact module destination and clears stale workspace filters', () => {
+    expect(destinationRouteUrl('http://localhost:3001/?page=hcm&module=leave&status=draft&q=test', 'procurement', 'purchase-request'))
+      .toBe('/?page=procurement&module=purchase-request');
+  });
+
+  it('opens an exact personnel category without carrying a stale module', () => {
+    expect(destinationRouteUrl('http://localhost:3001/?page=procurement&module=purchase-request', 'personnel', undefined, 'changes'))
+      .toBe('/?page=personnel&category=changes');
   });
 
   it('keeps workspace module, cartable, status and search in the URL', () => {

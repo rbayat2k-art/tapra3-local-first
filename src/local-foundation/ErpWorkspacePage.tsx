@@ -1,4 +1,4 @@
-import {useMemo, useState} from 'react';
+import {useEffect, useMemo, useState} from 'react';
 import {ArrowLeft, CalendarClock, CheckCircle2, CircleAlert, Eye, FileClock, Filter, Pencil, Plus, Search, ShieldCheck, UserRound, UserRoundCheck, X} from 'lucide-react';
 import {authorize, can, operationalRecordResource} from './authorization';
 import {ERP_MODULES, permissionFor, stateLabel, type ErpModuleDefinition} from './erpCatalog';
@@ -24,22 +24,28 @@ interface Props {
   moduleIds: string[];
   service: LocalFoundationService;
   execute: (label: string, work: () => Promise<FoundationState>, success: string) => Promise<boolean>;
+  onNavigateModule?: (moduleId: string) => void;
 }
 
 const fa = (value: number) => value.toLocaleString('en-US');
 
-export function ErpWorkspacePage({state, moduleIds, service, execute}: Props) {
+export function ErpWorkspacePage({state, moduleIds, service, execute, onNavigateModule}: Props) {
   const modules = ERP_MODULES.filter((item) => moduleIds.includes(item.id)).map((item) => workflowWithActivePolicy(state, item));
   const visible = modules.filter((item) => can(state.activeUser, permissionFor(item.id, 'view')));
   const requestedModule = workspaceParam(window.location.href, 'module');
   const [activeId, setActiveId] = useState(visible.some((item) => item.id === requestedModule) ? requestedModule : visible[0]?.id ?? modules[0]?.id ?? '');
   const active = visible.find((item) => item.id === activeId) ?? visible[0];
+  const resolvedActiveModuleId = active?.id;
   const [query, setQuery] = useState(() => workspaceParam(window.location.href, 'q'));
   const [status, setStatus] = useState(() => workspaceParam(window.location.href, 'status') || 'all');
   const [cartableId, setCartableId] = useState(() => workspaceParam(window.location.href, 'cartable'));
   const [selected, setSelected] = useState<OperationalRecord | null>(null);
   const [editing, setEditing] = useState<OperationalRecord | 'new' | null>(null);
   const [treasuryEditRequested, setTreasuryEditRequested] = useState(false);
+  useEffect(() => {
+    if (!requestedModule || !resolvedActiveModuleId || requestedModule === resolvedActiveModuleId) return;
+    window.history.replaceState(window.history.state, '', workspaceRouteUrl(window.location.href, {module: resolvedActiveModuleId, cartable: null, status: null, q: null}));
+  }, [requestedModule, resolvedActiveModuleId]);
   if (!active) return <EmptyAccess />;
   const records = state.operationalRecords.filter((item) => item.moduleId === active.id && (active.id !== 'treasury-execution' || isTreasuryRecordVisibleToUser(item, state)) && (active.id !== 'employee-advance' || isEmployeeAdvanceVisible(item, state)) && authorize({
     persona: state.activeUser,
@@ -52,16 +58,20 @@ export function ErpWorkspacePage({state, moduleIds, service, execute}: Props) {
   const cartableRecords = selectedCartable ? records.filter(selectedCartable.matches) : records;
   const filtered = cartableRecords.filter((item) => (status === 'all' || item.status === status) && `${item.title} ${item.trackingCode} ${item.description} ${active.id === 'treasury-execution' ? treasuryRequesterName(item, state) : ''} ${active.id === 'employee-advance' ? advanceBeneficiaryName(item) : ''}`.toLocaleLowerCase('fa').includes(query.trim().toLocaleLowerCase('fa')));
   const overdue = records.filter((item) => item.dueAt && new Date(item.dueAt) < new Date() && !['completed','closed','paid','delivered','cancelled'].includes(item.status)).length;
+  const visibleModuleRecordCount = (moduleId: string) => state.operationalRecords.filter((item) => item.moduleId === moduleId
+    && (moduleId !== 'treasury-execution' || isTreasuryRecordVisibleToUser(item, state))
+    && (moduleId !== 'employee-advance' || isEmployeeAdvanceVisible(item, state))
+    && authorize({persona: state.activeUser, permission: permissionFor(moduleId, 'view'), action: 'view', resource: operationalRecordResource(state.activeUser, item)}).allowed).length;
   const updateWorkspaceUrl = (update: WorkspaceRouteUpdate) => window.history.replaceState(window.history.state, '', workspaceRouteUrl(window.location.href, update));
   return (
     <div className="page-stack erp-workspace">
       <section className="page-intro erp-intro"><div className="page-intro__icon"><FileClock size={24}/></div><div><span className="eyebrow">گردش‌کار عملیاتی · نسخه‌دار</span><h2>{active.group}</h2><p>{active.description}</p></div><div className="erp-intro__actions"><span className="scope-badge">{state.activeUser.roleTitle}</span>{active.id !== 'offboarding' && can(state.activeUser, permissionFor(active.id,'create')) && <button className="button button--primary" onClick={() => setEditing('new')}><Plus size={18}/> ایجاد {active.singular}</button>}</div></section>
-      <div className="module-tabs" role="tablist" aria-label="زیربخش‌ها">{visible.map((module) => <button role="tab" aria-selected={module.id===active.id} className={module.id===active.id?'active':''} key={module.id} onClick={() => {setActiveId(module.id);setSelected(null);setTreasuryEditRequested(false);setStatus('all');setCartableId('');setQuery('');updateWorkspaceUrl({module:module.id,cartable:null,status:null,q:null});}}><strong>{module.title}</strong><span>{fa(state.operationalRecords.filter((item)=>item.moduleId===module.id).length)}</span></button>)}</div>
+      <div className="module-tabs" role="tablist" aria-label="زیربخش‌ها">{visible.map((module) => <button role="tab" aria-selected={module.id===active.id} className={module.id===active.id?'active':''} key={module.id} onClick={() => {setActiveId(module.id);setSelected(null);setTreasuryEditRequested(false);setStatus('all');setCartableId('');setQuery('');updateWorkspaceUrl({module:module.id,cartable:null,status:null,q:null});onNavigateModule?.(module.id);}}><strong>{module.title}</strong><span>{fa(visibleModuleRecordCount(module.id))}</span></button>)}</div>
       {active.productDecisionRequired && <div className="decision-note"><CircleAlert size={19}/><div><strong>نیازمند تصمیم محصول پیش از عملیات واقعی</strong><span>{active.productDecisionRequired}</span></div></div>}
       <section className="metric-grid metric-grid--compact"><MiniMetric label="کل رکوردها" value={fa(records.length)}/><MiniMetric label="در جریان" value={fa(records.filter((item)=>!['completed','closed','paid','delivered','cancelled','rejected'].includes(item.status)).length)}/><MiniMetric label="سررسید گذشته" value={fa(overdue)}/><MiniMetric label="نسخه گردش‌کار" value={`V${active.workflow.version.toLocaleString('en-US')}`}/></section>
       <section className="panel operational-list">
         {cartables.length > 0 && <div className="role-cartables" role="tablist" aria-label={`کارتابل‌های ${state.activeUser.roleTitle}`}>{cartables.map((cartable) => {const count = records.filter(cartable.matches).length; const activeCartable = cartable.id === selectedCartable?.id; return <button key={cartable.id} type="button" role="tab" aria-selected={activeCartable} className={activeCartable ? 'active' : ''} onClick={() => {setCartableId(cartable.id);setStatus('all');setSelected(null);updateWorkspaceUrl({cartable:cartable.id,status:null});}}><strong>{cartable.label}</strong><span>{fa(count)}</span></button>;})}</div>}
-        <div className="operational-toolbar"><div><span className="eyebrow">{selectedCartable ? `کارتابل ${state.activeUser.roleTitle}` : `صف ${active.title}`}</span><h3>{selectedCartable?.label ?? 'رکوردهای قابل اقدام'}</h3></div><div className="operational-filters"><label className="search-field"><Search size={17}/><input value={query} onChange={(event)=>{setQuery(event.target.value);updateWorkspaceUrl({q:event.target.value || null});}} placeholder="جست‌وجوی عنوان یا کد…"/></label><label className="select-field"><Filter size={16}/><select value={status} onChange={(event)=>{setStatus(event.target.value);updateWorkspaceUrl({status:event.target.value==='all'?null:event.target.value});}}><option value="all">همه وضعیت‌ها</option>{Object.entries(active.workflow.stateLabels).map(([id,label])=><option key={id} value={id}>{label}</option>)}</select></label></div></div>
+        <div className="operational-toolbar"><div><span className="eyebrow">{selectedCartable ? `کارتابل ${state.activeUser.roleTitle}` : `صف ${active.title}`}</span><h3>{selectedCartable?.label ?? 'رکوردهای قابل اقدام'}</h3></div><div className="operational-filters"><label className="search-field"><Search size={17}/><input aria-label="جست‌وجوی عنوان یا کد" value={query} onChange={(event)=>{setQuery(event.target.value);updateWorkspaceUrl({q:event.target.value || null});}} placeholder="جست‌وجوی عنوان یا کد…"/></label><label className="select-field"><Filter size={16}/><select aria-label="فیلتر وضعیت رکوردها" value={status} onChange={(event)=>{setStatus(event.target.value);updateWorkspaceUrl({status:event.target.value==='all'?null:event.target.value});}}><option value="all">همه وضعیت‌ها</option>{Object.entries(active.workflow.stateLabels).map(([id,label])=><option key={id} value={id}>{label}</option>)}</select></label></div></div>
         {active.id === 'purchase-request' ? <PurchaseRequestTable records={filtered} state={state} module={active} onOpen={setSelected} onEdit={setEditing} onFollowUp={(record) => {void execute('purchase-follow-up', () => service.requestTreasuryFollowUp(record.id), 'درخواست پیگیری برای مجریان خزانه ارسال شد.');}}/> : active.id === 'treasury-execution' ? <TreasuryExecutionTable records={filtered} state={state} module={active} onOpen={(record) => {setTreasuryEditRequested(false);setSelected(record);}} onEdit={(record) => {setTreasuryEditRequested(true);setSelected(record);}}/> : active.id === 'employee-advance' ? <EmployeeAdvanceTable records={filtered} state={state} module={active} onOpen={setSelected} onEdit={setEditing}/> : <OperationalTable records={filtered} state={state} module={active} onOpen={setSelected} onEdit={setEditing}/>} 
       </section>
       {selected && (active.id === 'purchase-request' ? <PurchaseRequestDrawer state={state} record={state.operationalRecords.find((item)=>item.id===selected.id)??selected} module={active} service={service} execute={execute} onClose={()=>setSelected(null)} onEdit={()=>{setEditing(selected);setSelected(null);}}/> : active.id === 'treasury-execution' ? <TreasuryExecutionDrawer state={state} record={state.operationalRecords.find((item)=>item.id===selected.id)??selected} module={active} service={service} execute={execute} initialEditPayment={treasuryEditRequested} onClose={()=>{setSelected(null);setTreasuryEditRequested(false);}}/> : active.id === 'employee-advance' ? <EmployeeAdvanceDrawer state={state} record={state.operationalRecords.find((item)=>item.id===selected.id)??selected} module={active} service={service} execute={execute} onClose={()=>setSelected(null)} onEdit={()=>{setEditing(state.operationalRecords.find((item)=>item.id===selected.id)??selected);setSelected(null);}}/> : active.id === 'asset-transfer' ? <AssetCustodyDrawer state={state} record={state.operationalRecords.find((item)=>item.id===selected.id)??selected} service={service} execute={execute} onClose={()=>setSelected(null)}/> : active.id === 'offboarding' ? <OffboardingDrawer state={state} record={state.operationalRecords.find((item)=>item.id===selected.id)??selected} service={service} execute={execute} onClose={()=>setSelected(null)}/> : <RecordDrawer state={state} record={state.operationalRecords.find((item)=>item.id===selected.id)??selected} module={active} service={service} execute={execute} onClose={()=>setSelected(null)} onEdit={()=>{setEditing(selected);setSelected(null);}}/>)}

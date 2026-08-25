@@ -1416,7 +1416,7 @@ export class LocalFoundationService {
     if (!target || target.status !== 'active' || !/^09\d{9}$/.test(mobile) || normalizePhone(personnel?.primaryMobile) !== mobile) throw new Error('نام کاربری و شماره همراه با یک حساب فعال تطابق ندارند.');
     const verificationCode = await recoveryCodeFor(target, mobile);
     await this.appendSystemAudit('organization.session.password_recovery_requested', 'درخواست بازیابی رمز عبور از صفحه ورود ثبت شد.', target.id, {userId: target.id, channel: 'local-sms-simulation'});
-    return {maskedMobile: maskMobile(mobile), verificationCode, message: `کد بازیابی رمز تپرا: ${verificationCode}`};
+    return {maskedMobile: maskMobile(mobile), verificationCode, message: `کد بازیابی رمز تیرا: ${verificationCode}`};
   }
 
   async completePasswordRecovery(username: string, mobileValue: string, verificationCode: string, newPassword: string): Promise<void> {
@@ -1441,7 +1441,7 @@ export class LocalFoundationService {
     if (!targets.length) throw new Error('حساب فعالی برای این شماره همراه پیدا نشد.');
     const usernames = targets.map((user) => user.username).join('، ');
     await this.appendSystemAudit('organization.session.username_reminder_requested', 'درخواست یادآوری نام کاربری از صفحه ورود ثبت شد.', targets[0].id, {userIds: targets.map((user) => user.id).join(','), channel: 'local-sms-simulation'});
-    return {maskedMobile: maskMobile(mobile), message: `نام کاربری تپرا: ${usernames}`};
+    return {maskedMobile: maskMobile(mobile), message: `نام کاربری تیرا: ${usernames}`};
   }
 
   async createEmployeeAdvance(input: EmployeeAdvanceInput): Promise<FoundationState> {
