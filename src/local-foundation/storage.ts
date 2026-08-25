@@ -173,7 +173,7 @@ export class IndexedDBAdapter implements StorageAdapter {
 export function validateSnapshotShape(value: unknown): asserts value is SnapshotManifest {
   if (!value || typeof value !== 'object') throw new Error('ساختار فایل پشتیبان معتبر نیست.');
   const snapshot = value as Partial<SnapshotManifest>;
-  if (snapshot.format !== 'tapra2-local-snapshot') throw new Error('این فایل، پشتیبان معتبر تیرا نیست.');
+  if (snapshot.format !== 'tapra2-local-snapshot') throw new Error('این فایل، پشتیبان معتبر شاهراه نیست.');
   if (snapshot.schemaVersion !== FOUNDATION_SCHEMA_VERSION) throw new Error('نسخه این پشتیبان با نسخه فعلی سازگار نیست.');
   if (!snapshot.stores || typeof snapshot.stores !== 'object') throw new Error('داده‌های فایل پشتیبان ناقص است.');
   for (const store of FOUNDATION_STORES) {

@@ -55,8 +55,8 @@ export function completeRequiredQaPersonnelRecords(records: PersonnelRecord[], r
       secondaryMobile,
       province: record.province?.trim() || 'تهران',
       city: record.city?.trim() || 'تهران',
-      address: record.address?.trim() || `نشانی آزمایشی QA تیرا ـ ${record.personnelCode}`,
-      bankName: record.bankName?.trim() || 'بانک آزمایشی تیرا',
+      address: record.address?.trim() || `نشانی آزمایشی QA شاهراه ـ ${record.personnelCode}`,
+      bankName: record.bankName?.trim() || 'بانک آزمایشی شاهراه',
       cardNumber: card.length === 16 ? card : `62198610${String(10_000_000 + index + 1).slice(-8)}`,
     };
   });

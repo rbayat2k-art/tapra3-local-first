@@ -36,6 +36,9 @@ import {digitsOnly, normalizeIranianMobile} from '../utils/operationalFormat';
 import {destinationRouteUrl, pageFromUrl, pageRouteUrl} from './navigationUrl';
 import {sameNameUsers, userDisplayLabel} from './personIdentity';
 import {PRIMARY_ADMIN_USER_ID, PROTECTED_PERMISSION_CODES, PROTECTED_ROLE_IDS} from './accessPolicy';
+import {BrandMark} from './BrandMark';
+import {PRODUCT_NAME, PRODUCT_TAGLINE} from './branding';
+import {DEFAULT_PREFERENCES, normalizeUiPreferences, type UiPreferences} from './appearancePreferences';
 import {WorkflowAdminPage} from './WorkflowAdminPage';
 import {RecruitmentPage} from './RecruitmentPage';
 import {NavigationSearch, type NavigationSearchDestination} from './NavigationSearch';
@@ -48,11 +51,6 @@ import {
 } from './navigationDiscovery';
 
 type PageId = string;
-type ThemePreference = 'light' | 'dark' | 'system';
-type FontSizePreference = 'standard' | 'large' | 'xlarge';
-type DensityPreference = 'compact' | 'comfortable' | 'spacious';
-interface UiPreferences { theme: ThemePreference; fontSize: FontSizePreference; density: DensityPreference; columnGap: number; reduceMotion: boolean; highContrast: boolean; }
-
 interface NavigationItem {
   id: PageId;
   title: string;
@@ -137,7 +135,6 @@ const UI_PREFERENCES_KEY = 'tapra2_ui_preferences_v2';
 const LEGACY_UI_PREFERENCES_KEY = 'tapra2_ui_preferences_v1';
 const SIDEBAR_COLLAPSED_KEY = 'tapra2_sidebar_collapsed_v1';
 const SIDEBAR_GROUPS_KEY = 'tapra2_sidebar_groups_v1';
-const DEFAULT_PREFERENCES: UiPreferences = {theme: 'system', fontSize: 'large', density: 'comfortable', columnGap: 8, reduceMotion: false, highContrast: false};
 const safeLocalStorage = {
   getItem(key: string): string | null { try { return window.localStorage.getItem(key); } catch { return null; } },
   setItem(key: string, value: string): void { try { window.localStorage.setItem(key, value); } catch { /* Preferences remain usable for this session. */ } },
@@ -147,8 +144,7 @@ function loadPreferences(): UiPreferences {
   try {
     const current = safeLocalStorage.getItem(UI_PREFERENCES_KEY);
     const legacy = !current ? safeLocalStorage.getItem(LEGACY_UI_PREFERENCES_KEY) : null;
-    const stored = JSON.parse(current ?? legacy ?? '{}') as Partial<UiPreferences>;
-    return {...DEFAULT_PREFERENCES, ...stored, columnGap: legacy && stored.columnGap === 4 ? 8 : stored.columnGap ?? DEFAULT_PREFERENCES.columnGap};
+    return normalizeUiPreferences(JSON.parse(current ?? legacy ?? '{}'), Boolean(legacy));
   }
   catch { return DEFAULT_PREFERENCES; }
 }
@@ -389,12 +385,15 @@ export function LocalFoundationApp() {
     const media = window.matchMedia('(prefers-color-scheme: dark)');
     const apply = () => {
       root.dataset.theme = preferences.theme === 'system' ? (media.matches ? 'dark' : 'light') : preferences.theme;
+      root.dataset.palette = preferences.palette;
       root.dataset.fontSize = preferences.fontSize;
       root.dataset.density = preferences.density;
       root.dataset.reduceMotion = String(preferences.reduceMotion);
       root.dataset.highContrast = String(preferences.highContrast);
       const columnGap = Math.min(24, Math.max(0, Number(preferences.columnGap) || 0));
       root.style.setProperty('--table-column-gap', `${columnGap}px`);
+      const themeColor = getComputedStyle(root).getPropertyValue('--browser-theme-color').trim();
+      document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')?.setAttribute('content', themeColor || '#111827');
     };
     apply();
     media.addEventListener('change', apply);
@@ -506,7 +505,7 @@ export function LocalFoundationApp() {
     setError(null);
     try {
       const snapshot = await service.exportSnapshot(password);
-      downloadJson(snapshot, password ? 'tira-backup-encrypted.json' : 'tira-backup.json');
+      downloadJson(snapshot, password ? 'shahrah-backup-encrypted.json' : 'shahrah-backup.json');
       setFoundation(await service.loadState());
       setToast(password ? 'پشتیبان رمزگذاری‌شده آماده شد.' : 'فایل پشتیبان آماده شد.');
       setBackupOpen(false);
@@ -566,10 +565,9 @@ export function LocalFoundationApp() {
 
   return (
     <div className={`app-shell ${sidebarCollapsed ? 'app-shell--sidebar-collapsed' : ''}`} dir="rtl">
-      <aside ref={sidebarRef} id="main-sidebar" role={mobileSidebarMode ? 'dialog' : undefined} aria-modal={mobileSidebarMode && mobileOpen ? true : undefined} aria-hidden={mobileSidebarMode && !mobileOpen ? true : undefined} aria-label="منوی اصلی تیرا" className={`sidebar ${sidebarCollapsed ? 'sidebar--collapsed' : ''} ${mobileOpen ? 'sidebar--open' : ''}`}>
+      <aside ref={sidebarRef} id="main-sidebar" role={mobileSidebarMode ? 'dialog' : undefined} aria-modal={mobileSidebarMode && mobileOpen ? true : undefined} aria-hidden={mobileSidebarMode && !mobileOpen ? true : undefined} aria-label={`منوی اصلی ${PRODUCT_NAME}`} className={`sidebar ${sidebarCollapsed ? 'sidebar--collapsed' : ''} ${mobileOpen ? 'sidebar--open' : ''}`}>
         <div className="brand-lockup">
-          <div className="brand-mark"><Sparkles size={21} /></div>
-          <div><strong>تیرا</strong><span>بنیاد محلی محصول</span></div>
+          <BrandMark variant={sidebarCollapsed && !mobileSidebarMode ? 'mark' : 'lockup'} />
           <button
             className="icon-button sidebar-collapse-toggle"
             onClick={() => {setNavigationSearchActive(false);setSidebarCollapsed((value) => !value);}}
@@ -643,7 +641,7 @@ export function LocalFoundationApp() {
         <header className="topbar">
           <div className="topbar-title">
             <button ref={mobileMenuButtonRef} className="icon-button mobile-menu" onClick={() => setMobileOpen(true)} aria-label="بازکردن منو" aria-expanded={mobileOpen} aria-controls="main-sidebar"><Menu size={21} /></button>
-            <div><span>تیرا / {currentPageTitle}</span><h1 id="main-page-heading" tabIndex={-1}>{currentPageTitle}</h1></div>
+            <div><span>{PRODUCT_NAME} / {currentPageTitle}</span><h1 id="main-page-heading" tabIndex={-1}>{currentPageTitle}</h1></div>
           </div>
           <div className="topbar-actions">
             <NotificationCenter notifications={foundation.notifications} open={notificationOpen} onToggle={() => {setNotificationOpen((value) => !value);setAccountOpen(false);}} onClose={() => setNotificationOpen(false)} onOpen={(notification) => {void openNotification(notification);}} onReadAll={() => {void run('notifications-read-all', () => service.markAllNotificationsRead(), 'همه اعلان‌ها خوانده شدند.');}} />
@@ -703,7 +701,7 @@ export function LocalFoundationApp() {
       {registrationOpen && <RegistrationDialog service={service} onClose={() => setRegistrationOpen(false)} onDone={(state) => {setFoundation(state);setRegistrationOpen(false);setToast('درخواست ثبت‌نام با کد پیگیری ثبت شد.');}} />}
       {logoutOpen && <ConfirmLogoutDialog busy={busy === 'sign-out'} user={foundation.activeUser} onClose={() => setLogoutOpen(false)} onConfirm={signOut} />}
       {resetOpen && <ResetDialog busy={busy === 'reset'} onClose={() => setResetOpen(false)} onConfirm={() => run('reset', () => service.reset(), 'داده‌ها به سناریوی اولیه بازگشتند.').then((succeeded) => {if (succeeded) setResetOpen(false);})} />}
-      {backupOpen && <PasswordDialog title="پشتیبان رمزگذاری‌شده" description="یک رمز حداقل ۸ نویسه‌ای انتخاب کنید. این رمز در تیرا ذخیره نمی‌شود." actionLabel="ساخت پشتیبان" busy={busy === 'backup'} onClose={() => setBackupOpen(false)} onSubmit={exportBackup} />}
+      {backupOpen && <PasswordDialog title="پشتیبان رمزگذاری‌شده" description={`یک رمز حداقل ۸ نویسه‌ای انتخاب کنید. این رمز در ${PRODUCT_NAME} ذخیره نمی‌شود.`} actionLabel="ساخت پشتیبان" busy={busy === 'backup'} onClose={() => setBackupOpen(false)} onSubmit={exportBackup} />}
       {restoreInput && <RestoreDialog input={restoreInput} busy={busy === 'restore'} onClose={() => setRestoreInput(null)} onSubmit={(password) => run('restore', () => service.importSnapshot(restoreInput, password), 'پشتیبان با موفقیت بازیابی شد.').then((succeeded) => {if (succeeded) setRestoreInput(null);})} />}
       {busy && busy !== 'initializing' && <div className="busy-indicator"><span /><b>در حال ثبت امن تغییرات…</b></div>}
       {toast && <div className="toast" role="status" aria-live="polite"><BadgeCheck size={20} /><span>{toast}</span></div>}
@@ -726,9 +724,10 @@ function Dashboard({state, navigate, destinations, usage, onDestination}: {
   return (
     <div className="page-stack">
       <section className="hero-card">
+        <BrandMark variant="mark" decorative className="hero-brand-watermark" />
         <div className="hero-copy">
-          <span className="eyebrow"><span className="pulse-dot pulse-dot--light" /> بنیاد محلی تیرا فعال است</span>
-          <h2>سلام {user.name.split(' ')[0]}،<br /><em>این همان شروع تازه تیراست.</em></h2>
+          <span className="eyebrow"><span className="pulse-dot pulse-dot--light" /> {PRODUCT_NAME} آماده کار است</span>
+          <h2>سلام {user.name.split(' ')[0]}،<br /><em>{PRODUCT_TAGLINE}</em></h2>
           <p>با نقش «{user.roleTitle}» وارد شده‌اید. منو و اقدام‌ها فقط بر اساس مجوز، محدوده و سیاست‌های واقعی همین کاربر محاسبه می‌شوند.</p>
           <div className="hero-actions">
             {can(user, 'organization.overview.view') && <button className="button button--light" onClick={() => navigate('organization')}>مشاهده سازمان <ArrowLeft size={17} /></button>}
@@ -1203,21 +1202,37 @@ function AppearancePage({preferences, onChange}: {preferences: UiPreferences; on
   return <div className="page-stack">
     <PageIntro icon={Palette} eyebrow="ترجیحات این دستگاه" title="تنظیمات ظاهری" description="این گزینه‌ها فقط برای ظاهر محصول‌اند، در localStorage همین مرورگر می‌مانند و وارد داده عملیاتی IndexedDB نمی‌شوند." />
     <section className="settings-panel">
+      <SettingHeading icon={Palette} title="رنگ سازمانی" text="رنگ برند را مستقل از حالت روشن، تیره یا خودکار انتخاب کنید." />
+      <div className="brand-palette-grid" role="group" aria-label="انتخاب رنگ سازمانی">
+        {([['classic', 'کلاسیک', 'بنفش آشنای فعلی'], ['navy-gold', 'شاهراه', 'سرمه‌ای و طلایی نشان شاهراه']] as const).map(([value, title, text]) => <button
+          key={value}
+          type="button"
+          className={`brand-palette-choice brand-palette-choice--${value} ${preferences.palette === value ? 'brand-palette-choice--active' : ''}`}
+          aria-pressed={preferences.palette === value}
+          onClick={() => update('palette', value)}
+        >
+          <span className="brand-palette-choice__preview"><i /><i /><i /></span>
+          <span><strong>{title}</strong><small>{text}</small></span>
+          {preferences.palette === value && <CheckCircle2 size={20} />}
+        </button>)}
+      </div>
+    </section>
+    <section className="settings-panel">
       <SettingHeading icon={SlidersHorizontal} title="اندازه نوشته‌ها" text="خوانایی همهٔ صفحه‌ها را بدون نیاز به Zoom مرورگر تنظیم کنید." />
       <div className="choice-grid choice-grid--font">
-        {([['standard', 'استاندارد', 'برای صفحه‌های کوچک و اطلاعات متراکم'], ['large', 'بزرگ', 'اندازه پیش‌فرض و پیشنهادی'], ['xlarge', 'خیلی بزرگ', 'خوانایی بیشتر در نمایشگرهای بزرگ']] as const).map(([value, title, text], index) => <button key={value} className={`preference-choice ${preferences.fontSize === value ? 'preference-choice--active' : ''}`} onClick={() => update('fontSize', value)}><span className={`font-sample font-sample--${index}`}>آ</span><strong>{title}</strong><small>{text}</small>{preferences.fontSize === value && <CheckCircle2 size={18} />}</button>)}
+        {([['standard', 'استاندارد', 'برای صفحه‌های کوچک و اطلاعات متراکم'], ['large', 'بزرگ', 'اندازه پیش‌فرض و پیشنهادی'], ['xlarge', 'خیلی بزرگ', 'خوانایی بیشتر در نمایشگرهای بزرگ']] as const).map(([value, title, text], index) => <button key={value} type="button" aria-pressed={preferences.fontSize === value} className={`preference-choice ${preferences.fontSize === value ? 'preference-choice--active' : ''}`} onClick={() => update('fontSize', value)}><span className={`font-sample font-sample--${index}`}>آ</span><strong>{title}</strong><small>{text}</small>{preferences.fontSize === value && <CheckCircle2 size={18} />}</button>)}
       </div>
     </section>
     <section className="settings-panel">
       <SettingHeading icon={Palette} title="پوسته" text="پوسته روشن، تیره یا هماهنگ با تنظیم سیستم‌عامل." />
       <div className="choice-grid">
-        {([['light', 'روشن', Sun], ['dark', 'تیره', Moon], ['system', 'سیستم', Monitor]] as const).map(([value, title, Icon]) => <button key={value} className={`preference-choice preference-choice--compact ${preferences.theme === value ? 'preference-choice--active' : ''}`} onClick={() => update('theme', value)}><Icon size={22} /><strong>{title}</strong><small>{value === 'system' ? 'هماهنگ با دستگاه' : `پوسته ${title}`}</small>{preferences.theme === value && <CheckCircle2 size={18} />}</button>)}
+        {([['light', 'روشن', Sun], ['dark', 'تیره', Moon], ['system', 'سیستم', Monitor]] as const).map(([value, title, Icon]) => <button key={value} type="button" aria-pressed={preferences.theme === value} className={`preference-choice preference-choice--compact ${preferences.theme === value ? 'preference-choice--active' : ''}`} onClick={() => update('theme', value)}><Icon size={22} /><strong>{title}</strong><small>{value === 'system' ? 'هماهنگ با دستگاه' : `پوسته ${title}`}</small>{preferences.theme === value && <CheckCircle2 size={18} />}</button>)}
       </div>
     </section>
     <section className="settings-panel">
       <SettingHeading icon={LayoutDashboard} title="تراکم نمایش" text="فاصلهٔ بین محتوا و ارتفاع ردیف‌ها را برای سبک کاری خود انتخاب کنید." />
       <div className="choice-grid">
-        {([['compact', 'فشرده', 'اطلاعات بیشتر'], ['comfortable', 'راحت', 'تعادل پیشنهادی'], ['spacious', 'باز', 'فاصله بیشتر']] as const).map(([value, title, text]) => <button key={value} className={`preference-choice preference-choice--compact ${preferences.density === value ? 'preference-choice--active' : ''}`} onClick={() => update('density', value)}><span className={`density-preview density-preview--${value}`}><i /><i /><i /></span><strong>{title}</strong><small>{text}</small>{preferences.density === value && <CheckCircle2 size={18} />}</button>)}
+        {([['compact', 'فشرده', 'اطلاعات بیشتر'], ['comfortable', 'راحت', 'تعادل پیشنهادی'], ['spacious', 'باز', 'فاصله بیشتر']] as const).map(([value, title, text]) => <button key={value} type="button" aria-pressed={preferences.density === value} className={`preference-choice preference-choice--compact ${preferences.density === value ? 'preference-choice--active' : ''}`} onClick={() => update('density', value)}><span className={`density-preview density-preview--${value}`}><i /><i /><i /></span><strong>{title}</strong><small>{text}</small>{preferences.density === value && <CheckCircle2 size={18} />}</button>)}
       </div>
     </section>
     <section className="settings-panel">
@@ -1330,8 +1345,8 @@ function AuthPortal({currentUser, busy, globalError, onClearError, onClose, onRe
   };
 
   return <main className="auth-page" dir="rtl">
-    <section className="auth-showcase" aria-label="معرفی سامانه تیرا">
-      <div className="auth-brand"><span><Sparkles size={25} /></span><div><strong>تیرا</strong><small>سامانه یکپارچه مدیریت سازمان</small></div></div>
+    <section className="auth-showcase" aria-label={`معرفی سامانه ${PRODUCT_NAME}`}>
+      <BrandMark variant="lockup" showTagline className="auth-brand" />
       <div className="auth-showcase-copy">
         <span className="auth-kicker"><i /> محیط امن و محلی سازمان</span>
         <h1>همه‌چیز برای یک<br/><em>روز کاری منظم</em></h1>
@@ -1347,7 +1362,7 @@ function AuthPortal({currentUser, busy, globalError, onClearError, onClose, onRe
     <section className="auth-workspace">
       {onClose && <button className="auth-close" onClick={onClose} aria-label="بازگشت به سامانه"><X size={20}/></button>}
       <div className="auth-card">
-        <div className="auth-mobile-brand"><span><Sparkles size={20}/></span><strong>تیرا</strong></div>
+        <BrandMark variant="lockup" className="auth-mobile-brand" />
         {mode !== 'login' && <button className="auth-back" onClick={() => changeMode('login')}><ArrowRight size={17}/> بازگشت به ورود</button>}
         <div className="auth-heading">
           <span>{mode === 'login' ? 'ورود به حساب کاربری' : mode === 'password' ? 'بازیابی رمز عبور' : 'یادآوری نام کاربری'}</span>
@@ -1403,7 +1418,7 @@ function RestoreDialog({input, busy, onClose, onSubmit}: {input: SnapshotManifes
   const encrypted = isEncryptedSnapshot(input);
   const [password, setPassword] = useState('');
   const [errors,setErrors]=useState<string[]>([]);const submit=()=>{const next=encrypted?validateRequired([{label:'رمز فایل',value:password,valid:(value)=>String(value).length>=8,message:'فیلد «رمز فایل» الزامی است و باید حداقل ۸ نویسه داشته باشد.'}]):[];setErrors(next);if(!next.length)onSubmit(encrypted?password:undefined);};
-  return <Modal onClose={onClose}><div className="modal-heading"><div><span>بازیابی کنترل‌شده</span><h2>{encrypted ? 'پشتیبان رمزگذاری‌شده' : 'پشتیبان محلی تیرا'}</h2><p>داده فعلی با محتوای فایل جایگزین می‌شود و رخداد بازیابی در Audit ثبت خواهد شد.</p></div><button className="icon-button" onClick={onClose}><X size={20} /></button></div><FormValidationSummary errors={errors}/>{encrypted && <label className="field-label"><RequiredLabel>رمز فایل</RequiredLabel><input aria-required="true" type="password" autoFocus value={password} onChange={(event) => setPassword(event.target.value)} placeholder="رمز پشتیبان" /></label>}<div className="restore-summary"><FileJson size={21} /><div><strong>اعتبارسنجی Schema و checksum</strong><span>قبل از جایگزینی داده به‌صورت خودکار انجام می‌شود.</span></div></div><div className="modal-actions"><button className="button button--secondary" onClick={onClose}>انصراف</button><button className="button button--primary" disabled={busy} onClick={submit}>تأیید و بازیابی</button></div></Modal>;
+  return <Modal onClose={onClose}><div className="modal-heading"><div><span>بازیابی کنترل‌شده</span><h2>{encrypted ? 'پشتیبان رمزگذاری‌شده' : `پشتیبان محلی ${PRODUCT_NAME}`}</h2><p>داده فعلی با محتوای فایل جایگزین می‌شود و رخداد بازیابی در Audit ثبت خواهد شد.</p></div><button className="icon-button" onClick={onClose}><X size={20} /></button></div><FormValidationSummary errors={errors}/>{encrypted && <label className="field-label"><RequiredLabel>رمز فایل</RequiredLabel><input aria-required="true" type="password" autoFocus value={password} onChange={(event) => setPassword(event.target.value)} placeholder="رمز پشتیبان" /></label>}<div className="restore-summary"><FileJson size={21} /><div><strong>اعتبارسنجی Schema و checksum</strong><span>قبل از جایگزینی داده به‌صورت خودکار انجام می‌شود.</span></div></div><div className="modal-actions"><button className="button button--secondary" onClick={onClose}>انصراف</button><button className="button button--primary" disabled={busy} onClick={submit}>تأیید و بازیابی</button></div></Modal>;
 }
 
 function ProbeCard({title, scenario, request, decision, onRun}: {title: string; scenario: string; request: Parameters<typeof service.inspectAuthorization>[0]; decision: AuthorizationDecision; onRun: () => void}) {
@@ -1432,7 +1447,7 @@ function GuardDot({label, passed}: {label: string; passed: boolean}) { return <s
 function DataAction({icon: Icon, tone, title, text, action, disabled, onClick}: {icon: LucideIcon; tone: string; title: string; text: string; action: string; disabled: boolean; onClick: () => void}) { return <article className={`data-action data-action--${tone}`}><span><Icon size={22} /></span><h3>{title}</h3><p>{text}</p><button disabled={disabled} onClick={onClick}>{disabled ? 'برای این کاربر مجاز نیست' : action}<ArrowLeft size={16} /></button></article>; }
 function StorageDatum({label, value, mono = false}: {label: string; value: string; mono?: boolean}) { return <div className="storage-datum"><span>{label}</span><strong className={mono ? 'mono' : ''}>{value}</strong></div>; }
 function Modal({children, onClose, wide = false}: {children: ReactNode; onClose: () => void; wide?: boolean}) { return <div className="modal-layer" role="dialog" aria-modal="true"><button className="modal-scrim" onClick={onClose} aria-label="بستن" /><section className={`modal-card ${wide ? 'modal-card--wide' : ''}`}>{children}</section></div>; }
-function LoadingScreen() { return <div className="loading-screen" dir="rtl"><div className="brand-mark"><Sparkles size={25} /></div><strong>تیرا در حال آماده‌سازی بنیاد محلی است</strong><span>داده‌های این دستگاه بررسی می‌شوند…</span><i /></div>; }
+function LoadingScreen() { return <div className="loading-screen" dir="rtl"><BrandMark variant="lockup" showTagline /><strong>{PRODUCT_NAME} در حال آماده‌سازی است</strong><span>داده‌های این دستگاه بررسی می‌شوند…</span><i /></div>; }
 function FatalState({error}: {error: string}) { return <div className="fatal-state" dir="rtl"><CircleAlert size={30} /><h1>راه‌اندازی Foundation ممکن نشد</h1><p>{error}</p><button onClick={() => location.reload()}>تلاش دوباره</button></div>; }
 
 function scopeLabel(scope: QaPersona['scope']) { return ({COMPANY: 'کل شرکت', UNIT: 'واحد سازمانی', TEAM: 'تیم کاری', SELF: 'فقط خود', RECORD: 'رکورد مشخص'} as const)[scope]; }

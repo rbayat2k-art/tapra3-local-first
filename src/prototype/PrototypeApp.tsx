@@ -43,7 +43,7 @@ export default function PrototypeApp() {
     <aside className={`fixed inset-y-0 right-0 z-50 flex flex-col border-l border-[var(--border)] bg-[var(--surface)] shadow-xl transition-all duration-300 ${mobileMenu ? 'translate-x-0' : 'translate-x-full'} ${state.sidebarCollapsed ? 'w-[86px]' : 'w-[286px]'} lg:translate-x-0`}>
       <div className="flex h-20 items-center gap-3 border-b border-[var(--border)] px-5">
         <span className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-gradient-to-br from-indigo-500 to-violet-700 text-white shadow-lg shadow-indigo-500/25"><Zap size={22} fill="currentColor" /></span>
-        {!state.sidebarCollapsed && <div><div className="text-xl font-black">تپرا</div><div className="text-[10px] font-bold text-[var(--text-muted)]">طراحی جدید سیستم مدیریت شرکت</div></div>}
+        {!state.sidebarCollapsed && <div><div className="text-xl font-black">شاهراه</div><div className="text-[10px] font-bold text-[var(--text-muted)]">طراحی جدید سیستم مدیریت شرکت</div></div>}
         <button className="mr-auto p-2 lg:hidden" onClick={() => setMobileMenu(false)}><X /></button>
       </div>
       <nav className="flex-1 overflow-y-auto px-3 py-4">
@@ -63,7 +63,7 @@ export default function PrototypeApp() {
     <div className={`min-h-screen transition-all duration-300 ${state.sidebarCollapsed ? 'lg:mr-[86px]' : 'lg:mr-[286px]'}`}>
       <header className="sticky top-0 z-30 flex h-20 items-center gap-3 border-b border-[var(--border)] bg-[color:var(--surface)]/90 px-4 backdrop-blur-xl sm:px-6">
         <button className="rounded-xl border border-[var(--border)] p-2.5 lg:hidden" onClick={() => setMobileMenu(true)}><Menu size={20} /></button>
-        <div className="min-w-0"><h1 className="truncate text-lg font-black">{module.title}</h1><p className="hidden text-[10px] text-[var(--text-muted)] sm:block">شرکت تپرا نمونه · تمام داده‌ها محلی و قابل تغییرند</p></div>
+        <div className="min-w-0"><h1 className="truncate text-lg font-black">{module.title}</h1><p className="hidden text-[10px] text-[var(--text-muted)] sm:block">نسخه نمونه شاهراه · تمام داده‌ها محلی و قابل تغییرند</p></div>
         <div className="mr-auto flex items-center gap-2">
           <button onClick={() => store.setTheme(state.theme === 'dark' ? 'light' : 'dark')} className="grid h-10 w-10 place-items-center rounded-xl border border-[var(--border)] text-[var(--text-muted)]">{state.theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}</button>
           <button className="relative grid h-10 w-10 place-items-center rounded-xl border border-[var(--border)] text-[var(--text-muted)]"><Bell size={18} /><span className="absolute left-2 top-2 h-2 w-2 rounded-full bg-rose-500" /></button>

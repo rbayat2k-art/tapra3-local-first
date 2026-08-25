@@ -53,7 +53,7 @@ export function Navbar({
               <Building2 className="h-6 w-6" />
             </span>
             <span className="min-w-0">
-              <span className="block truncate text-sm font-black sm:text-base">سامانه عملیاتی تپرا</span>
+              <span className="block truncate text-sm font-black sm:text-base">سامانه عملیاتی شاهراه</span>
               <span className="hidden truncate text-[11px] text-[var(--text-muted)] sm:block">مدیریت یکپارچه عملیات سازمان</span>
             </span>
           </button>

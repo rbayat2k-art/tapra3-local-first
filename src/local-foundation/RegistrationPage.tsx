@@ -31,7 +31,7 @@ export function RegistrationDialog({service, onClose, onDone}: {service: LocalFo
   const update = <K extends keyof RegistrationInput>(key: K, value: RegistrationInput[K]) => setForm((current) => ({...current, [key]: value}));
   async function submit() {setBusy(true); setError(''); try {onDone(await service.submitRegistration(form));} catch (cause) {setError(cause instanceof Error ? cause.message : 'ثبت درخواست ممکن نشد.'); setBusy(false);}}
   return <div className="modal-scrim"><form className="dialog dialog--registration" onSubmit={(event) => {event.preventDefault(); void submit();}}>
-    <header><div><span className="eyebrow">درخواست دسترسی سازمانی</span><h2>ثبت‌نام کامل در تیرا</h2><p>تمام موارد ستاره‌دار برای ایجاد درخواست الزامی هستند.</p></div><button className="icon-button" type="button" onClick={onClose} aria-label="بستن"><X size={20}/></button></header>
+    <header><div><span className="eyebrow">درخواست دسترسی سازمانی</span><h2>ثبت‌نام کامل در شاهراه</h2><p>تمام موارد ستاره‌دار برای ایجاد درخواست الزامی هستند.</p></div><button className="icon-button" type="button" onClick={onClose} aria-label="بستن"><X size={20}/></button></header>
     <div className="dialog-body registration-form-body">
       {error && <div className="notice notice--danger"><CircleAlert size={18}/><span>{error}</span></div>}
       <RegistrationSection icon={<UserRound size={18}/>} title="هویت و حساب">
