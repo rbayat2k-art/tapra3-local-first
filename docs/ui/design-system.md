@@ -43,3 +43,12 @@
 `src/components/ui/primitives.tsx` امروز در UI فعال Local Foundation استفاده عمومی ندارد و بعضی tokenهای موردنیاز آن نیز در `:root` جاری تعریف نشده‌اند؛ بنابراین canonical اعلام نمی‌شود. دو خانواده Modal (`modal-layer/modal-card` و `modal-scrim/dialog`) و دو خانواده Field نیز فعلاً هم‌زمان وجود دارند. کد جدید نزدیک‌ترین flow فعال را reuse می‌کند و consolidation در یک مأموریت مستقل با تست بصری انجام می‌شود. Component مشترک تازه فقط با دو مصرف‌کننده واقعی یا مأموریت consolidation تصویب‌شده ایجاد می‌شود.
 
 Storybook روی اجزای واقعاً فعال `FormValidation`، `PersianDateInput` و `SortHeader` برقرار و build آن CI gate است. اضافه‌کردن Story به معنی canonical شدن خودکار یک Component نیست؛ جدول بالا و مصرف واقعی تعیین‌کننده‌اند. Visual snapshot baseline هنوز تأیید نشده و `Unverified` است.
+
+## پنجره جزئیات رکورد عملیاتی
+
+- پوسته canonical برای جزئیات و اقدام رکوردهای عملیاتی `src/local-foundation/RecordDialog.tsx` است.
+- در دسکتاپ پنجره وسط viewport، با سقف ارتفاع و اسکرول داخلی نمایش داده می‌شود؛ در عرض موبایل به bottom sheet تمام‌عرض تبدیل می‌شود.
+- `role="dialog"`، نام قابل‌دسترسی، ورود و بازگشت focus، Tab/Shift+Tab و Escape توسط پوسته مدیریت می‌شوند؛ تقویم و overlayهای portaled داخل target همان پوسته می‌مانند و Escape ابتدا overlay فعال را می‌بندد.
+- header/body/footer، مجوزها و actionهای دامنه داخل مصرف‌کننده باقی می‌مانند و نباید به پوسته منتقل شوند.
+- validation فیلدی داخل فرم می‌ماند؛ خطای عملیات سراسری باید با `role="alert"` بالاتر از scrim و در viewport دیده شود.
+- کلاس‌های legacy با نام `drawer-*` فعلاً برای سازگاری CSS و چاپ خزانه باقی مانده‌اند، اما رفتار بصری کشوی کناری deprecated است.

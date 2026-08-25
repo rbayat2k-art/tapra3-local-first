@@ -2099,3 +2099,81 @@ input[dir="ltr"],code,.operational-row-number,.cell-date,.table-version { font-v
 .workflow-branch-route.has-error{border-color:color-mix(in srgb,var(--danger) 55%,var(--border))}.workflow-branch-route.has-error>summary>span{color:var(--danger);font-weight:800}
 @media(max-width:920px){.workflow-stage-toggle{grid-template-columns:36px minmax(120px,1fr) 20px}.workflow-stage-counts{grid-column:2/3}.workflow-stage-fields,.workflow-role-options{grid-template-columns:1fr}.workflow-decision-options{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:640px){.workflow-policy-dialog{width:100%;max-height:94vh}.workflow-policy-dialog>.dialog-body{padding:14px}.workflow-stage-editor,.workflow-form-section{padding:12px}.workflow-stage-editor>header,.workflow-branch-routes>header{align-items:stretch;flex-direction:column}.workflow-stage-editor>header .button,.workflow-branch-routes>header .button{width:100%}.workflow-stage-card__header{align-items:stretch;flex-direction:column}.workflow-stage-toggle{grid-template-columns:34px minmax(0,1fr) 18px}.workflow-stage-counts{grid-column:2/-1}.workflow-stage-actions{justify-content:flex-end;padding:7px 9px;border-top:1px solid var(--border);border-inline-start:0}.workflow-stage-card__body{padding:10px}.workflow-stage-group{padding:10px}.workflow-stage-fixed-row,.workflow-decision-options{grid-template-columns:1fr}.workflow-role-picker>summary{grid-template-columns:minmax(0,1fr) 18px}.workflow-role-picker>summary>b{display:none}.workflow-branch-route>summary{flex-wrap:wrap}.workflow-branch-route>summary>span{width:100%;margin-inline-start:25px}.workflow-repair-setting{grid-template-columns:20px minmax(0,1fr)}.workflow-repair-setting .button{grid-column:1/-1;width:100%}}
+
+/* Canonical operational record dialog: centered on desktop, bottom sheet on mobile. */
+@media screen {
+  .drawer-scrim {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  .record-drawer {
+    position: relative;
+    inset: auto;
+    width: min(900px, 100%);
+    max-height: min(90vh, 900px);
+    min-height: 0;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: 25px;
+    background: var(--surface);
+    box-shadow: 0 30px 100px rgba(0,0,0,.34);
+    animation: record-dialog-in .2s ease-out;
+  }
+  .record-drawer.recruitment-drawer,
+  .record-drawer.purchase-drawer,
+  .record-drawer.treasury-payment-drawer,
+  .record-drawer.offboarding-drawer { width: min(1040px, 100%); }
+  .record-drawer:focus { outline: none; }
+  .record-drawer:focus-visible { box-shadow: 0 0 0 3px color-mix(in srgb,var(--primary) 30%,transparent),0 30px 100px rgba(0,0,0,.34); }
+  .record-drawer .eyebrow { border-color: color-mix(in srgb,var(--primary) 28%,var(--border)); color: var(--primary-dark); background: var(--primary-soft); }
+  .record-drawer .state-badge--neutral { color: #475467; }
+  :root[data-theme="dark"] .record-drawer .state-badge--neutral { color: var(--muted); }
+  .record-drawer > header,
+  .record-drawer > footer { flex: 0 0 auto; background: var(--surface); }
+  .record-drawer > footer { position: relative; z-index: 1; }
+  .drawer-body { min-height: 0; }
+  .global-operation-error {
+    position: fixed;
+    inset-inline-start: 22px;
+    bottom: 22px;
+    z-index: 160;
+    display: grid;
+    width: min(520px, calc(100vw - 44px));
+    grid-template-columns: auto minmax(0,1fr) auto;
+    align-items: center;
+    gap: 10px;
+    margin: 0;
+    box-shadow: 0 20px 60px rgba(74,11,24,.24);
+    animation: toast-in .2s ease-out;
+  }
+  .global-operation-error > button {
+    padding: 6px 9px;
+    border: 1px solid currentColor;
+    border-radius: 9px;
+    color: inherit;
+    background: transparent;
+    font: inherit;
+    cursor: pointer;
+  }
+}
+@keyframes record-dialog-in { from { opacity: .55; transform: translateY(18px) scale(.985); } }
+@media screen and (max-width: 640px) {
+  .drawer-scrim { align-items: flex-end; padding: 0; }
+  .record-drawer,
+  .record-drawer.recruitment-drawer,
+  .record-drawer.purchase-drawer,
+  .record-drawer.treasury-payment-drawer,
+  .record-drawer.offboarding-drawer {
+    width: 100%;
+    max-width: 100%;
+    max-height: 94vh;
+    border-radius: 23px 23px 0 0;
+  }
+  .record-drawer > header { padding: 17px; }
+  .record-drawer > footer { flex-wrap: wrap; padding: 13px 17px; }
+  .record-drawer > footer .button { flex: 1 1 150px; }
+  .drawer-body { padding: 17px; overflow-x: hidden; }
+  .global-operation-error { inset-inline: 14px; bottom: 14px; width: auto; }
+}

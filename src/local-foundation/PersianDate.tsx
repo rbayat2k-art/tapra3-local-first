@@ -1,6 +1,8 @@
-import DatePicker, {type DateObject} from 'react-multi-date-picker';
+import {useEffect, useRef} from 'react';
+import DatePicker, {type DateObject, type DatePickerRef} from 'react-multi-date-picker';
 import persian from 'react-date-object/calendars/persian';
 import persianEn from 'react-date-object/locales/persian_en';
+import {useRecordDialogPortal} from './recordDialogPortal';
 
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -49,7 +51,16 @@ interface PersianDateInputProps {
 
 export function PersianDateInput({value = '', onChange, disabled = false, required = false, invalid = false, ariaLabel = 'انتخاب تاریخ شمسی', min}: PersianDateInputProps) {
   const pickerValue = value && !Number.isNaN(parseDate(value).getTime()) ? parseDate(value) : null;
+  const pickerRef = useRef<DatePickerRef>(null);
+  const unregisterOverlayRef = useRef<(() => void) | null>(null);
+  const dialogPortal = useRecordDialogPortal();
+  useEffect(() => () => unregisterOverlayRef.current?.(), []);
+  const closeCalendar = () => {
+    pickerRef.current?.closeCalendar();
+    requestAnimationFrame(() => pickerRef.current?.querySelector<HTMLElement>('input')?.focus());
+  };
   return <DatePicker
+    ref={pickerRef}
     value={pickerValue}
     onChange={(selected: DateObject | null) => onChange(selected ? toIsoDate(selected.toDate()) : '')}
     calendar={persian}
@@ -64,6 +75,15 @@ export function PersianDateInput({value = '', onChange, disabled = false, requir
     disabled={disabled}
     editable={!disabled}
     portal
+    portalTarget={dialogPortal?.portalTarget}
+    onOpen={() => {
+      unregisterOverlayRef.current?.();
+      unregisterOverlayRef.current = dialogPortal?.registerOverlay(closeCalendar) ?? null;
+    }}
+    onClose={() => {
+      unregisterOverlayRef.current?.();
+      unregisterOverlayRef.current = null;
+    }}
     aria-label={ariaLabel}
     aria-required={required}
     aria-invalid={invalid}

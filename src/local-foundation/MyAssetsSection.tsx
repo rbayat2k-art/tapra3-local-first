@@ -3,6 +3,9 @@ import {AlertTriangle, CheckCircle2, Eye, FileClock, History, KeyRound, PackageC
 import type {FoundationState, OperationalRecord} from './model';
 import type {LocalAssetCustodyChallenge, LocalFoundationService, OwnAssetIssueInput} from './service';
 import {formatPersianDateTime} from './PersianDate';
+import {can} from './authorization';
+import {permissionFor} from './erpCatalog';
+import {selectPersonnelAssetRecords, type PersonnelAssetViewMode} from './personnelAssetVisibility';
 
 type Execute = (label: string, work: () => Promise<FoundationState>, success: string) => Promise<boolean>;
 
@@ -12,19 +15,21 @@ interface Props {
   execute: Execute;
   personnelId: string;
   readOnly: boolean;
+  viewMode?: PersonnelAssetViewMode;
 }
 
-export function MyAssetsSection({state, service, execute, personnelId, readOnly}: Props) {
+export function MyAssetsSection({state, service, execute, personnelId, readOnly, viewMode = 'self'}: Props) {
+  const profileView = viewMode === 'personnel-profile';
   const [selectedAsset, setSelectedAsset] = useState<OperationalRecord>();
   const [returnAsset, setReturnAsset] = useState<OperationalRecord>();
   const [issueAsset, setIssueAsset] = useState<OperationalRecord>();
   const [otpValues, setOtpValues] = useState<Record<string, string>>({});
-  const assetsById = useMemo(() => new Map(state.operationalRecords.filter((item) => item.moduleId === 'fixed-asset').map((item) => [item.id, item])), [state.operationalRecords]);
-  const transfers = useMemo(() => state.operationalRecords.filter((item) => item.moduleId === 'asset-transfer' && item.ownerPersonnelId === personnelId).sort((a, b) => b.createdAt.localeCompare(a.createdAt)), [personnelId, state.operationalRecords]);
-  const currentAssets = useMemo(() => [...assetsById.values()].filter((item) => item.status !== 'disposed' && item.payload.custodianPersonnelId === personnelId).sort((a, b) => a.title.localeCompare(b.title, 'fa')), [assetsById, personnelId]);
-  const reports = useMemo(() => state.operationalRecords.filter((item) => item.moduleId === 'asset-maintenance' && item.ownerPersonnelId === personnelId).sort((a, b) => b.createdAt.localeCompare(a.createdAt)), [personnelId, state.operationalRecords]);
+  const selectedRecords = useMemo(() => selectPersonnelAssetRecords(state.operationalRecords, state.activeUser, personnelId, viewMode), [personnelId, state.activeUser, state.operationalRecords, viewMode]);
+  const assetsById = useMemo(() => new Map(selectedRecords.assets.map((item) => [item.id, item])), [selectedRecords.assets]);
+  const {currentAssets, transfers, reports} = selectedRecords;
   const pending = transfers.filter((item) => ['submitted', 'approved'].includes(item.status));
   const pendingForAsset = (assetId: string) => pending.some((item) => item.relatedRecordId === assetId);
+  const mayViewProfileAssets = !profileView || ['fixed-asset', 'asset-transfer', 'asset-maintenance'].every((moduleId) => can(state.activeUser, permissionFor(moduleId, 'view')));
 
   const confirmEmployee = async (transfer: OperationalRecord) => {
     const otp = otpValues[transfer.id] ?? '';
@@ -38,47 +43,50 @@ export function MyAssetsSection({state, service, execute, personnelId, readOnly}
     if (ok && challenge) setOtpValues((current) => ({...current, [transfer.id]: challenge!.otp}));
   };
 
+  if (!mayViewProfileAssets) return null;
+
   return <>
     <section className="my-assets-overview">
       <div className="my-assets-metrics">
-        <Metric icon={PackageCheck} label="در اختیار من" value={currentAssets.length}/>
-        <Metric icon={KeyRound} label="در انتظار تأیید من" value={pending.filter((item) => item.payload.employeeConfirmed !== true).length}/>
+        <Metric icon={PackageCheck} label={profileView ? 'در اختیار پرسنل' : 'در اختیار من'} value={currentAssets.length}/>
+        <Metric icon={KeyRound} label={profileView ? 'انتقال در انتظار' : 'در انتظار تأیید من'} value={profileView ? pending.length : pending.filter((item) => item.payload.employeeConfirmed !== true).length}/>
         <Metric icon={History} label="سوابق تحویل و عودت" value={transfers.length}/>
         <Metric icon={Wrench} label="گزارش‌های ثبت‌شده" value={reports.length}/>
       </div>
 
       {pending.length > 0 && <div className="my-assets-pending">
-        <div className="my-assets-block-title"><div><strong>نیازمند اقدام من</strong><small>رمز ارسال‌شده برای شما را وارد کنید؛ تأیید مسئول اموال همچنان مستقل باقی می‌ماند.</small></div><KeyRound size={20}/></div>
+        <div className="my-assets-block-title"><div><strong>{profileView ? 'انتقال‌های در انتظار' : 'نیازمند اقدام من'}</strong><small>{profileView ? 'تحویل یا عودت تا تأیید مستقل هر دو طرف قطعی محسوب نمی‌شود.' : 'رمز ارسال‌شده برای شما را وارد کنید؛ تأیید مسئول اموال همچنان مستقل باقی می‌ماند.'}</small></div><KeyRound size={20}/></div>
         {pending.map((transfer) => {
           const asset = transfer.relatedRecordId ? assetsById.get(transfer.relatedRecordId) : undefined;
           const employeeConfirmed = transfer.payload.employeeConfirmed === true;
           return <article key={transfer.id} className="my-asset-pending-row">
             <div><strong>{transfer.payload.action === 'return' ? 'عودت' : 'تحویل'} {asset?.title ?? 'دارایی'}</strong><small>{transfer.trackingCode} · ثبت در {formatPersianDateTime(transfer.createdAt)}</small></div>
-            {employeeConfirmed ? <span className="state-badge state-badge--progress"><CheckCircle2 size={14}/> تأیید شما ثبت شده؛ منتظر مسئول اموال</span> : readOnly ? <span className="state-badge">در حالت مشاهده فقط‌خواندنی</span> : <div className="my-asset-otp"><input aria-label={`رمز تأیید ${asset?.title ?? 'دارایی'}`} dir="ltr" inputMode="numeric" maxLength={6} placeholder="رمز ۶ رقمی" value={otpValues[transfer.id] ?? ''} onChange={(event) => setOtpValues((current) => ({...current, [transfer.id]: event.target.value.replace(/\D/g, '')}))}/><button className="button button--secondary" type="button" onClick={() => void issueEmployeeOtp(transfer)}>دریافت رمز من</button><button className="button button--secondary" disabled={(otpValues[transfer.id] ?? '').length !== 6} onClick={() => void confirmEmployee(transfer)}>ثبت تأیید من</button></div>}
+            {employeeConfirmed ? <span className="state-badge state-badge--progress"><CheckCircle2 size={14}/> تأیید پرسنل ثبت شده؛ منتظر مسئول اموال</span> : readOnly ? <span className="state-badge">منتظر تأیید پرسنل</span> : <div className="my-asset-otp"><input aria-label={`رمز تأیید ${asset?.title ?? 'دارایی'}`} dir="ltr" inputMode="numeric" maxLength={6} placeholder="رمز ۶ رقمی" value={otpValues[transfer.id] ?? ''} onChange={(event) => setOtpValues((current) => ({...current, [transfer.id]: event.target.value.replace(/\D/g, '')}))}/><button className="button button--secondary" type="button" onClick={() => void issueEmployeeOtp(transfer)}>دریافت رمز من</button><button className="button button--secondary" disabled={(otpValues[transfer.id] ?? '').length !== 6} onClick={() => void confirmEmployee(transfer)}>ثبت تأیید من</button></div>}
           </article>;
         })}
       </div>}
 
-      <div className="my-assets-block-title"><div><strong>دارایی‌های تحت اختیار من</strong><small>فقط دارایی‌هایی نمایش داده می‌شوند که تحویل دوطرفه آن‌ها به پرونده شما قطعی شده است.</small></div><PackageCheck size={20}/></div>
-      {currentAssets.length ? <div className="my-assets-table-wrap"><table className="my-assets-table"><thead><tr><th>ردیف</th><th>دارایی</th><th>کد / سریال</th><th>وضعیت</th><th>تاریخ تحویل</th><th>اقدام‌ها</th></tr></thead><tbody>{currentAssets.map((asset, index) => {
+      <div className="my-assets-block-title"><div><strong>{profileView ? 'دارایی‌های تحت اختیار پرسنل' : 'دارایی‌های تحت اختیار من'}</strong><small>{profileView ? 'فقط تحویل‌های دوطرفه قطعی‌شده در این فهرست نمایش داده می‌شوند.' : 'فقط دارایی‌هایی نمایش داده می‌شوند که تحویل دوطرفه آن‌ها به پرونده شما قطعی شده است.'}</small></div><PackageCheck size={20}/></div>
+      {currentAssets.length ? <div className="my-assets-table-wrap"><table className="my-assets-table"><thead><tr><th>ردیف</th><th>دارایی</th><th>کد / سریال</th><th>وضعیت</th><th>تاریخ تحویل</th>{!profileView && <th>اقدام‌ها</th>}</tr></thead><tbody>{currentAssets.map((asset, index) => {
         const delivery = transfers.find((item) => item.relatedRecordId === asset.id && item.payload.action === 'delivery' && item.status === 'completed');
-        return <tr key={asset.id}><td>{(index + 1).toLocaleString('en-US')}</td><td><strong>{asset.title}</strong><small>{payloadText(asset, 'category') || asset.description || 'بدون توضیح تکمیلی'}</small></td><td><code dir="ltr">{asset.trackingCode}</code><small dir="ltr">{payloadText(asset, 'serialNumber') || 'سریال ثبت نشده'}</small></td><td><span className="state-badge state-badge--good">در اختیار من</span></td><td>{formatPersianDateTime(String(asset.payload.lastCustodyChangedAt || delivery?.updatedAt || asset.updatedAt))}</td><td><div className="icon-actions"><button className="icon-button" title="مشاهده جزئیات و رسید تحویل" aria-label="مشاهده جزئیات و رسید تحویل" onClick={() => setSelectedAsset(asset)}><Eye size={17}/></button><button className="icon-button" title="گزارش خرابی، مفقودی یا مشکل" aria-label="گزارش خرابی، مفقودی یا مشکل" disabled={readOnly} onClick={() => setIssueAsset(asset)}><AlertTriangle size={17}/></button><button className="icon-button" title="درخواست عودت دارایی" aria-label="درخواست عودت دارایی" disabled={readOnly || pendingForAsset(asset.id)} onClick={() => setReturnAsset(asset)}><RotateCcw size={17}/></button></div></td></tr>;
-      })}</tbody></table></div> : <div className="compact-empty my-assets-empty"><PackageCheck size={24}/><span>در حال حاضر دارایی قطعی‌شده‌ای تحت اختیار شما ثبت نشده است.</span></div>}
+        return <tr key={asset.id}><td>{(index + 1).toLocaleString('en-US')}</td><td><strong>{asset.title}</strong><small>{payloadText(asset, 'category') || asset.description || 'بدون توضیح تکمیلی'}</small></td><td><code dir="ltr">{asset.trackingCode}</code><small dir="ltr">{payloadText(asset, 'serialNumber') || 'سریال ثبت نشده'}</small></td><td><span className="state-badge state-badge--good">{profileView ? 'در اختیار پرسنل' : 'در اختیار من'}</span></td><td>{formatPersianDateTime(String(asset.payload.lastCustodyChangedAt || delivery?.updatedAt || asset.updatedAt))}</td>{!profileView && <td><div className="icon-actions"><button className="icon-button" title="مشاهده جزئیات و رسید تحویل" aria-label="مشاهده جزئیات و رسید تحویل" onClick={() => setSelectedAsset(asset)}><Eye size={17}/></button><button className="icon-button" title="گزارش خرابی، مفقودی یا مشکل" aria-label="گزارش خرابی، مفقودی یا مشکل" disabled={readOnly} onClick={() => setIssueAsset(asset)}><AlertTriangle size={17}/></button><button className="icon-button" title="درخواست عودت دارایی" aria-label="درخواست عودت دارایی" disabled={readOnly || pendingForAsset(asset.id)} onClick={() => setReturnAsset(asset)}><RotateCcw size={17}/></button></div></td>}</tr>;
+      })}</tbody></table></div> : <div className="compact-empty my-assets-empty"><PackageCheck size={24}/><span>{profileView ? 'در حال حاضر دارایی قطعی‌شده‌ای برای این پرسنل ثبت نشده است.' : 'در حال حاضر دارایی قطعی‌شده‌ای تحت اختیار شما ثبت نشده است.'}</span></div>}
 
-      {transfers.length > 0 && <details className="my-assets-history"><summary><span><History size={18}/> تاریخچه تحویل و عودت</span><small>{transfers.length.toLocaleString('en-US')} رویداد</small></summary><div className="my-assets-history-list">{transfers.map((transfer, index) => {const asset = transfer.relatedRecordId ? assetsById.get(transfer.relatedRecordId) : undefined; return <article key={transfer.id}><b>{(index + 1).toLocaleString('en-US')}</b><div><strong>{transfer.payload.action === 'return' ? 'عودت' : 'تحویل'} {asset?.title ?? 'دارایی'}</strong><small>{transfer.trackingCode} · {formatPersianDateTime(transfer.updatedAt)}</small></div><span className={`state-badge state-badge--${transfer.status === 'completed' ? 'good' : 'progress'}`}>{transfer.status === 'completed' ? 'قطعی‌شده' : 'در انتظار تأیید'}</span></article>;})}</div></details>}
+      {transfers.length > 0 && <details className="my-assets-history"><summary><span><History size={18}/> تاریخچه تحویل و عودت</span><small>{transfers.length.toLocaleString('en-US')} رویداد</small></summary><div className="my-assets-history-list">{transfers.map((transfer, index) => {const asset = transfer.relatedRecordId ? assetsById.get(transfer.relatedRecordId) : undefined; return <article key={transfer.id}><b>{(index + 1).toLocaleString('en-US')}</b><div><strong>{transfer.payload.action === 'return' ? 'عودت' : 'تحویل'} {asset?.title ?? 'دارایی'}</strong><small>{transfer.trackingCode} · {formatPersianDateTime(transfer.updatedAt)} · تأیید پرسنل: {transfer.payload.employeeConfirmed === true ? 'ثبت شده' : 'در انتظار'} · تأیید مسئول اموال: {transfer.payload.officerConfirmed === true ? 'ثبت شده' : 'در انتظار'}</small></div><span className={`state-badge state-badge--${transfer.status === 'completed' ? 'good' : 'progress'}`}>{transfer.status === 'completed' ? 'قطعی‌شده' : 'در انتظار تأیید'}</span></article>;})}</div></details>}
+      {reports.length > 0 && <details className="my-assets-history"><summary><span><Wrench size={18}/> گزارش‌های خرابی، مفقودی و مشکل</span><small>{reports.length.toLocaleString('en-US')} گزارش</small></summary><div className="my-assets-history-list">{reports.map((report, index) => {const asset = report.relatedRecordId ? assetsById.get(report.relatedRecordId) : undefined; return <article key={report.id}><b>{(index + 1).toLocaleString('en-US')}</b><div><strong>{report.title || `گزارش ${asset?.title ?? 'دارایی'}`}</strong><small>{report.description || 'بدون شرح تکمیلی'} · {formatPersianDateTime(report.updatedAt)}</small></div><span className={`state-badge state-badge--${report.status === 'completed' ? 'good' : 'progress'}`}>{report.status === 'completed' ? 'رسیدگی‌شده' : 'در حال رسیدگی'}</span></article>;})}</div></details>}
     </section>
 
-    {selectedAsset && <AssetDetailsDialog asset={selectedAsset} transfers={transfers.filter((item) => item.relatedRecordId === selectedAsset.id)} reports={reports.filter((item) => item.relatedRecordId === selectedAsset.id)} onClose={() => setSelectedAsset(undefined)}/>} 
-    {returnAsset && <AssetReturnDialog asset={returnAsset} personnelId={personnelId} service={service} execute={execute} onClose={() => setReturnAsset(undefined)}/>} 
-    {issueAsset && <AssetIssueDialog asset={issueAsset} service={service} execute={execute} onClose={() => setIssueAsset(undefined)}/>} 
+    {!profileView && selectedAsset && <AssetDetailsDialog asset={selectedAsset} transfers={transfers.filter((item) => item.relatedRecordId === selectedAsset.id)} reports={reports.filter((item) => item.relatedRecordId === selectedAsset.id)} profileView={false} onClose={() => setSelectedAsset(undefined)}/>}
+    {!profileView && returnAsset && <AssetReturnDialog asset={returnAsset} personnelId={personnelId} service={service} execute={execute} onClose={() => setReturnAsset(undefined)}/>}
+    {!profileView && issueAsset && <AssetIssueDialog asset={issueAsset} service={service} execute={execute} onClose={() => setIssueAsset(undefined)}/>}
   </>;
 }
 
 function Metric({icon: Icon, label, value}: {icon: typeof PackageCheck; label: string; value: number}) {return <div><i><Icon size={18}/></i><span>{label}</span><strong>{value.toLocaleString('en-US')}</strong></div>;}
 
-function AssetDetailsDialog({asset, transfers, reports, onClose}: {asset: OperationalRecord; transfers: OperationalRecord[]; reports: OperationalRecord[]; onClose: () => void}) {
+function AssetDetailsDialog({asset, transfers, reports, profileView, onClose}: {asset: OperationalRecord; transfers: OperationalRecord[]; reports: OperationalRecord[]; profileView: boolean; onClose: () => void}) {
   return <div className="modal-scrim"><section className="dialog my-asset-detail-dialog"><header><div><span className="eyebrow">{asset.trackingCode}</span><h2>{asset.title}</h2><p>مشخصات، رسیدهای تحویل و سابقه نگهداری این دارایی</p></div><button className="icon-button" onClick={onClose} aria-label="بستن"><X size={20}/></button></header><div className="dialog-body form-stack">
-    <div className="record-facts"><div><span>شماره سریال</span><strong dir="ltr">{payloadText(asset, 'serialNumber') || 'ثبت نشده'}</strong></div><div><span>دسته‌بندی</span><strong>{payloadText(asset, 'category') || 'ثبت نشده'}</strong></div><div><span>برند / مدل</span><strong>{[payloadText(asset, 'brand'), payloadText(asset, 'model')].filter(Boolean).join(' / ') || 'ثبت نشده'}</strong></div><div><span>وضعیت هنگام تحویل</span><strong>{payloadText(asset, 'deliveryCondition') || payloadText(asset, 'condition') || 'ثبت نشده'}</strong></div><div><span>لوازم جانبی</span><strong>{payloadText(asset, 'accessories') || 'ثبت نشده'}</strong></div><div><span>وضعیت فعلی</span><strong>در اختیار شما</strong></div></div>
+    <div className="record-facts"><div><span>شماره سریال</span><strong dir="ltr">{payloadText(asset, 'serialNumber') || 'ثبت نشده'}</strong></div><div><span>دسته‌بندی</span><strong>{payloadText(asset, 'category') || 'ثبت نشده'}</strong></div><div><span>برند / مدل</span><strong>{[payloadText(asset, 'brand'), payloadText(asset, 'model')].filter(Boolean).join(' / ') || 'ثبت نشده'}</strong></div><div><span>وضعیت هنگام تحویل</span><strong>{payloadText(asset, 'deliveryCondition') || payloadText(asset, 'condition') || 'ثبت نشده'}</strong></div><div><span>لوازم جانبی</span><strong>{payloadText(asset, 'accessories') || 'ثبت نشده'}</strong></div><div><span>وضعیت فعلی</span><strong>{profileView ? 'در اختیار پرسنل' : 'در اختیار شما'}</strong></div></div>
     {asset.description && <div className="notice notice--info"><ShieldCheck size={18}/><span>{asset.description}</span></div>}
     <div className="my-asset-receipts"><h3>رسیدها و تأییدها</h3>{transfers.length ? transfers.map((transfer) => <article key={transfer.id}><FileClock size={19}/><div><strong>{transfer.payload.action === 'return' ? 'رسید عودت' : 'رسید تحویل'} · {transfer.trackingCode}</strong><small>{formatPersianDateTime(transfer.updatedAt)} · تأیید پرسنل: {transfer.payload.employeeConfirmed === true ? 'ثبت شده' : 'در انتظار'} · تأیید مسئول اموال: {transfer.payload.officerConfirmed === true ? 'ثبت شده' : 'در انتظار'}</small></div></article>) : <p>رسیدی ثبت نشده است.</p>}</div>
     {reports.length > 0 && <div className="my-asset-receipts"><h3>گزارش‌های مشکل</h3>{reports.map((report) => <article key={report.id}><AlertTriangle size={19}/><div><strong>{report.title}</strong><small>{report.description} · {formatPersianDateTime(report.createdAt)}</small></div></article>)}</div>}

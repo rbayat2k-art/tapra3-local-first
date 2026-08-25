@@ -234,6 +234,7 @@ export function LocalFoundationApp() {
   async function run(label: string, work: () => Promise<FoundationState>, success: string) {
     setBusy(label);
     setError(null);
+    setToast(null);
     try {
       const next = await work();
       setFoundation(next);
@@ -344,7 +345,7 @@ export function LocalFoundationApp() {
     />
     {registrationOpen && <RegistrationDialog service={service} onClose={() => setRegistrationOpen(false)} onDone={(state) => {setFoundation(state);setRegistrationOpen(false);setToast('درخواست ثبت‌نام با کد پیگیری ثبت شد.');}} />}
     {busy && <div className="busy-indicator"><span /><b>در حال بررسی امن اطلاعات…</b></div>}
-    {toast && <div className="toast"><BadgeCheck size={20} /><span>{toast}</span></div>}
+    {toast && <div className="toast" role="status" aria-live="polite"><BadgeCheck size={20} /><span>{toast}</span></div>}
   </>;
 
   const user = foundation.activeUser;
@@ -430,7 +431,7 @@ export function LocalFoundationApp() {
         {foundation.session.actingAdminUserId && <div className="access-view-banner"><Eye size={19} /><span>در حال مشاهده با دسترسی: <strong>{foundation.activeUser.name}</strong></span><button onClick={endQaSession}>بازگشت به دسترسی ادمین <ArrowLeft size={16} /></button></div>}
 
         <div className="page-frame">
-          {error && <div className="notice notice--danger"><CircleAlert size={19} /><span>{error}</span><button onClick={() => setError(null)}>بستن</button></div>}
+          {error && <div className="notice notice--danger global-operation-error" role="alert" aria-live="assertive"><CircleAlert size={19} /><span>{error}</span><button type="button" aria-label="بستن پیام خطا" onClick={() => setError(null)}>بستن</button></div>}
           {page === 'dashboard' && <Dashboard state={foundation} navigate={setPage} />}
           {page === 'organization' && <OrganizationOverviewPage state={foundation} />}
           {page === 'units' && <UnitsPage state={foundation} service={service} execute={run} />}
@@ -477,7 +478,7 @@ export function LocalFoundationApp() {
       {backupOpen && <PasswordDialog title="پشتیبان رمزگذاری‌شده" description="یک رمز حداقل ۸ نویسه‌ای انتخاب کنید. این رمز در تپرا ذخیره نمی‌شود." actionLabel="ساخت پشتیبان" busy={busy === 'backup'} onClose={() => setBackupOpen(false)} onSubmit={exportBackup} />}
       {restoreInput && <RestoreDialog input={restoreInput} busy={busy === 'restore'} onClose={() => setRestoreInput(null)} onSubmit={(password) => run('restore', () => service.importSnapshot(restoreInput, password), 'پشتیبان با موفقیت بازیابی شد.').then((succeeded) => {if (succeeded) setRestoreInput(null);})} />}
       {busy && busy !== 'initializing' && <div className="busy-indicator"><span /><b>در حال ثبت امن تغییرات…</b></div>}
-      {toast && <div className="toast"><BadgeCheck size={20} /><span>{toast}</span></div>}
+      {toast && <div className="toast" role="status" aria-live="polite"><BadgeCheck size={20} /><span>{toast}</span></div>}
     </div>
   );
 }

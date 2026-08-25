@@ -7,6 +7,7 @@ import type {FoundationState, OperationalRecord} from './model';
 import type {LocalAssetCustodyChallenge, LocalFoundationService, OperationalRecordInput} from './service';
 import {FormValidationSummary, OptionalLabel, RequiredLabel, validateRequired} from './FormValidation';
 import {formatPortalAmount, toLatinDigits} from '../utils/operationalFormat';
+import {RecordDialog} from './RecordDialog';
 
 type Execute = (label: string, work: () => Promise<FoundationState>, success: string) => Promise<boolean>;
 
@@ -70,7 +71,7 @@ export function OffboardingDrawer({state, record, service, execute, onClose}: {s
     if (ok) onClose();
   };
 
-  if (isEmploymentEndRequest) return <div className="drawer-scrim" onMouseDown={(event) => {if (event.currentTarget === event.target) onClose();}}><aside className="record-drawer offboarding-drawer" aria-label={`درخواست بررسی پایان همکاری ${person?.firstName ?? ''}`}>
+  if (isEmploymentEndRequest) return <RecordDialog ariaLabel={`درخواست بررسی پایان همکاری ${person?.firstName ?? ''}`} className="offboarding-drawer" onClose={onClose}>
     <header><div><span className="eyebrow">{record.trackingCode} · درخواست بررسی پایان همکاری</span><h2>{person ? `${person.firstName} ${person.lastName}` : record.title}</h2><p>{record.payload.personnelCode ? `کد پرسنلی ${record.payload.personnelCode}` : ''}</p></div><button className="icon-button" onClick={onClose} aria-label="بستن"><X size={20}/></button></header>
     <div className="drawer-body form-stack">
       <div className="waiting-banner"><CircleAlert size={20}/><div><span>مرحله جاری</span><strong>{record.status === 'requested' ? 'در انتظار بررسی منابع انسانی' : text(record.payload.currentWaitingFor) || 'تأییدشده و در انتظار تاریخ اجرا'}</strong></div></div>
@@ -79,9 +80,9 @@ export function OffboardingDrawer({state, record, service, execute, onClose}: {s
       {(record.status === 'requested' && canOrganization || isRequester || canClose) && <section className="workflow-box"><h3>{record.status === 'requested' && canOrganization ? 'تصمیم منابع انسانی' : 'لغو درخواست'}</h3><FormValidationSummary errors={errors}/><label className="field"><RequiredLabel>توضیح تصمیم</RequiredLabel><textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="دلیل تأیید یا پس‌گرفتن درخواست را ثبت کنید…"/></label><div className="transition-actions">{record.status === 'requested' && canOrganization && <button className="button button--primary" onClick={() => void approveEndRequest()}><BadgeCheck size={17}/> تأیید درخواست و ثبت تاریخ اجرا</button>}{(isRequester || canClose) && <button className="button button--secondary" onClick={() => void cancelEndRequest()}><RotateCcw size={17}/> {record.status === 'requested' ? 'لغو درخواست' : 'لغو پیش از اجرا'}</button>}</div></section>}
       <section className="history-box"><h3>تاریخچه غیرقابل حذف</h3>{history.map((item) => <article key={item.id}><span/><div><strong>{item.actorName}</strong><p>{item.reason || 'رویداد سیستمی ثبت شد.'}</p><small>{formatPersianDateTime(item.occurredAt)} · #{item.sequence.toLocaleString('fa-IR')}</small></div></article>)}</section>
     </div><footer><button className="button button--ghost" onClick={onClose}>بستن</button></footer>
-  </aside></div>;
+  </RecordDialog>;
 
-  return <div className="drawer-scrim" onMouseDown={(event) => {if (event.currentTarget === event.target) onClose();}}><aside className="record-drawer offboarding-drawer" aria-label={`پرونده خروج ${person?.firstName ?? ''}`}>
+  return <RecordDialog ariaLabel={`پرونده خروج ${person?.firstName ?? ''}`} className="offboarding-drawer" onClose={onClose}>
     <header><div><span className="eyebrow">{record.trackingCode} · پرونده خروج</span><h2>{person ? `${person.firstName} ${person.lastName}` : record.title}</h2><p>{record.payload.personnelCode ? `کد پرسنلی ${record.payload.personnelCode}` : ''}</p></div><button className="icon-button" onClick={onClose} aria-label="بستن"><X size={20}/></button></header>
     <div className="drawer-body form-stack">
       <div className="waiting-banner"><CircleAlert size={20}/><div><span>مرحله جاری</span><strong>{text(record.payload.currentWaitingFor) || 'در حال بررسی'}</strong></div></div>
@@ -103,7 +104,7 @@ export function OffboardingDrawer({state, record, service, execute, onClose}: {s
       {record.status !== 'completed' && <section className="workflow-box"><h3>ثبت تسویه و بستن پرونده</h3><FormValidationSummary errors={errors}/><label className="field"><RequiredLabel>توضیح تصمیم</RequiredLabel><textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="شرح تسویه، اقلام کنترل‌شده یا دلیل تصمیم…"/></label><div className="transition-actions">{canFinance && <button className="button button--secondary" onClick={() => void updateClearance('financial', record.payload.financialClearanceStatus !== 'clear')}><Banknote size={17}/>{record.payload.financialClearanceStatus === 'clear' ? 'بازگشایی تسویه مالی' : 'تأیید تسویه مالی'}</button>}{canOrganization && <button className="button button--secondary" onClick={() => void updateClearance('organizational', record.payload.organizationalClearanceStatus !== 'clear')}><ClipboardCheck size={17}/>{record.payload.organizationalClearanceStatus === 'clear' ? 'بازگشایی تسویه سازمانی' : 'تأیید تسویه سازمانی'}</button>}{canClose && <button className="button button--primary" disabled={!allClear} title={!allClear ? 'ابتدا همه مراحل تسویه را کامل کنید' : 'بستن پرونده'} onClick={() => void closeCase()}><BadgeCheck size={17}/> بستن نهایی پرونده خروج</button>}</div></section>}
       <section className="history-box"><h3>تاریخچه غیرقابل حذف</h3>{history.map((item) => <article key={item.id}><span/><div><strong>{item.actorName}</strong><p>{item.reason || 'رویداد سیستمی ثبت شد.'}</p><small>{formatPersianDateTime(item.occurredAt)} · #{item.sequence.toLocaleString('fa-IR')}</small></div></article>)}</section>
     </div><footer><button className="button button--ghost" onClick={onClose}>بستن</button></footer>
-  </aside></div>;
+  </RecordDialog>;
 }
 
 function ClearanceStep({icon: Icon, label, done}: {icon: LucideIcon; label: string; done: boolean}) {return <div className={done ? 'done' : ''}><Icon size={18}/><span>{label}</span><strong>{done ? 'تکمیل' : 'در انتظار'}</strong></div>;}

@@ -12,6 +12,7 @@ import {
 } from './purchaseRequest';
 import type {LocalFoundationService, OperationalRecordInput} from './service';
 import {SortHeader, useSortableRows, type SortColumn} from './Sorting';
+import {RecordDialog} from './RecordDialog';
 import {formatPortalAmount, normalizeBankCard} from '../utils/operationalFormat';
 import {canRequestTreasuryFollowUp} from './purchaseFollowUp';
 import {decisionsForWorkflowState, roleIdsForWorkflowState} from './workflowPolicy';
@@ -186,7 +187,7 @@ export function PurchaseRequestDrawer({state, record, module, service, execute, 
     const message = decision === 'approve_and_forward' ? 'درخواست تأیید و به مقصد بعدی ارجاع شد.' : decision === 'needs_correction' ? 'درخواست برای اصلاح به کارتابل درخواست‌کننده بازگشت.' : 'درخواست رد و بسته شد.';
     void execute('purchase-decision', () => service.decidePurchaseRequest(record.id, decision, assignee, reason), message).then((succeeded) => {if (succeeded) {setReason(''); setAssignee(''); setErrors([]);}});
   };
-  return <div className="drawer-scrim" onMouseDown={(event) => {if (event.currentTarget === event.target) onClose();}}><aside className="record-drawer purchase-drawer" aria-label={`جزئیات ${record.title}`}><header><div><span className="eyebrow">{record.trackingCode}</span><h2>{record.title}</h2><p>{record.description}</p></div><button className="icon-button" onClick={onClose} aria-label="بستن"><X size={20}/></button></header><div className="drawer-body">
+  return <RecordDialog ariaLabel={`جزئیات ${record.title}`} className="purchase-drawer" onClose={onClose}><header><div><span className="eyebrow">{record.trackingCode}</span><h2>{record.title}</h2><p>{record.description}</p></div><button className="icon-button" onClick={onClose} aria-label="بستن"><X size={20}/></button></header><div className="drawer-body">
     <div className="record-status-hero"><span className={`state-badge state-badge--${tone(record.status)}`}>{stateLabel(module.workflow, record.status)}</span><span>نسخه {record.version.toLocaleString('en-US')}</span><span>{priorityLabel(record.priority)}</span><strong>{rial(record.amountRial)}</strong></div>
     <PurchaseRequestDetails state={state} record={record}/>
     <section className="workflow-box"><h3>{isDecisionMaker ? 'تصمیم تأییدکننده' : 'اقدام بعدی'}</h3><FormValidationSummary errors={errors}/>{(isDecisionMaker || transitions.some((item) => item.reasonRequired)) && <label className="field"><RequiredLabel>توضیح تصمیم</RequiredLabel><textarea aria-required="true" value={reason} onChange={(event) => setReason(event.target.value)} placeholder="توضیحی بنویسید که در تاریخچه پرونده ثبت شود…"/></label>}
@@ -194,7 +195,7 @@ export function PurchaseRequestDrawer({state, record, module, service, execute, 
       {isDecisionMaker ? <div className="transition-actions">{allowedDecisions.includes('approve') && <button className="button button--primary" type="button" onClick={() => submitDecision('approve_and_forward')}>تأیید و ارجاع به نفر بعدی<ArrowLeft size={16}/></button>}{allowedDecisions.includes('needs_correction') && <button className="button button--secondary" type="button" onClick={() => submitDecision('needs_correction')}>نیازمند اصلاح<ArrowLeft size={16}/></button>}{allowedDecisions.includes('reject') && <button className="button button--danger" type="button" onClick={() => submitDecision('rejected')}>رد و بستن پرونده<ArrowLeft size={16}/></button>}</div> : <div className="transition-actions">{transitions.map((transition) => <button className={`button ${transition.to === 'cancelled' ? 'button--danger' : 'button--primary'}`} key={transition.id} onClick={() => decide(transition)}>{transition.label}<ArrowLeft size={16}/></button>)}{!transitions.length && <span className="quiet-state"><CheckCircle2 size={18}/>اقدام مجاز بعدی برای این نقش وجود ندارد.</span>}</div>}
     </section>
     <section className="history-box"><h3>تاریخچه غیرقابل حذف</h3>{history.length ? history.map((item) => <article key={item.id}><span/><div><strong>{item.toState ? `${item.fromState ?? ''} ← ${item.toState}` : item.eventType}</strong><p>{item.reason || `${item.actorName} این رویداد را ثبت کرد.`}</p><small>{formatPersianDateTime(item.occurredAt)} · #{item.sequence.toLocaleString('en-US')}</small></div></article>) : <div className="quiet-state">تاریخچه‌ای ثبت نشده است.</div>}</section>
-  </div><footer>{editable && <button className="button button--secondary" onClick={onEdit}><Pencil size={17}/> ویرایش پیش‌نویس</button>}<button className="button button--ghost" onClick={onClose}>بستن</button></footer></aside></div>;
+  </div><footer>{editable && <button className="button button--secondary" onClick={onEdit}><Pencil size={17}/> ویرایش پیش‌نویس</button>}<button className="button button--ghost" onClick={onClose}>بستن</button></footer></RecordDialog>;
 }
 
 export function PurchaseRequestDetails({state, record, revealBeneficiaryCard = false}: {state: FoundationState; record: OperationalRecord; revealBeneficiaryCard?: boolean}) {

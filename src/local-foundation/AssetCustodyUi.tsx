@@ -5,6 +5,7 @@ import type {AssetCustodyInput, LocalAssetCustodyChallenge, LocalFoundationServi
 import {formatPersianDateTime} from './PersianDate';
 import {can} from './authorization';
 import {permissionFor} from './erpCatalog';
+import {RecordDialog} from './RecordDialog';
 
 interface CommonProps {
   state: FoundationState;
@@ -77,7 +78,7 @@ export function AssetCustodyDrawer({state, record, service, execute, onClose}: C
     const ok = await execute(`asset-custody-${party}`, () => service.confirmAssetCustodyOtp(record.id, party, otp), party === 'employee' ? 'تأیید پرسنل ثبت شد.' : 'تأیید مسئول اموال ثبت شد.');
     if (ok) { setOtp(''); setShownOtp(''); }
   };
-  return <div className="drawer-scrim" onMouseDown={(event) => {if (event.currentTarget === event.target) onClose();}}><aside className="record-drawer asset-custody-drawer">
+  return <RecordDialog ariaLabel={`پرونده تحویل دارایی ${record.title}`} className="asset-custody-drawer" onClose={onClose}>
     <header><div><span className="eyebrow">{record.trackingCode}</span><h2>{record.title}</h2></div><button className="icon-button" onClick={onClose} aria-label="بستن"><X size={20}/></button></header>
     <div className="drawer-body form-stack">
       <div className="record-facts"><div><span>دارایی</span><strong>{asset?.title ?? 'نامشخص'}</strong></div><div><span>پرسنل</span><strong>{person ? `${person.firstName} ${person.lastName}` : 'نامشخص'}</strong></div><div><span>نوع عملیات</span><strong>{record.payload.action === 'return' ? 'عودت' : 'تحویل'}</strong></div></div>
@@ -87,7 +88,7 @@ export function AssetCustodyDrawer({state, record, service, execute, onClose}: C
       {record.status === 'completed' && <div className="success-panel"><CheckCircle2 size={22}/><div><strong>تحویل دوطرفه قطعی شده است</strong><span>زمان، عامل و سابقه در رویدادهای ممیزی نگهداری شده‌اند.</span></div></div>}
     </div>
     <footer className="drawer-footer"><button className="button button--ghost" onClick={onClose}>بستن</button></footer>
-  </aside></div>;
+  </RecordDialog>;
 }
 
 function Status({confirmed, label}: {confirmed: boolean; label: string}) {return <div className={confirmed ? 'confirmed' : ''}><CheckCircle2 size={18}/><span>{label}</span><strong>{confirmed ? 'ثبت شده' : 'در انتظار'}</strong></div>}

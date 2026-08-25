@@ -12,6 +12,7 @@ import {SortHeader, useSortableRows, type SortColumn} from './Sorting';
 import {formatPortalAmount} from '../utils/operationalFormat';
 import {EmployeeAdvanceDetails} from './EmployeeAdvanceUi';
 import {advanceBeneficiaryName, maskCard, readEmployeeAdvancePayload} from './employeeAdvance';
+import {RecordDialog} from './RecordDialog';
 
 type Execute = (label: string, work: () => Promise<FoundationState>, success: string) => Promise<boolean>;
 type ReceiptFile = NonNullable<TreasuryPaymentInput['receipt']>;
@@ -123,7 +124,7 @@ export function TreasuryExecutionDrawer({state, record, module, service, execute
     setEditingPayment(false);
   };
 
-  return <div className="drawer-scrim" onMouseDown={(event) => {if (event.currentTarget === event.target) onClose();}}><aside className="record-drawer purchase-drawer treasury-payment-drawer" aria-label={`پرونده پرداخت ${record.title}`}>
+  return <RecordDialog ariaLabel={`پرونده پرداخت ${record.title}`} className="purchase-drawer treasury-payment-drawer" onClose={onClose}>
     <header><div><span className="eyebrow">{record.trackingCode}</span><h2>{record.title}</h2><p>پرونده کامل درخواست و ثبت پرداخت خزانه</p></div><div className="treasury-drawer-actions">{canPrint && <button type="button" className="button button--secondary button--small" onClick={() => globalThis.print()}><Printer size={16}/> چاپ درخواست</button>}<button className="icon-button" onClick={onClose} aria-label="بستن"><X size={20}/></button></div></header>
     <div className="drawer-body">
       <div className="record-status-hero"><span className="state-badge state-badge--progress">{stateLabel(module.workflow, record.status)}</span><span>نسخه {record.version.toLocaleString('en-US')}</span><strong>{rial(record.amountRial)}</strong></div>
@@ -144,7 +145,7 @@ export function TreasuryExecutionDrawer({state, record, module, service, execute
       {source?.moduleId === 'purchase-request' && purchaseModule && <TreasuryPrintSheet state={state} source={source} purchaseModule={purchaseModule} treasuryModule={module} treasuryRecords={linkedTreasuryRecords}/>} 
       {source?.moduleId === 'employee-advance' && advanceModule && <EmployeeAdvancePrintSheet state={state} source={source} advanceModule={advanceModule} treasuryModule={module} treasuryRecords={linkedTreasuryRecords}/>} 
     </div><footer>{canPrint && <button type="button" className="button button--secondary" onClick={() => globalThis.print()}><Printer size={17}/> چاپ کامل درخواست</button>}<button className="button button--ghost" onClick={onClose}>بستن</button></footer>
-  </aside></div>;
+  </RecordDialog>;
 }
 
 function readPayment(record: OperationalRecord): TreasuryPaymentInput | undefined {
