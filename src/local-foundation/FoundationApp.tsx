@@ -42,6 +42,7 @@ import {DEFAULT_PREFERENCES, normalizeUiPreferences, type UiPreferences} from '.
 import {WorkflowAdminPage} from './WorkflowAdminPage';
 import {RecruitmentPage} from './RecruitmentPage';
 import {NavigationSearch, type NavigationSearchDestination} from './NavigationSearch';
+import {requestWorkspaceNavigation} from './windowWorkspaceGuard';
 import {
   frequentNavigationDestinations,
   incrementNavigationUsage,
@@ -194,6 +195,26 @@ export function LocalFoundationApp() {
     ? navigationUsageState.entries
     : [];
 
+  useEffect(() => {
+    if (!accountOpen && !notificationOpen) return;
+    const dismissFloatingPanels = (event: PointerEvent) => {
+      if (!(event.target instanceof Element)) return;
+      if (accountOpen && !event.target.closest('.account-menu, .account-trigger')) setAccountOpen(false);
+      if (notificationOpen && !event.target.closest('.notification-popover, .notification-trigger')) setNotificationOpen(false);
+    };
+    const dismissWithEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      setAccountOpen(false);
+      setNotificationOpen(false);
+    };
+    document.addEventListener('pointerdown', dismissFloatingPanels, true);
+    document.addEventListener('keydown', dismissWithEscape, true);
+    return () => {
+      document.removeEventListener('pointerdown', dismissFloatingPanels, true);
+      document.removeEventListener('keydown', dismissWithEscape, true);
+    };
+  }, [accountOpen, notificationOpen]);
+
   const closeMobileSidebar = useCallback(() => {
     setMobileOpen(false);
     window.setTimeout(() => mobileMenuButtonRef.current?.focus(), 0);
@@ -282,7 +303,9 @@ export function LocalFoundationApp() {
     const destination = navigationDestinations.find((item) => item.id === requested.id);
     if (!destination) return;
     const nextUrl = destinationRouteUrl(window.location.href, destination.page, destination.moduleId, destination.categoryId);
-    if (`${window.location.pathname}${window.location.search}${window.location.hash}` !== nextUrl) {
+    const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    if (currentUrl !== nextUrl && !requestWorkspaceNavigation()) return;
+    if (currentUrl !== nextUrl) {
       window.history.pushState({page: destination.page, module: destination.moduleId, category: destination.categoryId}, '', nextUrl);
     }
     setPageState(destination.page);

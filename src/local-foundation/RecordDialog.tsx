@@ -46,6 +46,7 @@ export function RecordDialog({ariaLabel, className = '', children, onClose}: Pro
       (first ?? dialog)?.focus();
     });
     const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (dialog.closest('.workspace-window--minimized')) return;
       if (event.key === 'Escape') {
         event.preventDefault();
         if (activeOverlayCloseRef.current) {
