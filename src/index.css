@@ -1126,9 +1126,7 @@ th .sort-header { padding: 8px 4px; }
 /* Local account entry and recovery */
 .auth-page { min-height: 100vh; display: grid; grid-template-columns: minmax(420px, .88fr) minmax(520px, 1.12fr); background: #f6f6fa; color: #172033; }
 .auth-showcase { position: relative; display: flex; min-height: 100vh; overflow: hidden; flex-direction: column; padding: 48px clamp(38px, 5vw, 82px); color: #fff; background: radial-gradient(circle at 18% 8%, var(--hero-highlight), transparent 31%), radial-gradient(circle at 90% 78%, rgba(214,155,45,.13), transparent 32%), linear-gradient(145deg,var(--hero-start) 0%,var(--hero-mid) 54%,var(--hero-end) 100%); }
-.auth-showcase::before,.auth-showcase::after { position:absolute;content:"";pointer-events:none }
-.auth-showcase::before { width:520px;height:520px;right:-270px;bottom:-180px;border:1px solid rgba(255,255,255,.1);border-radius:50% }
-.auth-showcase::after { right:clamp(20px,4vw,70px);bottom:-9%;width:min(54vw,760px);aspect-ratio:1;background:url("./assets/shahrah-mark-lines.png") center/contain no-repeat;opacity:.12;filter:drop-shadow(0 0 1px rgba(255,255,255,.32));transform:rotate(-3deg) }
+.auth-showcase::after { position:absolute;top:clamp(112px,15vh,155px);left:clamp(42px,6vw,96px);width:clamp(185px,18vw,255px);aspect-ratio:1;background:url("./assets/shahrah-mark-lines.png") center/contain no-repeat;content:"";opacity:.065;pointer-events:none }
 .auth-brand { position:relative;z-index:1;display:flex;align-items:center;gap:12px }
 .auth-brand { gap:16px }
 .auth-brand .shahrah-brand__mark { width:82px;height:82px;flex-basis:82px;border-radius:22px;background:rgba(255,255,255,.085) }
