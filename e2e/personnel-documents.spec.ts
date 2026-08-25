@@ -42,7 +42,7 @@ test('صف نواقص و مدارک اجباری بدون قطع دسترسی ن
 
   const firstDocumentInput = dialog.locator('input[aria-label="بارگذاری صفحه اول شناسنامه"]');
   await firstDocumentInput.setInputFiles({name: 'identity.svg', mimeType: 'image/svg+xml', buffer: Buffer.from('<svg></svg>')});
-  await expect(dialog.getByText(/PDF، JPG، PNG یا WebP/)).toBeVisible();
+  await expect(page.locator('.form-validation-popup').getByText(/PDF، JPG، PNG یا WebP/)).toBeVisible();
   await firstDocumentInput.setInputFiles({name: 'birth-certificate.png', mimeType: 'image/png', buffer: Buffer.from([137,80,78,71,13,10,26,10])});
   await expect(dialog.getByText('birth-certificate.png', {exact: true})).toBeVisible();
   await dialog.locator('input[aria-label="بارگذاری پشت کارت ملی"]').setInputFiles({name: 'national-id.pdf', mimeType: 'application/pdf', buffer: Buffer.from('%PDF-1.4')});

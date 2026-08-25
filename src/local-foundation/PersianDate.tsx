@@ -61,8 +61,7 @@ export function PersianDateInput({value = '', onChange, disabled = false, requir
   }, []);
   useEffect(() => {
     const closeCalendarBeforeParentDialog = (event: KeyboardEvent) => {
-      const calendarVisible = pickerRef.current?.isOpen
-        || Boolean(dialogPortal?.portalTarget?.querySelector('.rmdp-wrapper.tapra-persian-calendar'));
+      const calendarVisible = pickerRef.current?.isOpen;
       if (event.key !== 'Escape' || (!calendarOpenRef.current && !calendarVisible)) return;
       event.preventDefault();
       event.stopImmediatePropagation();
