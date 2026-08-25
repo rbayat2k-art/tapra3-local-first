@@ -1,7 +1,7 @@
 import {describe, expect, it} from 'vitest';
 import type {AuditEvent, FoundationSession, FoundationStoreName, LocalUser, RegistrationRequest, SecurityRole, SnapshotManifest} from './model';
 import {FOUNDATION_STORES} from './model';
-import {createSeedData, LOCAL_USERS, SECURITY_ROLES} from './seed';
+import {createSeedData, LOCAL_USERS, ORGANIZATIONAL_UNITS, SECURITY_ROLES} from './seed';
 import {LocalFoundationService, userConcurrencyToken} from './service';
 import type {StorageAdapter, StorageTransaction} from './storage';
 
@@ -360,5 +360,20 @@ describe('per-user permission overrides', () => {
       ...userInput(target),
       permissionDenials: ['foundation.dashboard.view'],
     })).rejects.toThrow('مجوز انتساب نقش و ریزمجوز');
+  });
+
+  it('rejects invalid organization parents, inactive managers and stale unit forms', async () => {
+    const storage = new MemoryStorage();
+    await storage.replaceAll(createSeedData());
+    const admin = LOCAL_USERS.find((user) => user.isAdmin)!;
+    const inactive = LOCAL_USERS.find((user) => user.status === 'inactive')!;
+    const session = await storage.get<FoundationSession>('sessions', 'active-session');
+    await storage.put('sessions', {...session!, activeUserId: admin.id, actingAdminUserId: undefined});
+    const service = new LocalFoundationService(storage);
+    const unit = ORGANIZATIONAL_UNITS.find((item) => item.type !== 'شعبه')!;
+
+    await expect(service.createUnit({name: 'واحد آزمایشی', type: 'اداره', parentId: 'missing-unit', description: ''})).rejects.toThrow('واحد بالادست');
+    await expect(service.createUnit({name: 'واحد آزمایشی', type: 'اداره', managerUserId: inactive.id, description: ''})).rejects.toThrow('حساب کاربری فعال');
+    await expect(service.updateUnit(unit.id, 'stale-version', {name: unit.name, type: unit.type, parentId: unit.parentId, managerUserId: unit.managerUserId, description: unit.description})).rejects.toThrow('پنجره دیگری');
   });
 });
