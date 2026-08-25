@@ -27,22 +27,23 @@ describe('deterministic local seed', () => {
 
   it('models QA identities as users with product status and admin-only QA login', () => {
     const admin = LOCAL_USERS.find((item) => item.roleId === 'role-admin')!;
-    const seller = LOCAL_USERS.find((item) => item.roleId === 'role-sales-seller')!;
+    const seller = LOCAL_USERS.find((item) => item.id === 'persona-laleh')!;
     expect(admin.roleTitle).toBe('ادمین');
     expect(admin.permissions).toContain('foundation.users.qa_login');
     expect(seller.permissions).not.toContain('foundation.users.qa_login');
     expect(LOCAL_USERS.some((item) => item.status === 'inactive')).toBe(true);
   });
 
-  it('applies per-user permission grants and denials without mutating the role bundle', () => {
-    const seller = LOCAL_USERS.find((item) => item.roleId === 'role-sales-seller')!;
+  it('applies denials but quarantines legacy direct grants without mutating the role bundle', () => {
+    const seller = LOCAL_USERS.find((item) => item.id === 'persona-laleh')!;
     const sellerRole = SECURITY_ROLES.find((item) => item.id === seller.roleId)!;
     const denied = sellerRole.permissions[0];
     const granted = 'foundation.audit.view';
     const roleSnapshot = [...sellerRole.permissions];
     const resolved = resolveUserAccess({...seller, permissionGrants: [granted], permissionDenials: [denied]}, SECURITY_ROLES);
     expect(resolved.permissions).not.toContain(denied);
-    expect(resolved.permissions).toContain(granted);
+    expect(resolved.permissions).not.toContain(granted);
+    expect(resolved.permissionEntitlements?.some((item) => item.source === 'user-grant')).toBe(false);
     expect(sellerRole.permissions).toEqual(roleSnapshot);
   });
 
@@ -64,7 +65,8 @@ describe('deterministic local seed', () => {
       expect(linkedUser, `${person.personnelCode} باید حساب متصل داشته باشد`).toBeDefined();
       expect(linkedUser?.status).toBe('active');
       expect(linkedUser?.personnelId).toBe(person.id);
-      expect(linkedUser?.roleIds).toContain('role-sales-seller');
+      const roleByLevel = {sales_vice: 'role-sales-vice', sales_manager: 'role-sales-manager', senior_supervisor: 'role-senior-sales-supervisor', sales_supervisor: 'role-sales-supervisor', seller: 'role-sales-seller'} as const;
+      expect(linkedUser?.roleIds).toContain(roleByLevel[person.salesHierarchyLevel!]);
       expect(linkedUser?.salesHierarchyLevel).toBe(person.salesHierarchyLevel);
     }
   });
@@ -97,6 +99,21 @@ describe('deterministic local seed', () => {
       expect(user.roleIds.length).toBeGreaterThan(0);
       expect(user.passwordHash).toMatch(/^pbkdf2\$120000\$/);
     }
+  });
+
+  it('keeps people with the same name as distinct linked identities', () => {
+    const users = LOCAL_USERS.filter((user) => user.name === 'سودابه مرادی');
+    expect(users).toHaveLength(2);
+    expect(new Set(users.map((user) => user.id)).size).toBe(2);
+    expect(new Set(users.map((user) => user.actorId)).size).toBe(2);
+    expect(new Set(users.map((user) => user.username)).size).toBe(2);
+    expect(new Set(users.map((user) => user.personnelId)).size).toBe(2);
+    for (const user of users) expect(PERSONNEL_RECORDS.find((person) => person.id === user.personnelId)?.linkedUserId).toBe(user.id);
+  });
+
+  it('assigns deterministic sales access roles from the approved sales hierarchy', () => {
+    const expected = {sales_vice: 'role-sales-vice', sales_manager: 'role-sales-manager', senior_supervisor: 'role-senior-sales-supervisor', sales_supervisor: 'role-sales-supervisor', seller: 'role-sales-seller'} as const;
+    for (const user of LOCAL_USERS.filter((item) => item.salesHierarchyLevel)) expect(user.roleIds).toContain(expected[user.salesHierarchyLevel!]);
   });
 
   it('identifies every sales structure by its call-center supervisor, not a separate name', () => {

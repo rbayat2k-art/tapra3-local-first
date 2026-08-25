@@ -1,6 +1,6 @@
 import type {
   AuditEvent, CustomerRecord, DomainEvent, FoundationSession, LocalUser, MetaRecord, OrganizationalPosition,
-  OperationalRecord, OperationalRecordHistory, OrganizationalUnit, PermissionCatalogItem, PermissionCode, PersonnelRecord, PolicyDefinition, SalesStructure, ScopeType, SecurityRole,
+  OperationalRecord, OperationalRecordHistory, OrganizationalUnit, PermissionCatalogItem, PermissionCode, PermissionEntitlement, PersonnelRecord, PolicyDefinition, SalesStructure, ScopeType, SecurityRole,
 } from './model';
 import {completeRequiredQaPersonnelRecords} from './qaPersonnelCompletion';
 import {FOUNDATION_SCHEMA_VERSION, FOUNDATION_SEED_VERSION, FOUNDATION_STORES, type FoundationStoreName} from './model';
@@ -20,13 +20,16 @@ export interface RoleTemplate {
   permissions: PermissionCode[];
 }
 
-const base: PermissionCode[] = [
+const shellBase: PermissionCode[] = [
   'foundation.dashboard.view', 'foundation.preferences.manage', 'organization.overview.view',
+];
+const employeeSelfService: PermissionCode[] = [
+  ...shellBase,
   permissionFor('employee-advance', 'view'), permissionFor('employee-advance', 'create'),
   permissionFor('employee-advance', 'edit'), permissionFor('employee-advance', 'transition'),
 ];
 export const ADMIN_OPERATIONAL_PERMISSIONS: PermissionCode[] = [
-  ...base, 'foundation.users.view', 'foundation.users.edit', 'foundation.users.status.manage',
+  ...employeeSelfService, 'foundation.users.view', 'foundation.users.edit', 'foundation.users.status.manage',
   'foundation.users.qa_login', 'foundation.qa.view', 'foundation.policy.inspect', 'foundation.audit.view',
   'foundation.data.export', 'foundation.data.manage', 'organization.units.view', 'organization.units.manage',
   'organization.positions.view', 'organization.positions.manage', 'organization.users.create',
@@ -36,26 +39,26 @@ export const ADMIN_OPERATIONAL_PERMISSIONS: PermissionCode[] = [
   'organization.personnel.documents.queue.view', 'organization.personnel.documents.content.read', 'organization.personnel.documents.manage',
   'crm.customers.view', 'crm.customers.create', 'crm.customers.edit', 'crm.customers.status.manage',
   'crm.customers.merge', 'crm.customers.import',
-  'organization.registrations.view', 'organization.registrations.review', 'foundation.qa.manage',
+  'organization.registrations.view', 'organization.registrations.review', 'organization.registrations.activate', 'foundation.qa.manage',
   'foundation.reports.view', 'foundation.workflow.manage', ...ERP_ADMIN_PERMISSIONS,
 ];
 
 export const ROLE_TEMPLATES: RoleTemplate[] = [
   {id: 'role-admin', title: 'ادمین', description: 'مدیریت کامل محصول محلی، سازمان و دسترسی‌ها', scope: 'COMPANY', permissions: ADMIN_OPERATIONAL_PERMISSIONS},
-  {id: 'role-system-admin', title: 'مدیر سامانه', description: 'مدیریت کاربران، ساختار سازمان، نقش‌ها و دادهٔ محلی؛ بدون اختیار تجاری ضمنی', scope: 'COMPANY', permissions: [...base, 'foundation.users.view', 'foundation.users.edit', 'foundation.users.status.manage', 'foundation.users.qa_login', 'foundation.qa.view', 'foundation.qa.manage', 'foundation.policy.inspect', 'foundation.audit.view', 'foundation.data.export', 'foundation.data.manage', 'foundation.workflow.manage', 'foundation.reports.view', 'organization.units.view', 'organization.units.manage', 'organization.positions.view', 'organization.positions.manage', 'organization.users.create', 'organization.users.password.manage', 'organization.roles.view', 'organization.roles.manage', 'organization.roles.assign', 'organization.personnel.view', 'organization.personnel.manage', 'organization.personnel.changes.review', 'organization.personnel.banking.view', 'organization.personnel.banking.manage', 'organization.personnel.account.manage', 'organization.registrations.view', 'organization.registrations.review']},
-  {id: 'role-finance-requester', title: 'درخواست‌کننده مالی', description: 'ثبت درخواست در محدودهٔ کاری خود', scope: 'SELF', permissions: [...base, 'business.request.create']},
-  {id: 'role-branch-approver', title: 'تأییدکننده مالی', description: 'تأیید درخواست‌های واحد با رعایت سازنده/تأییدکننده', scope: 'UNIT', permissions: [...base, 'business.request.approve']},
-  {id: 'role-inventory-maker', title: 'ثبت‌کننده موجودی', description: 'ثبت تعدیل موجودی بدون مجوز تأیید', scope: 'UNIT', permissions: [...base, 'business.inventory.adjust']},
-  {id: 'role-inventory-approver', title: 'تأییدکننده موجودی', description: 'تأیید تعدیل‌های دیگران در واحد انبار', scope: 'UNIT', permissions: [...base, 'business.inventory.approve']},
-  {id: 'role-support-agent', title: 'کارشناس پشتیبانی', description: 'دسترسی به پرونده‌های تخصیص‌یافته', scope: 'SELF', permissions: base},
-  {id: 'role-auditor', title: 'ممیز داخلی', description: 'مشاهدهٔ فقط‌خواندنی ساختار، کاربران، مشتریان، تصمیم‌ها و پشتیبان', scope: 'COMPANY', permissions: [...base, 'foundation.users.view', 'organization.units.view', 'organization.positions.view', 'organization.roles.view', 'organization.personnel.view', 'crm.customers.view', 'foundation.policy.inspect', 'foundation.audit.view', 'foundation.data.export']},
+  {id: 'role-system-admin', title: 'مدیر سامانه', description: 'مدیریت کاربران، ساختار سازمان، نقش‌ها و دادهٔ محلی؛ بدون اختیار تجاری ضمنی', scope: 'COMPANY', permissions: [...shellBase, 'foundation.users.view', 'foundation.users.edit', 'foundation.users.status.manage', 'foundation.users.qa_login', 'foundation.qa.view', 'foundation.qa.manage', 'foundation.policy.inspect', 'foundation.audit.view', 'foundation.data.export', 'foundation.data.manage', 'foundation.workflow.manage', 'foundation.reports.view', 'organization.units.view', 'organization.units.manage', 'organization.positions.view', 'organization.positions.manage', 'organization.users.create', 'organization.users.password.manage', 'organization.roles.view', 'organization.roles.manage', 'organization.roles.assign', 'organization.personnel.view', 'organization.personnel.manage', 'organization.personnel.changes.review', 'organization.personnel.banking.view', 'organization.personnel.banking.manage', 'organization.personnel.account.manage', 'organization.registrations.view', 'organization.registrations.activate']},
+  {id: 'role-finance-requester', title: 'درخواست‌کننده مالی', description: 'ثبت درخواست در محدودهٔ کاری خود', scope: 'SELF', permissions: [...employeeSelfService, 'business.request.create']},
+  {id: 'role-branch-approver', title: 'تأییدکننده مالی', description: 'تأیید درخواست‌های واحد با رعایت سازنده/تأییدکننده', scope: 'UNIT', permissions: [...employeeSelfService, 'business.request.approve']},
+  {id: 'role-inventory-maker', title: 'ثبت‌کننده موجودی', description: 'ثبت تعدیل موجودی بدون مجوز تأیید', scope: 'UNIT', permissions: [...employeeSelfService, 'business.inventory.adjust']},
+  {id: 'role-inventory-approver', title: 'تأییدکننده موجودی', description: 'تأیید تعدیل‌های دیگران در واحد انبار', scope: 'UNIT', permissions: [...employeeSelfService, 'business.inventory.approve']},
+  {id: 'role-support-agent', title: 'کارشناس پشتیبانی', description: 'دسترسی به پرونده‌های تخصیص‌یافته', scope: 'SELF', permissions: employeeSelfService},
+  {id: 'role-auditor', title: 'ممیز داخلی', description: 'نقش موقت فقط‌خواندنی برای مشاهده ساختار و خط‌مشی؛ گزارش ممیزی تا تصویب قرارداد سانسور نمایش داده نمی‌شود', scope: 'COMPANY', permissions: [...shellBase, 'organization.units.view', 'organization.positions.view', 'organization.roles.view', 'foundation.policy.inspect']},
   {id: 'role-registration-reviewer', title: 'بازبین ثبت‌نام', description: 'بررسی هویت و تصمیم‌گیری درباره درخواست ثبت‌نام؛ بدون اختیار ویرایش پرونده یا نقش', scope: 'COMPANY', permissions: ORGANIZATION_ROLE_GRANTS['role-registration-reviewer']},
   ...ERP_ROLE_TEMPLATES.map((role) => ({
     ...role,
     permissions: [...new Set([
       ...role.permissions,
       ...(ORGANIZATION_ROLE_GRANTS[role.id] ?? []),
-      ...(['role-sales-seller', 'role-purchase-requester', 'role-purchase-approver', 'role-treasury-executor-v1'].includes(role.id) ? base : []),
+      ...(['role-sales-vice', 'role-sales-manager', 'role-senior-sales-supervisor', 'role-sales-supervisor', 'role-sales-seller', 'role-purchase-requester', 'role-purchase-approver', 'role-treasury-executor-v1'].includes(role.id) ? employeeSelfService : []),
     ])],
   })),
 ];
@@ -130,7 +133,8 @@ function user(input: SeedUserInput): LocalUser {
   const assigned = ROLE_TEMPLATES.filter((role) => input.roleIds.includes(role.id));
   const primary = assigned.find((role) => role.id === input.roleId) ?? assigned[0];
   if (!primary) throw new Error(`Unknown seed role: ${input.roleId}`);
-  return {branchUnitId: 'unit-branch-central', ...input, passwordHash: PASSWORD_HASH, passwordUpdatedAt: SEED_TIME, roleTitle: primary.title, roles: assigned.map((role) => role.title), description: primary.description, scope: primary.scope, permissions: [...new Set(assigned.flatMap((role) => role.permissions))]};
+  const permissionEntitlements = assigned.flatMap((role) => role.permissions.map((permission) => ({permission, scope: role.scope, source: 'role' as const, sourceRoleId: role.id})));
+  return {branchUnitId: 'unit-branch-central', ...input, passwordHash: PASSWORD_HASH, passwordUpdatedAt: SEED_TIME, roleTitle: primary.title, roles: assigned.map((role) => role.title), description: primary.description, scope: primary.scope, permissions: [...new Set(permissionEntitlements.map((item) => item.permission))], permissionEntitlements};
 }
 
 export const LOCAL_USERS: LocalUser[] = [
@@ -138,14 +142,14 @@ export const LOCAL_USERS: LocalUser[] = [
   user({id: 'persona-system-admin', actorId: 'actor-system-admin', name: 'سارا احمدی', username: 's.ahmadi', roleId: 'role-system-admin', roleIds: ['role-system-admin'], status: 'active', companyId: COMPANY_ID, unitId: 'unit-management', positionId: 'position-manager', managerUserId: 'persona-product-owner', personnelId: 'personnel-sara', accent: '#0d9488', initials: 'س.ا', isAdmin: false}),
   user({id: 'persona-finance-requester', actorId: 'actor-finance-requester', name: 'مهدی رضایی', username: 'm.rezaei', roleId: 'role-finance-requester', roleIds: ['role-finance-requester'], status: 'active', companyId: COMPANY_ID, unitId: 'unit-finance', positionId: 'position-specialist', managerUserId: 'persona-branch-approver', personnelId: 'personnel-mehdi', accent: '#0284c7', initials: 'م.ر', isAdmin: false}),
   user({id: 'persona-branch-approver', actorId: 'actor-branch-approver', name: 'نیلوفر کریمی', username: 'n.karimi', roleId: 'role-branch-approver', roleIds: ['role-branch-approver'], status: 'active', companyId: COMPANY_ID, unitId: 'unit-finance', positionId: 'position-manager', managerUserId: 'persona-product-owner', personnelId: 'personnel-niloofar', accent: '#7c3aed', initials: 'ن.ک', isAdmin: false}),
-  user({id: 'persona-seller', actorId: 'actor-seller', name: 'آرمان فرهمند', username: 'a.farahmand', roleId: 'role-sales-seller', roleIds: ['role-sales-seller','role-workforce-requester','role-recruitment-interviewer'], status: 'active', companyId: COMPANY_ID, unitId: 'unit-sales', positionId: 'position-sales-manager', managerUserId: 'persona-product-owner', personnelId: 'personnel-arman', teamId: 'team-sales-a', salesHierarchyLevel: 'sales_manager', accent: '#2563eb', initials: 'آ.ف', isAdmin: false}),
-  user({id: 'persona-sales-vice-network', actorId: 'actor-sales-vice-network', name: 'سودابه مرادی', username: 's.moradi.sales', roleId: 'role-sales-seller', roleIds: ['role-sales-seller'], status: 'active', companyId: COMPANY_ID, unitId: 'unit-sales', positionId: 'position-sales-vice', managerUserId: 'persona-product-owner', personnelId: 'personnel-sales-vice', branchUnitId: 'unit-branch-central', salesHierarchyLevel: 'sales_vice', accent: '#7c3aed', initials: 'س.م', isAdmin: false}),
-  user({id: 'persona-sales-senior', actorId: 'actor-sales-senior', name: 'فرزاد قاسمی', username: 'f.ghasemi', roleId: 'role-sales-seller', roleIds: ['role-sales-seller'], status: 'active', companyId: COMPANY_ID, unitId: 'unit-sales', positionId: 'position-sales-senior-supervisor', managerUserId: 'persona-seller', personnelId: 'personnel-sales-senior', branchUnitId: 'unit-branch-central', salesHierarchyLevel: 'senior_supervisor', accent: '#4f46e5', initials: 'ف.ق', isAdmin: false}),
-  user({id: 'persona-sales-senior-poonak', actorId: 'actor-sales-senior-poonak', name: 'پوریا شریفی', username: 'p.sharifi.sales', roleId: 'role-sales-seller', roleIds: ['role-sales-seller'], status: 'active', companyId: COMPANY_ID, unitId: 'unit-sales', positionId: 'position-sales-senior-supervisor', managerUserId: 'persona-seller', personnelId: 'personnel-sales-senior-poonak', branchUnitId: 'unit-branch-poonak', salesHierarchyLevel: 'senior_supervisor', accent: '#7c3aed', initials: 'پ.ش', isAdmin: false}),
-  user({id: 'persona-callcenter-a', actorId: 'actor-callcenter-a', name: 'ناهید احمدی', username: 'n.ahmadi', roleId: 'role-sales-seller', roleIds: ['role-sales-seller','role-recruitment-interviewer','role-onboarding-supervisor'], status: 'active', companyId: COMPANY_ID, unitId: 'unit-sales', positionId: 'position-sales-supervisor', managerUserId: 'persona-sales-senior', personnelId: 'personnel-callcenter-a', branchUnitId: 'unit-branch-central', salesHierarchyLevel: 'sales_supervisor', accent: '#0d9488', initials: 'ن.ا', isAdmin: false}),
-  user({id: 'persona-callcenter-b', actorId: 'actor-callcenter-b', name: 'رضا محمدی', username: 'r.mohammadi', roleId: 'role-sales-seller', roleIds: ['role-sales-seller'], status: 'active', companyId: COMPANY_ID, unitId: 'unit-sales', positionId: 'position-sales-supervisor', managerUserId: 'persona-sales-senior', personnelId: 'personnel-callcenter-b', branchUnitId: 'unit-branch-central', salesHierarchyLevel: 'sales_supervisor', accent: '#0891b2', initials: 'ر.م', isAdmin: false}),
-  user({id: 'persona-callcenter-c', actorId: 'actor-callcenter-c', name: 'مریم حسینی', username: 'm.hosseini', roleId: 'role-sales-seller', roleIds: ['role-sales-seller'], status: 'active', companyId: COMPANY_ID, unitId: 'unit-sales', positionId: 'position-sales-supervisor', managerUserId: 'persona-sales-senior', personnelId: 'personnel-callcenter-c', branchUnitId: 'unit-branch-central', salesHierarchyLevel: 'sales_supervisor', accent: '#db2777', initials: 'م.ح', isAdmin: false}),
-  user({id: 'persona-callcenter-poonak', actorId: 'actor-callcenter-poonak', name: 'سینا عزیزی', username: 's.azizi.sales', roleId: 'role-sales-seller', roleIds: ['role-sales-seller'], status: 'active', companyId: COMPANY_ID, unitId: 'unit-sales', positionId: 'position-sales-supervisor', managerUserId: 'persona-sales-senior-poonak', personnelId: 'personnel-callcenter-poonak', branchUnitId: 'unit-branch-poonak', salesHierarchyLevel: 'sales_supervisor', accent: '#0f766e', initials: 'س.ع', isAdmin: false}),
+  user({id: 'persona-seller', actorId: 'actor-seller', name: 'آرمان فرهمند', username: 'a.farahmand', roleId: 'role-sales-manager', roleIds: ['role-sales-manager','role-workforce-requester','role-recruitment-interviewer'], status: 'active', companyId: COMPANY_ID, unitId: 'unit-sales', positionId: 'position-sales-manager', managerUserId: 'persona-product-owner', personnelId: 'personnel-arman', teamId: 'team-sales-a', salesHierarchyLevel: 'sales_manager', accent: '#2563eb', initials: 'آ.ف', isAdmin: false}),
+  user({id: 'persona-sales-vice-network', actorId: 'actor-sales-vice-network', name: 'سودابه مرادی', username: 's.moradi.sales', roleId: 'role-sales-vice', roleIds: ['role-sales-vice'], status: 'active', companyId: COMPANY_ID, unitId: 'unit-sales', positionId: 'position-sales-vice', managerUserId: 'persona-product-owner', personnelId: 'personnel-sales-vice', branchUnitId: 'unit-branch-central', salesHierarchyLevel: 'sales_vice', accent: '#7c3aed', initials: 'س.م', isAdmin: false}),
+  user({id: 'persona-sales-senior', actorId: 'actor-sales-senior', name: 'فرزاد قاسمی', username: 'f.ghasemi', roleId: 'role-senior-sales-supervisor', roleIds: ['role-senior-sales-supervisor'], status: 'active', companyId: COMPANY_ID, unitId: 'unit-sales', positionId: 'position-sales-senior-supervisor', managerUserId: 'persona-seller', personnelId: 'personnel-sales-senior', branchUnitId: 'unit-branch-central', salesHierarchyLevel: 'senior_supervisor', accent: '#4f46e5', initials: 'ف.ق', isAdmin: false}),
+  user({id: 'persona-sales-senior-poonak', actorId: 'actor-sales-senior-poonak', name: 'پوریا شریفی', username: 'p.sharifi.sales', roleId: 'role-senior-sales-supervisor', roleIds: ['role-senior-sales-supervisor'], status: 'active', companyId: COMPANY_ID, unitId: 'unit-sales', positionId: 'position-sales-senior-supervisor', managerUserId: 'persona-seller', personnelId: 'personnel-sales-senior-poonak', branchUnitId: 'unit-branch-poonak', salesHierarchyLevel: 'senior_supervisor', accent: '#7c3aed', initials: 'پ.ش', isAdmin: false}),
+  user({id: 'persona-callcenter-a', actorId: 'actor-callcenter-a', name: 'ناهید احمدی', username: 'n.ahmadi', roleId: 'role-sales-supervisor', roleIds: ['role-sales-supervisor','role-recruitment-interviewer','role-onboarding-supervisor'], status: 'active', companyId: COMPANY_ID, unitId: 'unit-sales', positionId: 'position-sales-supervisor', managerUserId: 'persona-sales-senior', personnelId: 'personnel-callcenter-a', branchUnitId: 'unit-branch-central', salesHierarchyLevel: 'sales_supervisor', accent: '#0d9488', initials: 'ن.ا', isAdmin: false}),
+  user({id: 'persona-callcenter-b', actorId: 'actor-callcenter-b', name: 'رضا محمدی', username: 'r.mohammadi', roleId: 'role-sales-supervisor', roleIds: ['role-sales-supervisor'], status: 'active', companyId: COMPANY_ID, unitId: 'unit-sales', positionId: 'position-sales-supervisor', managerUserId: 'persona-sales-senior', personnelId: 'personnel-callcenter-b', branchUnitId: 'unit-branch-central', salesHierarchyLevel: 'sales_supervisor', accent: '#0891b2', initials: 'ر.م', isAdmin: false}),
+  user({id: 'persona-callcenter-c', actorId: 'actor-callcenter-c', name: 'مریم حسینی', username: 'm.hosseini', roleId: 'role-sales-supervisor', roleIds: ['role-sales-supervisor'], status: 'active', companyId: COMPANY_ID, unitId: 'unit-sales', positionId: 'position-sales-supervisor', managerUserId: 'persona-sales-senior', personnelId: 'personnel-callcenter-c', branchUnitId: 'unit-branch-central', salesHierarchyLevel: 'sales_supervisor', accent: '#db2777', initials: 'م.ح', isAdmin: false}),
+  user({id: 'persona-callcenter-poonak', actorId: 'actor-callcenter-poonak', name: 'سینا عزیزی', username: 's.azizi.sales', roleId: 'role-sales-supervisor', roleIds: ['role-sales-supervisor'], status: 'active', companyId: COMPANY_ID, unitId: 'unit-sales', positionId: 'position-sales-supervisor', managerUserId: 'persona-sales-senior-poonak', personnelId: 'personnel-callcenter-poonak', branchUnitId: 'unit-branch-poonak', salesHierarchyLevel: 'sales_supervisor', accent: '#0f766e', initials: 'س.ع', isAdmin: false}),
   user({id: 'persona-laleh', actorId: 'actor-laleh', name: 'لاله مرادی', username: 'l.moradi', roleId: 'role-sales-seller', roleIds: ['role-sales-seller'], status: 'active', companyId: COMPANY_ID, unitId: 'unit-sales', positionId: 'position-seller', managerUserId: 'persona-callcenter-a', personnelId: 'personnel-laleh', branchUnitId: 'unit-branch-central', teamId: 'team-sales-a', salesHierarchyLevel: 'seller', accent: '#9333ea', initials: 'ل.م', isAdmin: false}),
   user({id: 'persona-inventory-maker', actorId: 'actor-inventory-maker', name: 'رضا نادری', username: 'r.naderi', roleId: 'role-inventory-maker', roleIds: ['role-inventory-maker'], status: 'active', companyId: COMPANY_ID, unitId: 'unit-warehouse', positionId: 'position-operator', managerUserId: 'persona-inventory-approver', personnelId: 'personnel-reza', accent: '#d97706', initials: 'ر.ن', isAdmin: false}),
   user({id: 'persona-inventory-approver', actorId: 'actor-inventory-approver', name: 'الهام شریفی', username: 'e.sharifi', roleId: 'role-inventory-approver', roleIds: ['role-inventory-approver'], status: 'active', companyId: COMPANY_ID, unitId: 'unit-warehouse', positionId: 'position-manager', managerUserId: 'persona-product-owner', personnelId: 'personnel-elham', accent: '#b45309', initials: 'ا.ش', isAdmin: false}),
@@ -162,7 +166,7 @@ export const LOCAL_USERS: LocalUser[] = [
   user({id: 'persona-treasury-executor', actorId: 'actor-treasury-executor', name: 'بردیا نوری', username: 'b.nouri', roleId: 'role-treasury-executor-v1', roleIds: ['role-treasury-executor-v1'], status: 'active', companyId: COMPANY_ID, unitId: 'unit-finance', positionId: 'position-specialist', managerUserId: 'persona-branch-approver', personnelId: 'personnel-treasury-executor', accent: '#059669', initials: 'ب.ن', isAdmin: false}),
   user({id: 'persona-advance-branch-manager', actorId: 'actor-advance-branch-manager', name: 'کامران یوسفی', username: 'k.yousefi', roleId: 'role-advance-branch-manager', roleIds: ['role-advance-branch-manager'], status: 'active', companyId: COMPANY_ID, unitId: 'unit-sales', branchUnitId: 'unit-branch-central', positionId: 'position-manager', managerUserId: 'persona-product-owner', personnelId: 'personnel-advance-branch-manager', advanceBranchIds: ['unit-branch-central'], accent: '#ea580c', initials: 'ک.ی', isAdmin: false}),
   user({id: 'persona-advance-accounting', actorId: 'actor-advance-accounting', name: 'بهاره اکبری', username: 'b.akbari', roleId: 'role-advance-accounting-reviewer', roleIds: ['role-advance-accounting-reviewer'], status: 'active', companyId: COMPANY_ID, unitId: 'unit-accounting', branchUnitId: 'unit-branch-central', positionId: 'position-specialist', managerUserId: 'persona-product-owner', personnelId: 'personnel-advance-accounting', advanceBranchIds: ['*'], accent: '#0891b2', initials: 'ب.ا', isAdmin: false}),
-  user({id: 'persona-sales-advance-approver', actorId: 'actor-sales-advance-approver', name: 'سودابه مرادی', username: 's.moradi', roleId: 'role-sales-advance-approver', roleIds: ['role-sales-advance-approver', 'role-sales-seller'], status: 'active', companyId: COMPANY_ID, unitId: 'unit-sales', branchUnitId: 'unit-branch-central', positionId: 'position-sales-vice', managerUserId: 'persona-product-owner', personnelId: 'personnel-sales-advance-approver', advanceBranchIds: ['*'], salesHierarchyLevel: 'sales_vice', accent: '#7c3aed', initials: 'س.م', isAdmin: false}),
+  user({id: 'persona-sales-advance-approver', actorId: 'actor-sales-advance-approver', name: 'سودابه مرادی', username: 's.moradi', roleId: 'role-sales-advance-approver', roleIds: ['role-sales-advance-approver', 'role-sales-vice'], status: 'active', companyId: COMPANY_ID, unitId: 'unit-sales', branchUnitId: 'unit-branch-central', positionId: 'position-sales-vice', managerUserId: 'persona-product-owner', personnelId: 'personnel-sales-advance-approver', advanceBranchIds: ['*'], salesHierarchyLevel: 'sales_vice', accent: '#7c3aed', initials: 'س.م', isAdmin: false}),
 ];
 
 const personnel = (input: Omit<PersonnelRecord, 'createdAt' | 'updatedAt' | 'gender' | 'maritalStatus' | 'employmentType' | 'startDate' | 'primaryMobile' | 'branchUnitId' | 'movements' | 'salesCompensationHistory'> & Partial<Pick<PersonnelRecord, 'gender' | 'maritalStatus' | 'employmentType' | 'startDate' | 'primaryMobile' | 'branchUnitId' | 'movements' | 'salesCompensationHistory'>>): PersonnelRecord => {
@@ -230,11 +234,19 @@ export function resolveUserAccess(userRecord: LocalUser, roles: SecurityRole[]):
   const permissionGrants = [...new Set(userRecord.permissionGrants ?? [])];
   const permissionDenials = [...new Set(userRecord.permissionDenials ?? [])];
   const denied = new Set(permissionDenials);
-  const rolePermissions = assigned.flatMap((role) => role.permissions);
+  const roleEntitlements = assigned.flatMap((role) => role.permissions.map((permission) => ({
+    permission, scope: role.scope, source: 'role' as const, sourceRoleId: role.id,
+  }))).filter((entitlement) => !denied.has(entitlement.permission));
+  // Persisted direct grants are retained only as migration evidence. They are
+  // intentionally ineffective until every consumer is resource-aware.
+  const grantEntitlements: PermissionEntitlement[] = [];
+  const permissionEntitlements = userRecord.isAdmin
+    ? ADMIN_OPERATIONAL_PERMISSIONS.map((permission) => ({permission, scope: 'COMPANY' as const, source: 'admin' as const}))
+    : [...roleEntitlements, ...grantEntitlements];
   const permissions = userRecord.isAdmin
     ? ADMIN_OPERATIONAL_PERMISSIONS
-    : [...new Set([...rolePermissions.filter((permission) => !denied.has(permission)), ...permissionGrants])];
-  return {...userRecord, permissionGrants, permissionDenials, roleId: primary?.id ?? userRecord.roleId, roleTitle: userRecord.isAdmin ? 'ادمین' : primary?.name ?? 'بدون نقش فعال', roles: assigned.map((role) => role.name), description: userRecord.isAdmin ? 'مدیریت کامل محصول محلی، سازمان و دسترسی‌ها' : primary?.description ?? 'نقش فعالی به این کاربر اختصاص داده نشده است.', scope: userRecord.isAdmin ? 'COMPANY' : primary?.scope ?? userRecord.scope, permissions};
+    : [...new Set(permissionEntitlements.map((entitlement) => entitlement.permission))];
+  return {...userRecord, permissionGrants, permissionDenials, permissionEntitlements, roleId: primary?.id ?? userRecord.roleId, roleTitle: userRecord.isAdmin ? 'ادمین' : primary?.name ?? 'بدون نقش فعال', roles: assigned.map((role) => role.name), description: userRecord.isAdmin ? 'مدیریت کامل محصول محلی، سازمان و دسترسی‌ها' : primary?.description ?? 'نقش فعالی به این کاربر اختصاص داده نشده است.', scope: userRecord.isAdmin ? 'COMPANY' : primary?.scope ?? userRecord.scope, permissions};
 }
 
 export function applyRole(userRecord: LocalUser, roleId: string): LocalUser {
@@ -273,7 +285,8 @@ export const PERMISSION_CATALOG: PermissionCatalogItem[] = [
   {code: 'crm.customers.merge', label: 'بررسی و ادغام تکراری', description: 'Merge کنترل‌شده با حفظ سابقه', domain: 'crm', available: true},
   {code: 'crm.customers.import', label: 'ورود گروهی مشتری', description: 'پیش‌نمایش و Import فایل CSV کوچک', domain: 'crm', available: true},
   {code: 'organization.registrations.view', label: 'مشاهده ثبت‌نام‌ها', description: 'مشاهده صف درخواست‌های ثبت‌نام', domain: 'organization', available: true},
-  {code: 'organization.registrations.review', label: 'بررسی ثبت‌نام‌ها', description: 'اتصال پرسنل، تعیین نقش و فعال‌سازی', domain: 'organization', available: true},
+  {code: 'organization.registrations.review', label: 'بررسی ثبت‌نام‌ها', description: 'بررسی هویت و پیشنهاد نقش ورودی توسط منابع انسانی', domain: 'organization', available: true},
+  {code: 'organization.registrations.activate', label: 'فعال‌سازی حساب ثبت‌نام', description: 'فعال‌سازی نهایی حساب پس از پیشنهاد منابع انسانی', domain: 'organization', available: true},
   {code: 'foundation.workflow.manage', label: 'مدیریت گردش‌کار', description: 'نسخه‌گذاری صف، تخصیص و سیاست تأیید', domain: 'management', available: true},
   {code: 'foundation.reports.view', label: 'مشاهده گزارش‌های مدیریتی', description: 'KPI و سلامت صف‌های عملیاتی', domain: 'management', available: true},
   {code: 'foundation.qa.manage', label: 'مدیریت داده آزمون حجیم', description: 'ساخت و بازنشانی LARGE_QA', domain: 'management', available: true},

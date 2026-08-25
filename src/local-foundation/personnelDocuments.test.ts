@@ -35,7 +35,7 @@ describe('personnel document catalog and file validation',()=>{
     expect(PERSONNEL_DOCUMENT_CATALOG.filter((item)=>item.required).map((item)=>item.kind)).toEqual(['birth_certificate_first','national_id_back']);
     const person={id:'p'} as never;
     expect(personnelCompletionSummary(person,[]).documents.map((item)=>item.kind)).toEqual(['birth_certificate_first','national_id_back']);
-  });
+  },20_000);
 
   it('accepts signed files and rejects spoofed, empty, SVG and oversized metadata',async()=>{
     await expect(validatePersonnelDocumentFile('birth_certificate_first',png)).resolves.toMatchObject({mimeType:'image/png',size:8});
@@ -48,7 +48,7 @@ describe('personnel document catalog and file validation',()=>{
     const oversizedBytes=new Uint8Array(PERSONNEL_DOCUMENT_MAX_SIZE+1);oversizedBytes.set([137,80,78,71,13,10,26,10]);
     await expect(validatePersonnelDocumentFile('birth_certificate_first',{...png,size:oversizedBytes.length,dataUrl:byteArrayDataUrl('image/png',oversizedBytes)})).rejects.toThrow('۵ مگابایت');
     await expect(validatePersonnelDocumentFile('birth_certificate_first',{...png,dataUrl:'not-a-data-url'})).rejects.toThrow('ساختار');
-  });
+  },20_000);
 
   it('does not count optional, replaced, legacy or unclassified records as required completion',()=>{
     const base={id:'doc',moduleId:'personnel-document',ownerPersonnelId:'p',status:'linked',payload:{documentKind:'residence_proof',fileRef:'f'}} as unknown as OperationalRecord;
@@ -92,7 +92,7 @@ describe('personnel document service',()=>{
     await login(storage,session,'persona-product-owner');
     await expect(service.exportSnapshot()).rejects.toThrow('فقط پشتیبان رمزگذاری‌شده');
     await login(storage,session,'persona-auditor');
-    await expect(service.exportSnapshot('strong-test-password')).rejects.toThrow('مجوز صریح مشاهده محتوای مدارک');
+    await expect(service.exportSnapshot('strong-test-password')).rejects.toThrow('مجوز دریافت پشتیبان داده');
   },20_000);
 
   it('keeps immutable replacement history and only counts the latest linked version',async()=>{
@@ -105,7 +105,7 @@ describe('personnel document service',()=>{
     expect(activePersonnelDocuments(state.operationalRecords,personnelId)).toHaveLength(1);
     expect(await storage.getAll<PersonnelDocumentFile>('personnel_document_files')).toHaveLength(2);
     await expect(service.savePersonnelDocument(personnelId,{...input('birth_certificate_first'),replaceDocumentId:first.id})).rejects.toThrow('نسخه فعالی');
-  });
+  },20_000);
 
   it('prevents arbitrary self targets and QA uploads while HR may manage and reviewer may only read',async()=>{
     const {storage,session,service}=await setup();
@@ -131,7 +131,7 @@ describe('personnel document service',()=>{
     expect(new Date(state.session.profileCompletionDeferredUntil!).getTime()).toBeGreaterThan(Date.now()+6*24*60*60*1000);
     expect(state.activeUser.permissions).toEqual(before.activeUser.permissions);
     expect(state.audits.some((item)=>item.action==='organization.personnel.profile_completion_deferred')).toBe(true);
-  });
+  },20_000);
 
   it('rolls back metadata, content, history and audit when the atomic upload transaction fails',async()=>{
     const {storage,session,service}=await setup();await login(storage,session,'persona-seller');

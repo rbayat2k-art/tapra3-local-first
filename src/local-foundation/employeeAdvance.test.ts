@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import type {FoundationSession, FoundationStoreName, OperationalRecord, SnapshotManifest, WorkflowDefinition} from './model';
+import type {FoundationSession, FoundationStoreName, SnapshotManifest, WorkflowDefinition} from './model';
 import {FOUNDATION_STORES} from './model';
 import {createSeedData} from './seed';
 import {LocalFoundationService} from './service';
@@ -21,6 +21,20 @@ async function setup() {const storage = new MemoryStorage(); await storage.repla
 const login = (storage: MemoryStorage, session: FoundationSession, activeUserId: string) => storage.put('sessions', {...session, activeUserId, actingAdminUserId: undefined});
 
 describe('employee advance workflow', () => {
+  it('fails closed for every generic employee-advance mutation path', async () => {
+    const {storage, session, service} = await setup();
+    await login(storage, session, 'persona-product-owner');
+    const before = await service.loadState();
+    const record = before.operationalRecords.find((item) => item.moduleId === 'employee-advance')!;
+    await expect(service.createOperationalRecord('employee-advance', {title: 'دورزدن مسیر'})).rejects.toThrow('مسیر اختصاصی');
+    await expect(service.updateOperationalRecord('employee-advance', record.id, record.version, {title: 'دورزدن مسیر'})).rejects.toThrow('مسیر اختصاصی');
+    await expect(service.transitionOperationalRecord('employee-advance', record.id, 'submit')).rejects.toThrow('مسیر اختصاصی');
+    await expect(service.assignOperationalRecord('employee-advance', record.id, 'persona-system-admin', 'ارجاع آزمایشی')).rejects.toThrow('مسیر اختصاصی');
+    const after = await service.loadState();
+    expect(after.operationalRecords.find((item) => item.id === record.id)).toEqual(record);
+    expect(after.operationalHistory).toEqual(before.operationalHistory);
+  });
+
   it('routes a normal signed request through branch, accounting, main approver and treasury', async () => {
     const {storage, session, service} = await setup();
     await login(storage, session, 'persona-seller');

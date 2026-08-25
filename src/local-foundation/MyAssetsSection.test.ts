@@ -26,7 +26,7 @@ const record = (moduleId: string, unitId: string): OperationalRecord => ({
 describe('personnel asset record visibility', () => {
   it('shows only asset records inside the viewers authorized scope', () => {
     const admin = QA_PERSONAS.find((item) => item.id === 'persona-product-owner')!;
-    const unitViewer = {...admin, isAdmin: false, scope: 'UNIT' as const, unitId: 'unit-sales'};
+    const unitViewer = {...admin, isAdmin: false, scope: 'UNIT' as const, unitId: 'unit-sales', permissionEntitlements: admin.permissions.map((permission) => ({permission, scope: 'UNIT' as const, source: 'role' as const, sourceRoleId: 'test-unit-viewer'}))};
 
     for (const moduleId of ['fixed-asset', 'asset-transfer', 'asset-maintenance']) {
       expect(canViewPersonnelAssetRecord(unitViewer, record(moduleId, 'unit-sales'))).toBe(true);

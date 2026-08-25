@@ -2,7 +2,7 @@ import {describe, expect, it} from 'vitest';
 import type {FoundationSession, FoundationStoreName, LocalUser, SnapshotManifest} from './model';
 import {FOUNDATION_STORES} from './model';
 import {createSeedData} from './seed';
-import {LocalFoundationService} from './service';
+import {LocalFoundationService, userConcurrencyToken} from './service';
 import type {StorageAdapter, StorageTransaction} from './storage';
 import {todayIsoDate, toIsoDate} from './PersianDate';
 import {permissionFor} from './erpCatalog';
@@ -57,7 +57,7 @@ describe('personnel employment lifecycle', () => {
     const request = state.operationalRecords.find((item) => item.moduleId === 'offboarding' && item.ownerPersonnelId === 'personnel-arman')!;
     await expect(service.approvePersonnelEndRequest(request.id, request.version, 'تأیید توسط همان ثبت‌کننده'))
       .rejects.toThrow('ثبت‌کننده درخواست');
-    await expect(service.schedulePersonnelEnd('personnel-laleh', {effectiveDate: todayIsoDate(), departureInitiator:'organization', reason:'دورزدن درخواست'}))
+    await expect(service.schedulePersonnelEnd('personnel-laleh', (await service.loadState()).personnel.find((person)=>person.id==='personnel-laleh')!.updatedAt, {effectiveDate: todayIsoDate(), departureInitiator:'organization', reason:'دورزدن درخواست'}))
       .rejects.toThrow('مسیر اضطراری ادمین');
   });
 
@@ -111,7 +111,7 @@ describe('personnel employment lifecycle', () => {
 
   it('ends employment and disables login without deleting either record', async () => {
     const {storage, service} = await setup();
-    const state = await service.schedulePersonnelEnd('personnel-arman', {effectiveDate: todayIsoDate(), departureInitiator: 'organization', reason: 'پایان همکاری آزمایشی', handoffNotes: 'تحویل کامل کارها'});
+    const state = await service.schedulePersonnelEnd('personnel-arman', (await service.loadState()).personnel.find((person)=>person.id==='personnel-arman')!.updatedAt, {effectiveDate: todayIsoDate(), departureInitiator: 'organization', reason: 'پایان همکاری آزمایشی', handoffNotes: 'تحویل کامل کارها'});
     const personnel = state.personnel.find((item) => item.id === 'personnel-arman')!;
     const user = state.users.find((item) => item.id === 'persona-seller')!;
     expect(personnel.employmentStatus).toBe('ended');
@@ -125,15 +125,15 @@ describe('personnel employment lifecycle', () => {
 
   it('keeps a future termination scheduled and the login active until its effective date', async () => {
     const {service} = await setup(); const future = new Date(); future.setDate(future.getDate() + 2);
-    const state = await service.schedulePersonnelEnd('personnel-arman', {effectiveDate: toIsoDate(future), departureInitiator: 'organization', reason: 'پایان قرارداد در آینده'});
+    const state = await service.schedulePersonnelEnd('personnel-arman', (await service.loadState()).personnel.find((person)=>person.id==='personnel-arman')!.updatedAt, {effectiveDate: toIsoDate(future), departureInitiator: 'organization', reason: 'پایان قرارداد در آینده'});
     expect(state.personnel.find((item) => item.id === 'personnel-arman')?.employmentStatus).toBe('ending_scheduled');
     expect(state.users.find((item) => item.id === 'persona-seller')?.status).toBe('active');
   });
 
   it('rehire uses the same dossier and explicitly replaces old access roles', async () => {
     const {service} = await setup();
-    await service.schedulePersonnelEnd('personnel-arman', {effectiveDate: todayIsoDate(), departureInitiator: 'organization', reason: 'پایان دوره قبلی'});
-    const state = await service.rehirePersonnel('personnel-arman', {effectiveDate: todayIsoDate(), reason: 'شروع دوره تازه', employmentType: 'تمام‌وقت', unitId: 'unit-sales', positionId: 'position-sales-manager', branchUnitId: 'unit-branch-central', roleIds: ['role-sales-seller']});
+    const ended = await service.schedulePersonnelEnd('personnel-arman', (await service.loadState()).personnel.find((person)=>person.id==='personnel-arman')!.updatedAt, {effectiveDate: todayIsoDate(), departureInitiator: 'organization', reason: 'پایان دوره قبلی'});
+    const state = await service.rehirePersonnel('personnel-arman', ended.personnel.find((person)=>person.id==='personnel-arman')!.updatedAt, {effectiveDate: todayIsoDate(), reason: 'شروع دوره تازه', employmentType: 'تمام‌وقت', unitId: 'unit-sales', positionId: 'position-sales-manager', branchUnitId: 'unit-branch-central', roleIds: ['role-sales-seller']});
     const personnel = state.personnel.find((item) => item.id === 'personnel-arman')!;
     const user = state.users.find((item) => item.id === 'persona-seller')!;
     expect(personnel.personnelCode).toBe('P-3001');
@@ -145,13 +145,29 @@ describe('personnel employment lifecycle', () => {
 
   it('blocks manual account activation while employment is ended', async () => {
     const {service} = await setup();
-    await service.schedulePersonnelEnd('personnel-arman', {effectiveDate: todayIsoDate(), departureInitiator: 'organization', reason: 'پایان همکاری'});
-    await expect(service.setUserStatus('persona-seller', 'active')).rejects.toThrow('بازگشت به همکاری');
+    const state = await service.schedulePersonnelEnd('personnel-arman', (await service.loadState()).personnel.find((person)=>person.id==='personnel-arman')!.updatedAt, {effectiveDate: todayIsoDate(), departureInitiator: 'organization', reason: 'پایان همکاری'});
+    const endedUser = state.users.find((user)=>user.id==='persona-seller')!;
+    await expect(service.setUserStatus('persona-seller', userConcurrencyToken(endedUser), 'active')).rejects.toThrow('بازگشت به همکاری');
+  });
+
+  it('rejects stale personnel forms and rolls back cancellation when audit storage fails', async () => {
+    const {storage,service}=await setup();
+    const stale=(await service.loadState()).personnel.find((person)=>person.id==='personnel-arman')!;
+    await storage.put('personnel',{...stale,firstName:'تغییر هم‌زمان',updatedAt:'2026-08-25T11:00:00.000Z'});
+    await expect(service.updatePersonnel(stale.id,stale.updatedAt,{...stale,firstName:'فرم قدیمی'})).rejects.toThrow('تب دیگری');
+
+    const current=(await service.loadState()).personnel.find((person)=>person.id==='personnel-arman')!;
+    const future=new Date();future.setDate(future.getDate()+2);
+    const scheduledState=await service.schedulePersonnelEnd(current.id,current.updatedAt,{effectiveDate:toIsoDate(future),departureInitiator:'organization',reason:'پایان قرارداد آینده'});
+    const scheduled=scheduledState.personnel.find((person)=>person.id===current.id)!;
+    storage.failNextPut('audit_events');
+    await expect(service.cancelPersonnelEnd(scheduled.id,scheduled.updatedAt,'لغو برنامه خروج')).rejects.toThrow('injected audit_events failure');
+    expect((await storage.get<typeof scheduled>('personnel',scheduled.id))?.employmentStatus).toBe('ending_scheduled');
   });
 
   it('closes an exit dossier only after financial and organizational clearance', async () => {
     const {service} = await setup();
-    let state = await service.schedulePersonnelEnd('personnel-arman', {effectiveDate: todayIsoDate(), departureInitiator: 'employee', reason: 'پایان همکاری با تسویه کامل', handoffNotes: 'تحویل کارها ثبت شد'});
+    let state = await service.schedulePersonnelEnd('personnel-arman', (await service.loadState()).personnel.find((person)=>person.id==='personnel-arman')!.updatedAt, {effectiveDate: todayIsoDate(), departureInitiator: 'employee', reason: 'پایان همکاری با تسویه کامل', handoffNotes: 'تحویل کارها ثبت شد'});
     let offboarding = state.operationalRecords.find((item) => item.moduleId === 'offboarding' && item.ownerPersonnelId === 'personnel-arman')!;
     await expect(service.completeOffboarding(offboarding.id, offboarding.version, 'بستن پرونده')).rejects.toThrow('تسویه مالی');
 
@@ -274,7 +290,7 @@ describe('asset custody with local OTP', () => {
     let challenge = await service.createAssetCustodyChallenge({assetRecordId: asset.id, personnelId: 'personnel-arman', action: 'delivery'});
     await confirmAssetCustodyBoth(storage, service, challenge.transferId);
     await switchActiveUser(storage, 'persona-product-owner');
-    state = await service.schedulePersonnelEnd('personnel-arman', {effectiveDate: todayIsoDate(), departureInitiator: 'organization', reason: 'خروج همراه با دارایی'});
+    state = await service.schedulePersonnelEnd('personnel-arman', state.personnel.find((person)=>person.id==='personnel-arman')!.updatedAt, {effectiveDate: todayIsoDate(), departureInitiator: 'organization', reason: 'خروج همراه با دارایی'});
     let offboarding = state.operationalRecords.find((item) => item.moduleId === 'offboarding' && item.ownerPersonnelId === 'personnel-arman')!;
     expect(offboarding.payload.assetClearanceStatus).toBe('pending');
     expect(offboarding.payload.pendingAssetIds).toContain(asset.id);

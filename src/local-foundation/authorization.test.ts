@@ -1,7 +1,8 @@
 import {describe, expect, it} from 'vitest';
 import {authorize, operationalRecordResource} from './authorization';
 import type {OperationalRecord} from './model';
-import {QA_PERSONAS} from './seed';
+import {QA_PERSONAS, resolveUserAccess} from './seed';
+import type {SecurityRole} from './model';
 
 const persona = (id: string) => QA_PERSONAS.find((item) => item.id === id)!;
 
@@ -109,5 +110,25 @@ describe('local permission engine', () => {
     });
     expect(result.allowed).toBe(false);
     expect(result.code).toBe('workflow.transition_denied');
+  });
+
+  it('evaluates each role permission with that roles own scope', () => {
+    const permission = 'crm.lead.view';
+    const roles: SecurityRole[] = [
+      {id: 'company-role', name: 'شرکتی', description: '', status: 'active', protected: false, scope: 'COMPANY', permissions: ['foundation.dashboard.view'], createdAt: '', updatedAt: ''},
+      {id: 'self-role', name: 'شخصی', description: '', status: 'active', protected: false, scope: 'SELF', permissions: [permission], createdAt: '', updatedAt: ''},
+    ];
+    const mixed = resolveUserAccess({...persona('persona-sales-advance-approver'), roleId: 'company-role', roleIds: ['company-role', 'self-role'], isAdmin: false}, roles);
+    const anotherPersonsRecord = {id: 'other', companyId: mixed.companyId, unitId: mixed.unitId, ownerId: 'another-actor', createdBy: 'another-actor', state: 'open'};
+    const ownRecord = {...anotherPersonsRecord, id: 'own', ownerId: mixed.actorId};
+    expect(authorize({persona: mixed, permission, resource: anotherPersonsRecord, action: 'view'}).allowed).toBe(false);
+    expect(authorize({persona: mixed, permission, resource: ownRecord, action: 'view'}).allowed).toBe(true);
+  });
+
+  it('fails closed when a stale non-admin user has no derived entitlements', () => {
+    const stale = {...persona('persona-seller'), isAdmin: false, permissionEntitlements: undefined};
+    const result = authorize({persona: stale, permission: 'foundation.dashboard.view'});
+    expect(result.allowed).toBe(false);
+    expect(result.code).toBe('permission.missing');
   });
 });

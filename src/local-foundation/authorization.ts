@@ -11,10 +11,10 @@ const deny = (code: string, reasonFa: string, progress: Partial<AuthorizationDec
   ...progress,
 });
 
-function resolveScope(persona: QaPersona, resource?: DemoResource): boolean {
+function resolveScope(persona: QaPersona, scope: QaPersona['scope'], resource?: DemoResource): boolean {
   if (!resource) return true;
   if (resource.companyId !== persona.companyId) return false;
-  switch (persona.scope) {
+  switch (scope) {
     case 'COMPANY': return true;
     case 'UNIT': return Boolean(persona.unitId && persona.unitId === resource.unitId);
     case 'TEAM': return Boolean(persona.teamId && persona.teamId === resource.teamId);
@@ -29,11 +29,16 @@ export function authorize(request: AuthorizationRequest): AuthorizationDecision 
   if (persona.status !== 'active') {
     return deny('account.inactive', 'حساب کاربری غیرفعال است و اجازه مشاهده یا انجام عملیات ندارد.');
   }
-  if (!persona.isAdmin && !persona.permissions.includes(permission)) {
+  const matchingEntitlements = persona.permissionEntitlements?.filter((item) => item.permission === permission) ?? [];
+  const permissionMatched = persona.isAdmin || matchingEntitlements.length > 0;
+  if (!permissionMatched) {
     return deny('permission.missing', 'این نقش مجوز لازم برای این اقدام را ندارد.');
   }
 
-  if (!resolveScope(persona, resource)) {
+  const scopeMatched = persona.isAdmin
+    ? resolveScope(persona, 'COMPANY', resource)
+    : matchingEntitlements.some((entitlement) => resolveScope(persona, entitlement.scope, resource));
+  if (!scopeMatched) {
     return deny('scope.denied', 'این رکورد خارج از محدوده کاری کاربر فعال است.', {permissionMatched: true});
   }
 

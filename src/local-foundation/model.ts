@@ -1,10 +1,17 @@
 export const FOUNDATION_SCHEMA_VERSION = 11;
 export const FOUNDATION_DB_NAME = 'tapra2_local';
-export const FOUNDATION_SEED_VERSION = 'complete-local-erp-v1.29-personnel-documents';
+export const FOUNDATION_SEED_VERSION = 'complete-local-erp-v1.30-access-safety';
 
 export type ScopeType = 'COMPANY' | 'UNIT' | 'TEAM' | 'SELF' | 'RECORD';
 /** Permission codes are registry-driven and always use domain.resource.action. */
 export type PermissionCode = string;
+
+export interface PermissionEntitlement {
+  permission: PermissionCode;
+  scope: ScopeType;
+  source: 'role' | 'user-grant' | 'admin';
+  sourceRoleId?: string;
+}
 
 export type UserStatus = 'active' | 'inactive';
 export type SalesHierarchyLevel = 'sales_vice' | 'sales_manager' | 'senior_supervisor' | 'sales_supervisor' | 'seller';
@@ -47,6 +54,8 @@ export interface LocalUser {
   teamId?: string;
   scope: ScopeType;
   permissions: PermissionCode[];
+  /** Effective permission sources. Authorization evaluates the scope of each source separately. */
+  permissionEntitlements?: PermissionEntitlement[];
   /** Explicit permissions granted only to this user, without changing assigned roles. */
   permissionGrants?: PermissionCode[];
   /** Explicit permissions denied only to this user; denial wins over every assigned role. */
@@ -548,6 +557,11 @@ export interface RegistrationRequest {
   selfDeclaration: Record<string, string>;
   status: 'submitted' | 'in_review' | 'needs_correction' | 'approved' | 'rejected' | 'activated';
   reviewReason?: string;
+  proposedRoleIds?: string[];
+  proposedByUserId?: string;
+  proposedAt?: string;
+  activatedByUserId?: string;
+  activatedAt?: string;
   linkedPersonnelId?: string;
   linkedUserId?: string;
   version: number;

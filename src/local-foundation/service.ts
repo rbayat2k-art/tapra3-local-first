@@ -31,6 +31,10 @@ import {
   activePersonnelDocuments, missingPersonnelDocuments, personnelDocumentDefinition,
   validatePersonnelDocumentFile, type PersonnelDocumentUploadInput,
 } from './personnelDocuments';
+import {
+  assertDirectAccessAssignmentAllowed, assertProtectedRoleMutationAllowed, assertRoleDefinitionAllowed, PRIMARY_ADMIN_USER_ID,
+  REGISTRATION_ASSIGNABLE_ROLE_IDS,
+} from './accessPolicy';
 
 export interface UnitInput {name: string; type: string; parentId?: string; managerUserId?: string; description: string;}
 export interface PositionInput {title: string; description: string; unitIds?: string[];}
@@ -197,7 +201,7 @@ export class LocalFoundationService {
           }
           const audits = await tx.getAll<AuditEvent>('audit_events');
           await tx.put('personnel', updatedPerson);
-          if (linkedUser && !linkedUser.isAdmin) await tx.put('users', {...linkedUser, status: 'inactive'});
+          if (linkedUser) {const currentUser=await tx.get<LocalUser>('users',linkedUser.id);if(!currentUser)throw new Error('حساب مرتبط پیدا نشد؛ اجرای زمان‌بندی دوباره تلاش خواهد شد.');if(currentUser.isAdmin)throw new Error('پایان همکاری زمان‌بندی‌شده برای حساب ادمین اصلی خودکار اجرا نمی‌شود.');await tx.put('users',{...currentUser,status:'inactive'});}
           await tx.put('offboarding_cases', offboarding);
           await tx.put('workflow_history', history);
           await tx.put('audit_events', {id: newId('audit'), sequence: nextSequence(audits), companyId: auditUser.companyId, category: 'system', action: 'organization.personnel.employment_ended_automatically', actorId: auditUser.actorId, actorName: auditUser.name, effectiveUserId: auditUser.id, occurredAt: now, summary: `پایان همکاری زمان‌بندی‌شده «${person.firstName} ${person.lastName}» اجرا شد.`, outcome: 'success', correlationId, metadata: {personnelId: person.id, effectiveDate: pending.effectiveDate, offboardingRecordId: offboarding.id}} satisfies AuditEvent);
@@ -220,16 +224,12 @@ export class LocalFoundationService {
           managerPersonnelId: pending.managerPersonnelId, pendingLifecycleChange: undefined,
           lifecycleHistory: [...(person.lifecycleHistory ?? []), event], updatedAt: now,
         };
-        let updatedUser: LocalUser | undefined;
-        if (linkedUser) {
-          const managerUserId = state.users.find((user) => user.personnelId === updatedPerson.managerPersonnelId)?.id;
-          const roleId = roleIds[0] ?? linkedUser.roleId;
-          updatedUser = resolveUserAccess({...linkedUser, status: 'active', roleId, roleIds, unitId: updatedPerson.unitId, positionId: updatedPerson.positionId, branchUnitId: updatedPerson.branchUnitId, managerUserId}, state.roles);
-        }
-        await this.storage.transaction(['personnel', 'users', 'audit_events', 'domain_events', 'meta'], 'readwrite', async (tx) => {
+        await this.storage.transaction(['personnel', 'users', 'security_roles', 'audit_events', 'domain_events', 'meta'], 'readwrite', async (tx) => {
           const latestPerson = await tx.get<PersonnelRecord>('personnel', person.id);
           if (!latestPerson || latestPerson.updatedAt !== person.updatedAt || latestPerson.pendingLifecycleChange?.scheduledAt !== pending.scheduledAt) return;
-          const audits = await tx.getAll<AuditEvent>('audit_events');
+          const [currentUsers,currentRoles,audits]=await Promise.all([tx.getAll<LocalUser>('users'),tx.getAll<SecurityRole>('security_roles'),tx.getAll<AuditEvent>('audit_events')]);
+          let updatedUser:LocalUser|undefined;
+          if(linkedUser){const currentUser=currentUsers.find((user)=>user.id===linkedUser.id);if(!currentUser)throw new Error('حساب مرتبط پیدا نشد؛ اجرای زمان‌بندی دوباره تلاش خواهد شد.');if(roleIds.some((roleId)=>!currentRoles.some((role)=>role.id===roleId&&role.status==='active')))throw new Error('یکی از نقش‌های بازگشت به همکاری تغییر کرده یا غیرفعال شده است.');assertDirectAccessAssignmentAllowed(auditUser,currentUser,roleIds,[],[],currentRoles,state.session.actingAdminUserId);const managerUserId=currentUsers.find((user)=>user.personnelId===updatedPerson.managerPersonnelId)?.id;const roleId=roleIds[0]??currentUser.roleId;updatedUser=resolveUserAccess({...currentUser,status:'active',roleId,roleIds,unitId:updatedPerson.unitId,positionId:updatedPerson.positionId,branchUnitId:updatedPerson.branchUnitId,managerUserId},currentRoles);}
           await tx.put('personnel', updatedPerson);
           if (updatedUser) await tx.put('users', updatedUser);
           await tx.put('audit_events', {id: newId('audit'), sequence: nextSequence(audits), companyId: auditUser.companyId, category: 'system', action: 'organization.personnel.rehired_automatically', actorId: auditUser.actorId, actorName: auditUser.name, effectiveUserId: auditUser.id, occurredAt: now, summary: `بازگشت به همکاری زمان‌بندی‌شده «${person.firstName} ${person.lastName}» اجرا شد.`, outcome: 'success', correlationId, metadata: {personnelId: person.id, effectiveDate: pending.effectiveDate, roleIds: roleIds.join(',')}} satisfies AuditEvent);
@@ -268,8 +268,11 @@ export class LocalFoundationService {
     const seededRecruitmentHistory = (seeded.workflow_history as OperationalRecordHistory[]).filter((item) => item.moduleId === 'recruitment-case');
     const seededWorkflowDefinitions = seeded.workflow_definitions as WorkflowDefinition[];
     const seededWorkflowVersions = seeded.workflow_versions as WorkflowDefinition[];
-    const existingEntries = await Promise.all(FOUNDATION_STORES.map(async (store) => [store, await this.storage.getAll(store)] as const));
+    const existingEntries = await this.storage.transaction([...FOUNDATION_STORES], 'readonly', (tx) =>
+      Promise.all(FOUNDATION_STORES.map(async (store) => [store, await tx.getAll(store)] as const)),
+    );
     const existing = Object.fromEntries(existingEntries) as Record<FoundationStoreName, unknown[]>;
+    const migrationBasePersistedAt = (existing.meta as MetaRecord[]).find((item) => item.id === 'lastPersistedAt')?.value;
     for (const store of FOUNDATION_STORES) if (existing[store].length) seeded[store] = existing[store];
     const priorWorkflowDefinitions = existing.workflow_definitions as WorkflowDefinition[];
     seeded.workflow_definitions = [
@@ -295,9 +298,13 @@ export class LocalFoundationService {
 
     const priorRoles = existing.security_roles as SecurityRole[];
     const customRoles = priorRoles.filter((role) => role.id !== 'role-seller' && !SECURITY_ROLES.some((template) => template.id === role.id));
+    const securityPatchedRoleIds = new Set(['role-admin','role-system-admin','role-user-manager','role-registration-reviewer','role-workflow-admin','role-auditor']);
     seeded.security_roles = [...SECURITY_ROLES.map((template) => {
       const prior = priorRoles.find((role) => role.id === template.id);
-      return prior ? {...prior, ...template, version: (prior.version ?? 1) + 1, updatedAt: now} : {...template, version: 1};
+      if (!prior) return {...template, version: 1};
+      return securityPatchedRoleIds.has(template.id)
+        ? {...prior, protected: template.protected, permissions: [...template.permissions], version:(prior.version??1)+1, updatedAt:now}
+        : {...template, ...prior, version:prior.version??1};
     }), ...customRoles];
     const priorUnits = existing.organizational_units as OrganizationalUnit[];
     const customUnits = priorUnits.filter((unit) => !ORGANIZATIONAL_UNITS.some((template) => template.id === unit.id));
@@ -410,13 +417,23 @@ export class LocalFoundationService {
     const mergedUsers = [...LOCAL_USERS.map((template) => {
       const prior = priorUsers.find((user) => user.id === template.id);
       if (!prior) return template;
-      const requiredRecruitmentRoles: Record<string, string[]> = {
-        'persona-seller': ['role-workforce-requester','role-recruitment-interviewer'],
-        'persona-callcenter-a': ['role-recruitment-interviewer','role-onboarding-supervisor'],
-        'persona-hr-manager': ['role-recruitment-manager'],
-        'persona-hr-operator': ['role-recruitment-operator'],
+      const salesRoleByPersona: Record<string, string> = {
+        'persona-seller': 'role-sales-manager',
+        'persona-sales-vice-network': 'role-sales-vice',
+        'persona-sales-senior': 'role-senior-sales-supervisor',
+        'persona-sales-senior-poonak': 'role-senior-sales-supervisor',
+        'persona-callcenter-a': 'role-sales-supervisor',
+        'persona-callcenter-b': 'role-sales-supervisor',
+        'persona-callcenter-c': 'role-sales-supervisor',
+        'persona-callcenter-poonak': 'role-sales-supervisor',
+        'persona-sales-advance-approver': 'role-sales-vice',
       };
-      return {...template, ...prior, roleIds: [...new Set([...prior.roleIds, ...(requiredRecruitmentRoles[prior.id] ?? [])])]};
+      const correctedSalesRole = salesRoleByPersona[prior.id];
+      const hadLegacySellerRole = prior.roleIds.some((roleId) => ['role-sales-seller', 'role-seller'].includes(roleId));
+      const preservedRoles = correctedSalesRole && hadLegacySellerRole ? prior.roleIds.filter((roleId) => !['role-sales-seller', 'role-seller'].includes(roleId)) : prior.roleIds;
+      const roleIds = [...new Set([...preservedRoles, ...(correctedSalesRole && hadLegacySellerRole ? [correctedSalesRole] : [])])];
+      const roleId = ['role-sales-seller', 'role-seller'].includes(prior.roleId) && correctedSalesRole && hadLegacySellerRole ? correctedSalesRole : prior.roleId;
+      return {...template, ...prior, roleId, roleIds};
     }), ...customUsers];
     seeded.users = mergedUsers.map((value) => {
       const user = value as LocalUser;
@@ -424,7 +441,7 @@ export class LocalFoundationService {
       const linkedPersonnel = migratedPersonnel.find((person) => person.id === user.personnelId || person.linkedUserId === user.id);
       const normalizedRoleIds = [...new Set((user.roleIds?.length ? user.roleIds : [user.roleId || fallback.roleId]).map((roleId) => roleId === 'role-seller' ? 'role-sales-seller' : roleId))];
       const normalizedRoleId = (user.roleId === 'role-seller' ? 'role-sales-seller' : user.roleId) || normalizedRoleIds[0];
-      return resolveUserAccess({...fallback, ...user, ...(linkedPersonnel ? {unitId: linkedPersonnel.unitId, positionId: linkedPersonnel.positionId, branchUnitId: linkedPersonnel.branchUnitId, salesHierarchyLevel: linkedPersonnel.salesHierarchyLevel} : {}), roleId: normalizedRoleId, roleIds: normalizedRoleIds, isAdmin: user.id === 'persona-product-owner'}, roles);
+      return resolveUserAccess({...fallback, ...user, ...(linkedPersonnel ? {unitId: linkedPersonnel.unitId, positionId: linkedPersonnel.positionId, branchUnitId: linkedPersonnel.branchUnitId, salesHierarchyLevel: linkedPersonnel.salesHierarchyLevel} : {}), roleId: normalizedRoleId, roleIds: normalizedRoleIds, permissionGrants: [], isAdmin: user.id === 'persona-product-owner'}, roles);
     });
     const purchaseSeed = (createSeedData().purchase_requests as OperationalRecord[]).find((record) => record.id === 'demo-purchase-request-1');
     seeded.purchase_requests = (seeded.purchase_requests as OperationalRecord[]).map((record) => {
@@ -468,8 +485,18 @@ export class LocalFoundationService {
     const systemMetaIds = new Set(['schemaVersion', 'seedVersion', 'seededAt', 'lastPersistedAt']);
     const preservedMeta = (existing.meta as MetaRecord[]).filter((item) => !systemMetaIds.has(item.id));
     seeded.meta = [...preservedMeta, {id: 'schemaVersion', value: FOUNDATION_SCHEMA_VERSION}, {id: 'seedVersion', value: FOUNDATION_SEED_VERSION}, {id: 'lastPersistedAt', value: now}];
-    await this.storage.replaceAll(seeded);
-    await this.appendSystemAudit('foundation.erp_v1.migrated', 'ساختار ERP محلی V1 بدون حذف داده‌های قبلی ارتقا یافت.', activeUserId, {schemaVersion: FOUNDATION_SCHEMA_VERSION, legacySellerRoleMigratedTo: 'role-sales-seller'});
+    const migrationActor = (seeded.users as LocalUser[]).find((user)=>user.id===activeUserId) ?? (seeded.users as LocalUser[])[0];
+    const migratedAudits = seeded.audit_events as AuditEvent[];
+    seeded.audit_events = [...migratedAudits,{id:newId('audit'),sequence:nextSequence(migratedAudits),companyId:migrationActor.companyId,category:'data',action:'foundation.erp_v1.migrated',actorId:migrationActor.actorId,actorName:migrationActor.name,effectiveUserId:migrationActor.id,occurredAt:now,summary:'ساختار ERP محلی V1 بدون حذف داده‌های قبلی ارتقا یافت.',outcome:'success',correlationId:newId('correlation'),metadata:{schemaVersion:FOUNDATION_SCHEMA_VERSION,legacySellerRoleMigratedTo:'role-sales-seller'}} satisfies AuditEvent];
+    await this.storage.transaction([...FOUNDATION_STORES], 'readwrite', async (tx) => {
+      const latestEntries=await Promise.all(FOUNDATION_STORES.map(async(store)=>[store,await tx.getAll(store)] as const));
+      const latest=Object.fromEntries(latestEntries) as Record<FoundationStoreName,unknown[]>;
+      const latestPersistedAt=(latest.meta as MetaRecord[]).find((item)=>item.id==='lastPersistedAt')?.value;
+      const storeChanged=FOUNDATION_STORES.some((store)=>JSON.stringify(latest[store])!==JSON.stringify(existing[store]));
+      if(latestPersistedAt!==migrationBasePersistedAt||storeChanged)throw new Error('داده‌ها هنگام ارتقا در تب دیگری تغییر کردند؛ همه تب‌ها را ببندید و دوباره تلاش کنید.');
+      for (const store of FOUNDATION_STORES) await tx.clear(store);
+      for (const store of FOUNDATION_STORES) for (const value of seeded[store]) await tx.put(store, value);
+    });
   }
 
   async loadState(): Promise<FoundationState> {
@@ -492,8 +519,18 @@ export class LocalFoundationService {
       ? {...session, signedOutAt: session.switchedAt}
       : session;
     const normalizedAudits = audits.map((event) => ({...event, effectiveUserId: event.effectiveUserId ?? (event as AuditEvent & {effectivePersonaId?: string}).effectivePersonaId ?? activeUser.id}));
+    const auditorView = activeUser.roleIds.includes('role-auditor');
+    const projectedUsers = auditorView
+      ? users.filter((user) => user.id === activeUser.id).map((user) => ({...user, passwordHash: ''}))
+      : users;
+    const projectedPersonnel = auditorView
+      ? personnel.filter((person) => person.id === activeUser.personnelId || person.linkedUserId === activeUser.id)
+      : personnel;
+    // Until the product owner approves an auditor-specific reporting contract,
+    // expose no event rows. Audit summaries and actor fields often contain PII.
+    const projectedAudits = auditorView ? [] : normalizedAudits;
     const allOperationalRecords = operationalParts.flat();
-    const operationalRecords = allOperationalRecords.filter((record) => {
+    const operationalRecords = (auditorView ? [] : allOperationalRecords).filter((record) => {
       if (record.moduleId !== 'personnel-document') return true;
       const target = personnel.find((item) => item.id === record.ownerPersonnelId);
       if (!target) return false;
@@ -501,7 +538,8 @@ export class LocalFoundationService {
       const permission = [PERSONNEL_DOCUMENT_PERMISSION_READ, PERSONNEL_DOCUMENT_PERMISSION_MANAGE, 'organization.personnel.documents.queue.view'].find((candidate) => activeUser.permissions.includes(candidate));
       return Boolean(permission && authorize({persona: activeUser, permission, action: 'view', resource: this.personnelResource({users, activeUser} as FoundationState, target)}).allowed);
     }).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-    return {users, activeUser, session: effectiveSession, units: units.sort((a, b) => a.order - b.order || a.name.localeCompare(b.name, 'fa')), positions: positions.sort((a, b) => a.title.localeCompare(b.title, 'fa')), roles: roles.sort((a, b) => Number(b.protected) - Number(a.protected) || a.name.localeCompare(b.name, 'fa')), personnel: personnel.sort((a, b) => a.personnelCode.localeCompare(b.personnelCode, 'fa')), personnelProfileChangeRequests: profileChangeRequests.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), salesStructures: salesStructures.sort((a, b) => salesStructureSupervisorName(a, personnel).localeCompare(salesStructureSupervisorName(b, personnel), 'fa')), customers: customers.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), customerImports: customerImports.sort((a, b) => b.createdAt.localeCompare(a.createdAt)), workflows, workflowVersions, operationalRecords, operationalHistory: history.sort((a, b) => b.occurredAt.localeCompare(a.occurredAt)), notifications: notifications.filter((item) => item.userId === activeUser.id).sort((a, b) => b.createdAt.localeCompare(a.createdAt)), registrationRequests: registrations.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), qaDataset: qaManifests.find((item) => item.id === 'large-qa') ?? {id: 'large-qa', status: 'empty', roleCount: 0, userCount: 0, seed: 'tapra2-large-qa-v1'}, projections, audits: normalizedAudits.sort((a, b) => b.sequence - a.sequence), recordCount: records.length + personnel.length + profileChangeRequests.length + salesStructures.length + customers.length + operationalRecords.length + notifications.length, lastPersistedAt: typeof persistedAt?.value === 'string' ? persistedAt.value : effectiveSession.switchedAt};
+    const projectedActiveUser = projectedUsers.find((user) => user.id === activeUser.id) ?? activeUser;
+    return {users: projectedUsers, activeUser: projectedActiveUser, session: effectiveSession, units: units.sort((a, b) => a.order - b.order || a.name.localeCompare(b.name, 'fa')), positions: positions.sort((a, b) => a.title.localeCompare(b.title, 'fa')), roles: roles.sort((a, b) => Number(b.protected) - Number(a.protected) || a.name.localeCompare(b.name, 'fa')), personnel: projectedPersonnel.sort((a, b) => a.personnelCode.localeCompare(b.personnelCode, 'fa')), personnelProfileChangeRequests: auditorView ? [] : profileChangeRequests.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), salesStructures: auditorView ? [] : salesStructures.sort((a, b) => salesStructureSupervisorName(a, personnel).localeCompare(salesStructureSupervisorName(b, personnel), 'fa')), customers: auditorView ? [] : customers.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), customerImports: auditorView ? [] : customerImports.sort((a, b) => b.createdAt.localeCompare(a.createdAt)), workflows, workflowVersions, operationalRecords, operationalHistory: auditorView ? [] : history.sort((a, b) => b.occurredAt.localeCompare(a.occurredAt)), notifications: notifications.filter((item) => item.userId === activeUser.id).sort((a, b) => b.createdAt.localeCompare(a.createdAt)), registrationRequests: auditorView ? [] : registrations.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), qaDataset: qaManifests.find((item) => item.id === 'large-qa') ?? {id: 'large-qa', status: 'empty', roleCount: 0, userCount: 0, seed: 'tapra2-large-qa-v1'}, projections: auditorView ? [] : projections, audits: projectedAudits.sort((a, b) => b.sequence - a.sequence), recordCount: auditorView ? projectedAudits.length : records.length + personnel.length + profileChangeRequests.length + salesStructures.length + customers.length + operationalRecords.length + notifications.length, lastPersistedAt: typeof persistedAt?.value === 'string' ? persistedAt.value : effectiveSession.switchedAt};
   }
 
   async createSalesStructure(input: SalesStructureInput): Promise<FoundationState> {
@@ -625,36 +663,81 @@ export class LocalFoundationService {
 
   async createUser(input: UserInput): Promise<FoundationState> {
     const state = await this.loadState(); const actor = state.activeUser; requirePermission(actor, 'organization.users.create', 'مجوز ایجاد کاربر را ندارید.'); requirePermission(actor, 'organization.roles.assign', 'مجوز انتساب نقش و ریزمجوز به کاربر را ندارید.'); validateUserInput(input, state); if (!input.password || input.password.length < 8) throw new Error('رمز عبور اولیه باید حداقل ۸ نویسه باشد.');
+    assertDirectAccessAssignmentAllowed(actor, undefined, input.roleIds, input.permissionGrants ?? [], input.permissionDenials ?? [], state.roles, state.session.actingAdminUserId);
     const now = new Date().toISOString(); const id = newId('user'); const primaryRole = state.roles.find((role) => role.id === input.roleIds[0])!;
     const overrides = normalizeUserPermissionOverrides(input, state);
     const created = resolveUserAccess({id, actorId: newId('actor'), name: input.name.trim(), username: input.username.trim().toLowerCase(), passwordHash: await hashPassword(input.password), passwordUpdatedAt: now, roleId: primaryRole.id, roleIds: [...input.roleIds], roles: [], roleTitle: primaryRole.name, status: 'active', isAdmin: false, description: primaryRole.description, companyId: COMPANY_ID, unitId: input.unitId, positionId: input.positionId, branchUnitId: input.branchUnitId, managerUserId: input.managerUserId || undefined, personnelId: input.personnelId, scope: primaryRole.scope, permissions: [], permissionGrants: overrides.grants, permissionDenials: overrides.denials, accent: avatarColor(state.users.length), initials: makeInitials(input.name)}, state.roles);
-    await this.storage.put('users', created); await this.appendAudit({actor, effectiveUser: created, category: 'system', action: 'organization.user.created', summary: `کاربر «${created.name}» ایجاد شد.`, outcome: 'success', metadata: {userId: created.id, username: created.username}}); await this.appendAudit({actor, effectiveUser: created, category: 'system', action: 'organization.role.assigned', summary: `نقش اولیه به کاربر «${created.name}» اختصاص یافت.`, outcome: 'success', metadata: {roleIds: created.roleIds.join(',')}}); return this.loadState();
+    const correlationId = newId('correlation');
+    await this.storage.transaction(['users','security_roles','registration_requests','audit_events','domain_events','meta'], 'readwrite', async (tx) => {
+      const [currentUsers, currentRoles, currentRequests] = await Promise.all([
+        tx.getAll<LocalUser>('users'),
+        tx.getAll<SecurityRole>('security_roles'),
+        tx.getAll<RegistrationRequest>('registration_requests'),
+      ]);
+      if (currentUsers.some((user) => user.username.toLowerCase() === created.username.toLowerCase())) throw new Error('این نام کاربری هم‌زمان ثبت شده است؛ نام دیگری انتخاب کنید.');
+      if (currentRequests.some((request) => !request.linkedUserId && request.requestedUsername.toLowerCase() === created.username.toLowerCase())) throw new Error('این نام کاربری برای یک درخواست ثبت‌نام رزرو شده است.');
+      if (created.personnelId && currentUsers.some((user) => user.personnelId === created.personnelId)) throw new Error('برای این پرونده پرسنلی هم‌زمان حساب دیگری ساخته شده است.');
+      if (created.roleIds.some((roleId) => !currentRoles.some((role) => role.id === roleId && role.status === 'active'))) throw new Error('یکی از نقش‌ها هم‌زمان تغییر کرده یا غیرفعال شده است.');
+      assertDirectAccessAssignmentAllowed(actor, undefined, created.roleIds, created.permissionGrants ?? [], created.permissionDenials ?? [], currentRoles, state.session.actingAdminUserId);
+      const committed = resolveUserAccess(created, currentRoles);
+      const audits = await tx.getAll<AuditEvent>('audit_events');
+      await tx.put('users', committed);
+      await tx.put('audit_events', {id:newId('audit'),sequence:nextSequence(audits),companyId:actor.companyId,category:'authorization',action:'organization.user.created',actorId:actor.actorId,actorName:actor.name,effectiveUserId:committed.id,occurredAt:now,summary:`کاربر «${committed.name}» ایجاد شد.`,outcome:'success',correlationId,metadata:{userId:committed.id,username:committed.username,roleIds:committed.roleIds.join(',')}} satisfies AuditEvent);
+      await tx.put('domain_events', {id:newId('event'),aggregateType:'user',aggregateId:committed.id,eventType:'UserCreated',actorId:actor.actorId,occurredAt:now,correlationId,payload:{roleIds:committed.roleIds}} satisfies DomainEvent);
+      await tx.put('meta',{id:'lastPersistedAt',value:now});
+    });
+    return this.loadState();
   }
 
-  async updateUser(userId: string, input: Partial<UserInput> & {name: string; roleId?: string}): Promise<FoundationState> {
+  async updateUser(userId: string, expectedVersionToken: string, input: Partial<UserInput> & {name: string; roleId?: string}): Promise<FoundationState> {
     const state = await this.loadState(); const actor = state.activeUser; requirePermission(actor, 'foundation.users.edit', 'مجوز ویرایش کاربر را ندارید.'); const existing = state.users.find((user) => user.id === userId); if (!existing) throw new Error('کاربر پیدا نشد.');
     const roleIds = input.roleIds?.length ? input.roleIds : input.roleId ? [input.roleId] : existing.roleIds; const complete: UserInput = {name: input.name, username: input.username ?? existing.username, unitId: input.unitId ?? existing.unitId ?? '', positionId: input.positionId ?? existing.positionId ?? '', branchUnitId: input.branchUnitId ?? existing.branchUnitId, managerUserId: input.managerUserId, roleIds, permissionGrants: input.permissionGrants ?? existing.permissionGrants, permissionDenials: input.permissionDenials ?? existing.permissionDenials}; validateUserInput(complete, state, userId);
     const accessChanged = !sameStrings(existing.roleIds, roleIds)
       || !sameStrings(existing.permissionGrants ?? [], complete.permissionGrants ?? [])
       || !sameStrings(existing.permissionDenials ?? [], complete.permissionDenials ?? []);
     if (accessChanged) requirePermission(actor, 'organization.roles.assign', 'مجوز انتساب نقش و ریزمجوز به کاربر را ندارید.');
+    if (state.session.actingAdminUserId) throw new Error('در حالت مشاهده آزمایشی، ویرایش کاربر مجاز نیست.');
+    if (accessChanged) assertDirectAccessAssignmentAllowed(actor, existing, roleIds, complete.permissionGrants ?? [], complete.permissionDenials ?? [], state.roles, state.session.actingAdminUserId);
     if (existing.isAdmin && !roleIds.includes('role-admin')) throw new Error('نقش پایه ادمین از حساب اصلی قابل حذف نیست.');
     if (existing.isAdmin && ((complete.permissionGrants?.length ?? 0) || (complete.permissionDenials?.length ?? 0))) throw new Error('دسترسی ادمین محافظت‌شده است و استثنای کاربری نمی‌پذیرد.');
     const overrides = normalizeUserPermissionOverrides(complete, state);
     const primaryRole = state.roles.find((role) => role.id === roleIds[0])!; const updated = resolveUserAccess({...existing, name: complete.name.trim(), username: complete.username.trim().toLowerCase(), unitId: complete.unitId, positionId: complete.positionId, managerUserId: complete.managerUserId || undefined, roleId: primaryRole.id, roleIds: [...roleIds], permissionGrants: overrides.grants, permissionDenials: overrides.denials, initials: makeInitials(complete.name)}, state.roles);
-    await this.storage.put('users', updated); await this.appendAudit({actor, effectiveUser: updated, category: 'system', action: 'organization.user.updated', summary: `اطلاعات کاربر «${updated.name}» ویرایش شد.`, outcome: 'success', metadata: {userId, username: updated.username}});
-    const added = roleIds.filter((id) => !existing.roleIds.includes(id)); const removed = existing.roleIds.filter((id) => !roleIds.includes(id)); if (added.length || removed.length) await this.appendAudit({actor, effectiveUser: updated, category: 'system', action: 'organization.role.assignment_changed', summary: `نقش‌های کاربر «${updated.name}» به‌روزرسانی شد.`, outcome: 'success', metadata: {addedRoleIds: added.join(','), removedRoleIds: removed.join(',')}});
-    if (!sameStrings(existing.permissionGrants ?? [], overrides.grants) || !sameStrings(existing.permissionDenials ?? [], overrides.denials)) await this.appendAudit({actor, effectiveUser: updated, category: 'system', action: 'organization.user.permission_overrides_changed', summary: `استثناهای دسترسی کاربر «${updated.name}» به‌روزرسانی شد.`, outcome: 'success', metadata: {grantedPermissions: overrides.grants.join(','), deniedPermissions: overrides.denials.join(','), effectivePermissionCount: updated.permissions.length}});
+    const added = roleIds.filter((id) => !existing.roleIds.includes(id)); const removed = existing.roleIds.filter((id) => !roleIds.includes(id));
+    const overridesChanged = !sameStrings(existing.permissionGrants ?? [], overrides.grants) || !sameStrings(existing.permissionDenials ?? [], overrides.denials);
+    const now = new Date().toISOString(); const correlationId = newId('correlation');
+    await this.storage.transaction(['users','security_roles','registration_requests','audit_events','domain_events','meta'], 'readwrite', async (tx) => {
+      const current = await tx.get<LocalUser>('users', userId);
+      if (!current || userConcurrencyToken(current) !== expectedVersionToken) throw new Error('حساب کاربر در تب دیگری تغییر کرده است؛ تازه‌سازی کنید.');
+      const [currentUsers, currentRoles, currentRequests] = await Promise.all([
+        tx.getAll<LocalUser>('users'),
+        tx.getAll<SecurityRole>('security_roles'),
+        tx.getAll<RegistrationRequest>('registration_requests'),
+      ]);
+      if (currentUsers.some((item) => item.id !== userId && item.username.toLowerCase() === updated.username.toLowerCase())) throw new Error('این نام کاربری هم‌زمان برای حساب دیگری ثبت شده است.');
+      if (currentRequests.some((request) => request.linkedUserId !== userId && request.requestedUsername.toLowerCase() === updated.username.toLowerCase())) throw new Error('این نام کاربری برای یک درخواست ثبت‌نام رزرو شده است.');
+      if (updated.roleIds.some((roleId) => !currentRoles.some((role) => role.id === roleId && role.status === 'active'))) throw new Error('یکی از نقش‌ها هم‌زمان تغییر کرده یا غیرفعال شده است.');
+      if (accessChanged) assertDirectAccessAssignmentAllowed(actor, current, updated.roleIds, updated.permissionGrants ?? [], updated.permissionDenials ?? [], currentRoles, state.session.actingAdminUserId);
+      const committed = resolveUserAccess({...updated, passwordHash: current.passwordHash, passwordUpdatedAt: current.passwordUpdatedAt}, currentRoles);
+      const audits = await tx.getAll<AuditEvent>('audit_events');
+      await tx.put('users', committed);
+      const auditSequence = nextSequence(audits);
+      await tx.put('audit_events', {id:newId('audit'),sequence:auditSequence,companyId:actor.companyId,category:'authorization',action:'organization.user.updated',actorId:actor.actorId,actorName:actor.name,effectiveUserId:committed.id,occurredAt:now,summary:`اطلاعات و دسترسی کاربر «${committed.name}» به‌روزرسانی شد.`,outcome:'success',correlationId,metadata:{userId,username:committed.username,addedRoleIds:added.join(','),removedRoleIds:removed.join(','),grantedPermissions:overridesChanged?overrides.grants.join(','):'',deniedPermissions:overridesChanged?overrides.denials.join(','):''}} satisfies AuditEvent);
+      if (overridesChanged) await tx.put('audit_events', {id:newId('audit'),sequence:auditSequence+1,companyId:actor.companyId,category:'authorization',action:'organization.user.permission_overrides_changed',actorId:actor.actorId,actorName:actor.name,effectiveUserId:committed.id,occurredAt:now,summary:`استثناهای دسترسی کاربر «${committed.name}» به‌روزرسانی شد.`,outcome:'success',correlationId,metadata:{userId,grantedPermissions:overrides.grants.join(','),deniedPermissions:overrides.denials.join(','),effectivePermissionCount:committed.permissions.length}} satisfies AuditEvent);
+      await tx.put('domain_events', {id:newId('event'),aggregateType:'user',aggregateId:userId,eventType:'UserAccessUpdated',actorId:actor.actorId,occurredAt:now,correlationId,payload:{addedRoleIds:added,removedRoleIds:removed,overridesChanged}} satisfies DomainEvent);
+      await tx.put('meta',{id:'lastPersistedAt',value:now});
+    });
     return this.loadState();
   }
 
-  async setUserPassword(userId: string, password: string): Promise<FoundationState> {
-    const state = await this.loadState(); const actor = state.activeUser; requirePermission(actor, 'organization.users.password.manage', 'مجوز تنظیم رمز عبور را ندارید.'); if (password.length < 8) throw new Error('رمز عبور باید حداقل ۸ نویسه باشد.'); const target = state.users.find((user) => user.id === userId); if (!target) throw new Error('کاربر پیدا نشد.'); const updated = {...target, passwordHash: await hashPassword(password), passwordUpdatedAt: new Date().toISOString()}; await this.storage.put('users', updated); await this.appendAudit({actor, effectiveUser: target, category: 'system', action: 'organization.user.password_reset', summary: `رمز عبور کاربر «${target.name}» بازنشانی شد.`, outcome: 'success', metadata: {userId}}); return this.loadState();
+  async setUserPassword(userId: string, expectedVersionToken: string, password: string): Promise<FoundationState> {
+    const state = await this.loadState(); const actor = state.activeUser; requirePermission(actor, 'organization.users.password.manage', 'مجوز تنظیم رمز عبور را ندارید.'); if (password.length < 8) throw new Error('رمز عبور باید حداقل ۸ نویسه باشد.'); const target = state.users.find((user) => user.id === userId); if (!target) throw new Error('کاربر پیدا نشد.'); if (state.session.actingAdminUserId) throw new Error('در حالت مشاهده آزمایشی، بازنشانی رمز مجاز نیست.'); if (target.id === PRIMARY_ADMIN_USER_ID && actor.id !== PRIMARY_ADMIN_USER_ID) throw new Error('رمز حساب اصلی فقط توسط صاحب همان حساب تغییر می‌کند.');
+    const now=new Date().toISOString();const passwordHash=await hashPassword(password);const correlationId=newId('correlation');
+    await this.storage.transaction(['users','audit_events','domain_events','meta'],'readwrite',async(tx)=>{const current=await tx.get<LocalUser>('users',userId);if(!current||userConcurrencyToken(current)!==expectedVersionToken)throw new Error('حساب کاربر در تب دیگری تغییر کرده است؛ تازه‌سازی کنید.');const updated={...current,passwordHash,passwordUpdatedAt:now};const audits=await tx.getAll<AuditEvent>('audit_events');await tx.put('users',updated);await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:actor.companyId,category:'system',action:'organization.user.password_reset',actorId:actor.actorId,actorName:actor.name,effectiveUserId:updated.id,occurredAt:now,summary:`رمز عبور کاربر «${updated.name}» بازنشانی شد.`,outcome:'success',correlationId,metadata:{userId}} satisfies AuditEvent);await tx.put('domain_events',{id:newId('event'),aggregateType:'user',aggregateId:userId,eventType:'UserPasswordReset',actorId:actor.actorId,occurredAt:now,correlationId,payload:{}} satisfies DomainEvent);await tx.put('meta',{id:'lastPersistedAt',value:now});});return this.loadState();
   }
 
-  async changeOwnCredentials(input: SelfCredentialChangeInput): Promise<FoundationState> {
+  async changeOwnCredentials(expectedVersionToken: string, input: SelfCredentialChangeInput): Promise<FoundationState> {
     const state = await this.loadState();
-    const user = state.activeUser;
+    const user = await this.storage.get<LocalUser>('users', state.activeUser.id) ?? state.activeUser;
     if (state.session.actingAdminUserId) throw new Error('در حالت مشاهده دسترسی کاربر، تغییر اطلاعات ورود مجاز نیست؛ با حساب واقعی کاربر وارد شوید.');
     if (user.status !== 'active') throw new Error('حساب غیرفعال امکان تغییر اطلاعات ورود ندارد.');
     if (!await verifyPassword(input.currentPassword, user.passwordHash)) throw new Error('رمز عبور فعلی صحیح نیست.');
@@ -671,31 +754,17 @@ export class LocalFoundationService {
     if (passwordChanged && await verifyPassword(newPassword, user.passwordHash)) throw new Error('رمز عبور جدید باید با رمز فعلی متفاوت باشد.');
 
     const now = new Date().toISOString();
-    const updated: LocalUser = {
-      ...user,
-      username,
-      passwordHash: passwordChanged ? await hashPassword(newPassword) : user.passwordHash,
-      passwordUpdatedAt: passwordChanged ? now : user.passwordUpdatedAt,
-    };
-    await this.storage.put('users', updated);
-    await this.appendAudit({
-      actor: user,
-      effectiveUser: updated,
-      category: 'system',
-      action: 'organization.user.credentials_changed',
-      summary: `اطلاعات ورود حساب «${user.name}» توسط خود کاربر تغییر کرد.`,
-      reason: 'تغییر شخصی اطلاعات ورود پس از تأیید رمز فعلی',
-      outcome: 'success',
-      metadata: {userId: user.id, usernameChanged, passwordChanged, username},
-    });
+    const passwordHash=passwordChanged?await hashPassword(newPassword):user.passwordHash;const correlationId=newId('correlation');
+    await this.storage.transaction(['users','registration_requests','audit_events','domain_events','meta'],'readwrite',async(tx)=>{const current=await tx.get<LocalUser>('users',user.id);if(!current||userConcurrencyToken(current)!==expectedVersionToken)throw new Error('حساب در تب دیگری تغییر کرده است؛ تازه‌سازی کنید.');const [currentUsers,currentRequests,audits]=await Promise.all([tx.getAll<LocalUser>('users'),tx.getAll<RegistrationRequest>('registration_requests'),tx.getAll<AuditEvent>('audit_events')]);if(currentUsers.some((item)=>item.id!==current.id&&item.username.toLowerCase()===username)||currentRequests.some((request)=>request.linkedUserId!==current.id&&request.requestedUsername.toLowerCase()===username))throw new Error('این نام کاربری هم‌زمان استفاده یا رزرو شده است.');const updated={...current,username,passwordHash,passwordUpdatedAt:passwordChanged?now:current.passwordUpdatedAt};await tx.put('users',updated);await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:current.companyId,category:'system',action:'organization.user.credentials_changed',actorId:current.actorId,actorName:current.name,effectiveUserId:current.id,occurredAt:now,summary:`اطلاعات ورود حساب «${current.name}» توسط خود کاربر تغییر کرد.`,reason:'تغییر شخصی اطلاعات ورود پس از تأیید رمز فعلی',outcome:'success',correlationId,metadata:{userId:current.id,usernameChanged,passwordChanged,username}} satisfies AuditEvent);await tx.put('domain_events',{id:newId('event'),aggregateType:'user',aggregateId:current.id,eventType:'UserCredentialsChanged',actorId:current.actorId,occurredAt:now,correlationId,payload:{usernameChanged,passwordChanged}} satisfies DomainEvent);await tx.put('meta',{id:'lastPersistedAt',value:now});});
     return this.loadState();
   }
 
-  async setUserStatus(userId: string, status: UserStatus): Promise<FoundationState> {
+  async setUserStatus(userId: string, expectedVersionToken: string, status: UserStatus): Promise<FoundationState> {
     const state = await this.loadState(); const actor = state.activeUser; requirePermission(actor, 'foundation.users.status.manage', 'مجوز فعال‌سازی یا غیرفعال‌سازی کاربر را ندارید.'); const target = state.users.find((user) => user.id === userId); if (!target) throw new Error('کاربر پیدا نشد.'); if (target.id === actor.id) throw new Error('نمی‌توانید وضعیت حسابی را که با آن وارد شده‌اید تغییر دهید.'); if (target.isAdmin) throw new Error('حساب اصلی ادمین قابل غیرفعال‌سازی نیست.');
+    if (state.session.actingAdminUserId) throw new Error('در حالت مشاهده آزمایشی، تغییر وضعیت حساب مجاز نیست.');
     const linkedPersonnel = state.personnel.find((person) => person.id === target.personnelId || person.linkedUserId === target.id);
     if (status === 'active' && linkedPersonnel && linkedPersonnel.employmentStatus !== 'active') throw new Error('حساب پرسنلی که همکاری فعال ندارد از این بخش فعال نمی‌شود؛ ابتدا «بازگشت به همکاری» را ثبت کنید.');
-    const updated = {...target, status}; await this.storage.put('users', updated); await this.appendAudit({actor, effectiveUser: updated, category: 'system', action: status === 'active' ? 'organization.user.activated' : 'organization.user.deactivated', summary: `کاربر «${target.name}» ${status === 'active' ? 'فعال' : 'غیرفعال'} شد.`, outcome: 'success', metadata: {userId, status}}); return this.loadState();
+    const now=new Date().toISOString();const correlationId=newId('correlation');await this.storage.transaction(['users','personnel','audit_events','domain_events','meta'],'readwrite',async(tx)=>{const current=await tx.get<LocalUser>('users',userId);if(!current||userConcurrencyToken(current)!==expectedVersionToken)throw new Error('حساب کاربر در تب دیگری تغییر کرده است؛ تازه‌سازی کنید.');const currentPersonnelRecords=await tx.getAll<PersonnelRecord>('personnel');const currentPersonnel=currentPersonnelRecords.find((person)=>person.id===current.personnelId||person.linkedUserId===current.id);if(status==='active'&&currentPersonnel&&currentPersonnel.employmentStatus!=='active')throw new Error('حساب پرسنلی که همکاری فعال ندارد از این بخش فعال نمی‌شود؛ ابتدا «بازگشت به همکاری» را ثبت کنید.');const updated={...current,status};const audits=await tx.getAll<AuditEvent>('audit_events');await tx.put('users',updated);await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:actor.companyId,category:'system',action:status==='active'?'organization.user.activated':'organization.user.deactivated',actorId:actor.actorId,actorName:actor.name,effectiveUserId:updated.id,occurredAt:now,summary:`کاربر «${updated.name}» ${status==='active'?'فعال':'غیرفعال'} شد.`,outcome:'success',correlationId,metadata:{userId,status}} satisfies AuditEvent);await tx.put('domain_events',{id:newId('event'),aggregateType:'user',aggregateId:userId,eventType:status==='active'?'UserActivated':'UserDeactivated',actorId:actor.actorId,occurredAt:now,correlationId,payload:{status}} satisfies DomainEvent);await tx.put('meta',{id:'lastPersistedAt',value:now});});return this.loadState();
   }
 
   async createPersonnel(input: PersonnelInput): Promise<FoundationState> {
@@ -713,7 +782,7 @@ export class LocalFoundationService {
     return this.loadState();
   }
 
-  async updatePersonnel(personnelId: string, input: PersonnelInput): Promise<FoundationState> {
+  async updatePersonnel(personnelId: string, expectedUpdatedAt: string, input: PersonnelInput): Promise<FoundationState> {
     const state = await this.loadState(); const actor = state.activeUser;
     requirePermission(actor, 'organization.personnel.manage', 'مجوز ویرایش پرونده پرسنلی را ندارید.');
     const existing = state.personnel.find((item) => item.id === personnelId); if (!existing) throw new Error('پرونده پرسنلی پیدا نشد.');
@@ -733,19 +802,22 @@ export class LocalFoundationService {
       ? createDefaultSalesCompensationRecord({...existing, ...normalized}, now, actor.actorId, actor.name)
       : undefined;
     const updated: PersonnelRecord = {...existing, ...normalized, linkedUserId: existing.linkedUserId, movements: existing.movements ?? [], lifecycleHistory: existing.lifecycleHistory ?? [], pendingLifecycleChange: existing.pendingLifecycleChange, salesCompensationHistory: initialCompensation ? [initialCompensation] : existingCompensation, updatedAt: now};
-    await this.storage.put('personnel', updated);
-    if (existing.linkedUserId) {
-      const linkedUser = state.users.find((item) => item.id === existing.linkedUserId);
-      if (linkedUser) {
-        const managerUserId = state.users.find((item) => item.personnelId === updated.managerPersonnelId)?.id;
-        await this.storage.put('users', resolveUserAccess({...linkedUser, name: `${updated.firstName} ${updated.lastName}`, initials: makeInitials(`${updated.firstName} ${updated.lastName}`), unitId: updated.unitId, positionId: updated.positionId, managerUserId, salesHierarchyLevel: updated.salesHierarchyLevel}, state.roles));
-      }
-    }
     const changedAreas = personnelChangeAreas(existing, updated);
-    await this.appendAudit({actor, effectiveUser: actor, category: 'system', action: 'organization.personnel.updated', summary: `پرونده پرسنلی «${updated.firstName} ${updated.lastName}» ویرایش شد.`, outcome: 'success', metadata: {personnelId, changedAreas: changedAreas.join(',')}});
-    for (const area of changedAreas.filter((item) => ['unit', 'position', 'manager', 'employment'].includes(item))) await this.appendAudit({actor, effectiveUser: actor, category: 'system', action: `organization.personnel.${area}_changed`, summary: `${personnelAreaLabel(area)} «${updated.firstName} ${updated.lastName}» تغییر کرد.`, outcome: 'success', metadata: {personnelId, changedArea: area}});
-    if (changedAreas.includes('sales_hierarchy')) await this.appendAudit({actor, effectiveUser: actor, category: 'system', action: 'organization.personnel.sales_hierarchy_changed', summary: `جایگاه «${updated.firstName} ${updated.lastName}» در شبکه فروش تغییر کرد.`, outcome: 'success', metadata: {personnelId, previousLevel: existing.salesHierarchyLevel ?? '', newLevel: updated.salesHierarchyLevel ?? '', previousSalesStartDate: existing.salesAssignmentStartDate ?? '', newSalesStartDate: updated.salesAssignmentStartDate ?? '', previousSupervisorId: existing.salesSupervisorPersonnelId ?? '', newSupervisorId: updated.salesSupervisorPersonnelId ?? '', previousSalesBranchId: existing.salesBranchUnitId ?? '', newSalesBranchId: updated.salesBranchUnitId ?? '', previousChannel: existing.salesChannel ?? '', newChannel: updated.salesChannel ?? ''}});
-    if (bankingChanged) await this.appendAudit({actor, effectiveUser: actor, category: 'authorization', action: 'organization.personnel.banking_changed', summary: `اطلاعات بانکی پرونده «${updated.firstName} ${updated.lastName}» تغییر کرد.`, outcome: 'success', metadata: {personnelId, bankingChanged: true}});
+    const linkedUser=existing.linkedUserId?state.users.find((item)=>item.id===existing.linkedUserId):undefined;const correlationId=newId('correlation');
+    await this.storage.transaction(['personnel','users','security_roles','audit_events','domain_events','meta'],'readwrite',async(tx)=>{
+      const currentPersonnel=await tx.get<PersonnelRecord>('personnel',personnelId);
+      if(!currentPersonnel||currentPersonnel.updatedAt!==expectedUpdatedAt||existing.updatedAt!==expectedUpdatedAt)throw new Error('پرونده پرسنلی در تب دیگری تغییر کرده است؛ تازه‌سازی کنید.');
+      const [currentUsers,currentRoles,audits]=await Promise.all([tx.getAll<LocalUser>('users'),tx.getAll<SecurityRole>('security_roles'),tx.getAll<AuditEvent>('audit_events')]);
+      let currentLinkedUser:LocalUser|undefined;
+      if(existing.linkedUserId){currentLinkedUser=currentUsers.find((item)=>item.id===existing.linkedUserId);if(!currentLinkedUser||!linkedUser||userConcurrencyToken(currentLinkedUser)!==userConcurrencyToken(linkedUser))throw new Error('حساب مرتبط در تب دیگری تغییر کرده است؛ تازه‌سازی کنید.');const managerUserId=currentUsers.find((item)=>item.personnelId===updated.managerPersonnelId)?.id;currentLinkedUser=resolveUserAccess({...currentLinkedUser,name:`${updated.firstName} ${updated.lastName}`,initials:makeInitials(`${updated.firstName} ${updated.lastName}`),unitId:updated.unitId,positionId:updated.positionId,managerUserId,salesHierarchyLevel:updated.salesHierarchyLevel},currentRoles);}
+      await tx.put('personnel',updated);if(currentLinkedUser)await tx.put('users',currentLinkedUser);
+      const entries:Array<Pick<AuditEvent,'category'|'action'|'summary'|'metadata'>>=[{category:'system',action:'organization.personnel.updated',summary:`پرونده پرسنلی «${updated.firstName} ${updated.lastName}» ویرایش شد.`,metadata:{personnelId,changedAreas:changedAreas.join(',')}}];
+      for(const area of changedAreas.filter((item)=>['unit','position','manager','employment'].includes(item)))entries.push({category:'system',action:`organization.personnel.${area}_changed`,summary:`${personnelAreaLabel(area)} «${updated.firstName} ${updated.lastName}» تغییر کرد.`,metadata:{personnelId,changedArea:area}});
+      if(changedAreas.includes('sales_hierarchy'))entries.push({category:'system',action:'organization.personnel.sales_hierarchy_changed',summary:`جایگاه «${updated.firstName} ${updated.lastName}» در شبکه فروش تغییر کرد.`,metadata:{personnelId,previousLevel:existing.salesHierarchyLevel??'',newLevel:updated.salesHierarchyLevel??'',previousSalesStartDate:existing.salesAssignmentStartDate??'',newSalesStartDate:updated.salesAssignmentStartDate??'',previousSupervisorId:existing.salesSupervisorPersonnelId??'',newSupervisorId:updated.salesSupervisorPersonnelId??'',previousSalesBranchId:existing.salesBranchUnitId??'',newSalesBranchId:updated.salesBranchUnitId??'',previousChannel:existing.salesChannel??'',newChannel:updated.salesChannel??''}});
+      if(bankingChanged)entries.push({category:'authorization',action:'organization.personnel.banking_changed',summary:`اطلاعات بانکی پرونده «${updated.firstName} ${updated.lastName}» تغییر کرد.`,metadata:{personnelId,bankingChanged:true}});
+      let sequence=nextSequence(audits);for(const entry of entries)await tx.put('audit_events',{id:newId('audit'),sequence:sequence++,companyId:actor.companyId,category:entry.category,action:entry.action,actorId:actor.actorId,actorName:actor.name,effectiveUserId:actor.id,occurredAt:now,summary:entry.summary,outcome:'success',correlationId,metadata:entry.metadata} satisfies AuditEvent);
+      await tx.put('domain_events',{id:newId('event'),aggregateType:'personnel',aggregateId:personnelId,eventType:'PersonnelUpdated',actorId:actor.actorId,occurredAt:now,correlationId,payload:{changedAreas}} satisfies DomainEvent);await tx.put('meta',{id:'lastPersistedAt',value:now});
+    });
     return this.loadState();
   }
 
@@ -781,7 +853,7 @@ export class LocalFoundationService {
     if (record.status !== 'requested') throw new Error('فقط درخواست در انتظار بررسی منابع انسانی قابل تأیید است.');
     const person = state.personnel.find((item) => item.id === record.ownerPersonnelId); if (!person) throw new Error('پرونده پرسنلی مرتبط پیدا نشد.');
     const decisionNote = note.trim(); if (decisionNote.length < 3) throw new Error('توضیح تصمیم منابع انسانی الزامی است.');
-    return this.schedulePersonnelEnd(person.id, {effectiveDate: String(record.payload.proposedEmploymentEndDate ?? record.payload.employmentEndDate ?? ''), departureInitiator: record.payload.departureInitiator === 'employee' ? 'employee' : 'organization', reason: String(record.payload.employmentEndReason ?? ''), handoffNotes: record.description || undefined}, this.lifecycleExecutionToken, {recordId, expectedVersion, note: decisionNote});
+    return this.schedulePersonnelEnd(person.id, person.updatedAt, {effectiveDate: String(record.payload.proposedEmploymentEndDate ?? record.payload.employmentEndDate ?? ''), departureInitiator: record.payload.departureInitiator === 'employee' ? 'employee' : 'organization', reason: String(record.payload.employmentEndReason ?? ''), handoffNotes: record.description || undefined}, this.lifecycleExecutionToken, {recordId, expectedVersion, note: decisionNote});
   }
 
   async cancelPersonnelEndRequest(personnelId: string, reason: string, expectedVersion?: number): Promise<FoundationState> {
@@ -804,7 +876,7 @@ export class LocalFoundationService {
     return this.loadState();
   }
 
-  async schedulePersonnelEnd(personnelId: string, input: PersonnelEndInput, executionToken?: symbol, approval?: {recordId: string; expectedVersion: number; note: string}): Promise<FoundationState> {
+  async schedulePersonnelEnd(personnelId: string, expectedUpdatedAt: string, input: PersonnelEndInput, executionToken?: symbol, approval?: {recordId: string; expectedVersion: number; note: string}): Promise<FoundationState> {
     const state = await this.loadState(); const actor = state.activeUser;
     if (!actor.isAdmin && executionToken !== this.lifecycleExecutionToken) throw new Error('اجرای مستقیم پایان همکاری فقط مسیر اضطراری ادمین است؛ منابع انسانی باید درخواست مستقل بسازد و تأییدکننده دیگری آن را تصویب کند.');
     const person = state.personnel.find((item) => item.id === personnelId); if (!person) throw new Error('پرونده پرسنلی پیدا نشد.');
@@ -836,18 +908,18 @@ export class LocalFoundationService {
     const history: OperationalRecordHistory = approvalRecord
       ? this.makeHistory(state, offboarding, actor, 'transitioned', {fromState: approvalRecord.status, toState: targetStatus, reason: approval?.note ?? reason, snapshot: {personnelId, effectiveDate, immediate}})
       : {id: newId('history'), recordId: offboarding.id, moduleId: offboarding.moduleId, sequence: 1, eventType: 'created', actorId: actor.actorId, actorName: actor.name, effectiveUserId: actor.id, reason, snapshot: {personnelId, effectiveDate, immediate}, occurredAt: now};
-    const updatedUser = immediate && linkedUser && !linkedUser.isAdmin ? {...linkedUser, status: 'inactive' as const} : undefined;
+    const shouldDisableLinkedUser = Boolean(immediate && linkedUser);
     const auditActor = await this.resolveAuditActor(actor); const correlationId = newId('correlation');
     await this.storage.transaction(['personnel', 'users', 'offboarding_cases', 'workflow_history', 'audit_events', 'domain_events', 'meta'], 'readwrite', async (tx) => {
       const latestPerson = await tx.get<PersonnelRecord>('personnel', person.id);
-      if (!latestPerson || latestPerson.updatedAt !== person.updatedAt || latestPerson.employmentStatus !== person.employmentStatus) throw new Error('پرونده پرسنلی هم‌زمان تغییر کرده است؛ صفحه را تازه کنید.');
+      if (!latestPerson || latestPerson.updatedAt !== expectedUpdatedAt || person.updatedAt !== expectedUpdatedAt || latestPerson.employmentStatus !== person.employmentStatus) throw new Error('پرونده پرسنلی هم‌زمان تغییر کرده است؛ صفحه را تازه کنید.');
       if (approvalRecord) {
         const latestRequest = await tx.get<OperationalRecord>('offboarding_cases', approvalRecord.id);
         if (!latestRequest || latestRequest.version !== approvalRecord.version || latestRequest.status !== 'requested') throw new Error('درخواست پایان همکاری هم‌زمان تغییر کرده است؛ صفحه را تازه کنید.');
       }
       const audits = await tx.getAll<AuditEvent>('audit_events');
       await tx.put('personnel', updated);
-      if (updatedUser) await tx.put('users', updatedUser);
+      if (shouldDisableLinkedUser && linkedUser) {const currentUser=await tx.get<LocalUser>('users',linkedUser.id);if(!currentUser||userConcurrencyToken(currentUser)!==userConcurrencyToken(linkedUser))throw new Error('حساب مرتبط در تب دیگری تغییر کرده است؛ تازه‌سازی کنید.');if(currentUser.isAdmin)throw new Error('پایان همکاری مستقیم برای حساب ادمین اصلی مجاز نیست.');await tx.put('users',{...currentUser,status:'inactive'});}
       await tx.put('offboarding_cases', offboarding);
       await tx.put('workflow_history', history);
       await tx.put('audit_events', {id: newId('audit'), sequence: nextSequence(audits), companyId: actor.companyId, category: 'system', action: immediate ? 'organization.personnel.employment_ended' : 'organization.personnel.employment_end_scheduled', actorId: auditActor.actorId, actorName: auditActor.name, effectiveUserId: actor.id, occurredAt: now, summary: immediate ? `${input.departureInitiator === 'employee' ? 'استعفای' : 'قطع همکاری'} «${person.firstName} ${person.lastName}» ثبت و حساب او غیرفعال شد.` : `${input.departureInitiator === 'employee' ? 'استعفا' : 'قطع همکاری'} برای «${person.firstName} ${person.lastName}» در تاریخ ${effectiveDate} زمان‌بندی شد.`, reason, outcome: 'success', correlationId, metadata: {personnelId, effectiveDate, immediate, departureInitiator: input.departureInitiator, linkedUserId: linkedUser?.id ?? '', offboardingRecordId: offboarding.id}} satisfies AuditEvent);
@@ -857,7 +929,7 @@ export class LocalFoundationService {
     return this.loadState();
   }
 
-  async cancelPersonnelEnd(personnelId: string, reason: string): Promise<FoundationState> {
+  async cancelPersonnelEnd(personnelId: string, expectedUpdatedAt: string, reason: string): Promise<FoundationState> {
     const state = await this.loadState(); const actor = state.activeUser;
     requirePermission(actor, 'organization.personnel.manage', 'مجوز لغو پایان همکاری را ندارید.');
     const person = state.personnel.find((item) => item.id === personnelId); if (!person) throw new Error('پرونده پرسنلی پیدا نشد.');
@@ -865,12 +937,12 @@ export class LocalFoundationService {
     if (reason.trim().length < 3) throw new Error('دلیل لغو پایان همکاری الزامی است.');
     const now = new Date().toISOString();
     const event = {id: newId('employment-event'), kind: 'employment_end_cancelled' as const, effectiveDate: person.pendingLifecycleChange.effectiveDate, reason: reason.trim(), actorId: actor.actorId, actorName: actor.name, recordedAt: now};
-    await this.storage.put('personnel', {...person, employmentStatus: 'active', endDate: undefined, pendingLifecycleChange: undefined, lifecycleHistory: [...(person.lifecycleHistory ?? []), event], updatedAt: now});
-    await this.appendAudit({actor, effectiveUser: actor, category: 'system', action: 'organization.personnel.employment_end_cancelled', summary: `پایان همکاری زمان‌بندی‌شده «${person.firstName} ${person.lastName}» لغو شد.`, reason: reason.trim(), outcome: 'success', metadata: {personnelId}});
+    const updated={...person,employmentStatus:'active' as const,endDate:undefined,pendingLifecycleChange:undefined,lifecycleHistory:[...(person.lifecycleHistory??[]),event],updatedAt:now};const correlationId=newId('correlation');
+    await this.storage.transaction(['personnel','audit_events','domain_events','meta'],'readwrite',async(tx)=>{const current=await tx.get<PersonnelRecord>('personnel',personnelId);if(!current||current.updatedAt!==expectedUpdatedAt||person.updatedAt!==expectedUpdatedAt||current.pendingLifecycleChange?.scheduledAt!==person.pendingLifecycleChange?.scheduledAt)throw new Error('پرونده پرسنلی در تب دیگری تغییر کرده است؛ تازه‌سازی کنید.');const audits=await tx.getAll<AuditEvent>('audit_events');await tx.put('personnel',updated);await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:actor.companyId,category:'system',action:'organization.personnel.employment_end_cancelled',actorId:actor.actorId,actorName:actor.name,effectiveUserId:actor.id,occurredAt:now,summary:`پایان همکاری زمان‌بندی‌شده «${person.firstName} ${person.lastName}» لغو شد.`,reason:reason.trim(),outcome:'success',correlationId,metadata:{personnelId}} satisfies AuditEvent);await tx.put('domain_events',{id:newId('event'),aggregateType:'personnel-lifecycle',aggregateId:personnelId,eventType:'PersonnelEndCancelled',actorId:actor.actorId,occurredAt:now,correlationId,payload:{}} satisfies DomainEvent);await tx.put('meta',{id:'lastPersistedAt',value:now});});
     return this.loadState();
   }
 
-  async rehirePersonnel(personnelId: string, input: PersonnelRehireInput): Promise<FoundationState> {
+  async rehirePersonnel(personnelId: string, expectedUpdatedAt: string, input: PersonnelRehireInput): Promise<FoundationState> {
     const state = await this.loadState(); const actor = state.activeUser;
     requirePermission(actor, 'organization.personnel.manage', 'مجوز ثبت بازگشت به همکاری را ندارید.');
     const person = state.personnel.find((item) => item.id === personnelId); if (!person) throw new Error('پرونده پرسنلی پیدا نشد.');
@@ -882,19 +954,41 @@ export class LocalFoundationService {
     const targetPosition = state.positions.find((position) => position.id === input.positionId && position.status === 'active');
     if (!targetPosition || !positionSupportsUnit(targetPosition, input.unitId)) throw new Error('سمت انتخاب‌شده برای واحد دوره همکاری جدید مجاز نیست.');
     const linkedUser = state.users.find((user) => user.id === person.linkedUserId);
+    if (linkedUser) requirePermission(actor, 'organization.roles.assign', 'برای فعال‌سازی دوباره حساب، تأیید مدیر دسترسی و مجوز انتساب نقش لازم است.');
     if (linkedUser && !input.roleIds.length) throw new Error('برای فعال‌شدن دوباره حساب، حداقل یک نقش جدید انتخاب کنید؛ نقش‌های قبلی خودکار برنمی‌گردند.');
     if (input.roleIds.some((id) => !state.roles.some((role) => role.id === id && role.status === 'active'))) throw new Error('یکی از نقش‌های انتخاب‌شده فعال یا معتبر نیست.');
+    if (linkedUser) assertDirectAccessAssignmentAllowed(actor, linkedUser, input.roleIds, [], [], state.roles, state.session.actingAdminUserId);
     const now = new Date().toISOString(); const immediate = effectiveDate === currentLocalDate();
     const lifecycleData = {effectiveDate, reason, employmentType: input.employmentType.trim(), unitId: input.unitId, positionId: input.positionId, branchUnitId: input.branchUnitId, managerPersonnelId: input.managerPersonnelId, roleIds: [...new Set(input.roleIds)]};
     const event = {id: newId('employment-event'), kind: immediate ? 'rehired' as const : 'rehire_scheduled' as const, ...lifecycleData, actorId: actor.actorId, actorName: actor.name, recordedAt: now};
     const updated: PersonnelRecord = immediate ? {...person, employmentStatus: 'active', startDate: effectiveDate, endDate: undefined, employmentType: lifecycleData.employmentType, unitId: input.unitId, positionId: input.positionId, branchUnitId: input.branchUnitId, managerPersonnelId: input.managerPersonnelId, pendingLifecycleChange: undefined, lifecycleHistory: [...(person.lifecycleHistory ?? []), event], updatedAt: now} : {...person, employmentStatus: 'rehire_scheduled', pendingLifecycleChange: {kind: 'rehire', ...lifecycleData, scheduledByActorId: actor.actorId, scheduledByActorName: actor.name, scheduledAt: now}, lifecycleHistory: [...(person.lifecycleHistory ?? []), event], updatedAt: now};
-    await this.storage.put('personnel', updated);
+    let updatedLinkedUser: LocalUser | undefined;
     if (immediate && linkedUser) {
       const managerUserId = state.users.find((user) => user.personnelId === input.managerPersonnelId)?.id;
       const roleIds = lifecycleData.roleIds; const roleId = roleIds[0];
-      await this.storage.put('users', resolveUserAccess({...linkedUser, status: 'active', roleId, roleIds, unitId: input.unitId, positionId: input.positionId, branchUnitId: input.branchUnitId, managerUserId}, state.roles));
+      updatedLinkedUser = resolveUserAccess({...linkedUser, status: 'active', roleId, roleIds, unitId: input.unitId, positionId: input.positionId, branchUnitId: input.branchUnitId, managerUserId}, state.roles);
     }
-    await this.appendAudit({actor, effectiveUser: actor, category: 'system', action: immediate ? 'organization.personnel.rehired' : 'organization.personnel.rehire_scheduled', summary: immediate ? `بازگشت به همکاری «${person.firstName} ${person.lastName}» ثبت و حساب او با نقش‌های جدید فعال شد.` : `بازگشت به همکاری «${person.firstName} ${person.lastName}» برای ${effectiveDate} زمان‌بندی شد.`, reason, outcome: 'success', metadata: {personnelId, effectiveDate, immediate, roleIds: lifecycleData.roleIds.join(',')}});
+    const action = immediate ? 'organization.personnel.rehired' : 'organization.personnel.rehire_scheduled';
+    const summary = immediate ? `بازگشت به همکاری «${person.firstName} ${person.lastName}» ثبت و حساب او با نقش‌های جدید فعال شد.` : `بازگشت به همکاری «${person.firstName} ${person.lastName}» برای ${effectiveDate} زمان‌بندی شد.`;
+    const correlationId = newId('correlation');
+    await this.storage.transaction(['personnel','users','security_roles','audit_events','domain_events','meta'], 'readwrite', async (tx) => {
+      const current = await tx.get<PersonnelRecord>('personnel', personnelId);
+      if (!current || current.updatedAt !== expectedUpdatedAt || person.updatedAt !== expectedUpdatedAt || current.employmentStatus !== 'ended') throw new Error('پرونده پرسنلی در تب دیگری تغییر کرده است؛ تازه‌سازی کنید.');
+      const [currentRoles,currentUsers] = await Promise.all([tx.getAll<SecurityRole>('security_roles'),tx.getAll<LocalUser>('users')]);
+      if (lifecycleData.roleIds.some((id)=>!currentRoles.some((role)=>role.id===id&&role.status==='active'))) throw new Error('یکی از نقش‌های انتخاب‌شده هم‌زمان تغییر کرده یا غیرفعال شده است؛ تازه‌سازی کنید.');
+      if (linkedUser) {
+        const currentUser=await tx.get<LocalUser>('users',linkedUser.id);
+        if(!currentUser||userMutationFingerprint(currentUser)!==userMutationFingerprint(linkedUser))throw new Error('حساب مرتبط در تب دیگری تغییر کرده است؛ تازه‌سازی کنید.');
+        assertDirectAccessAssignmentAllowed(actor,currentUser,lifecycleData.roleIds,[],[],currentRoles,state.session.actingAdminUserId);
+        if(immediate){const managerUserId=currentUsers.find((user)=>user.personnelId===input.managerPersonnelId)?.id;const roleId=lifecycleData.roleIds[0];updatedLinkedUser=resolveUserAccess({...currentUser,status:'active',roleId,roleIds:lifecycleData.roleIds,unitId:input.unitId,positionId:input.positionId,branchUnitId:input.branchUnitId,managerUserId},currentRoles);}
+      }
+      const audits = await tx.getAll<AuditEvent>('audit_events');
+      await tx.put('personnel', updated);
+      if (updatedLinkedUser) await tx.put('users', updatedLinkedUser);
+      await tx.put('audit_events', {id:newId('audit'), sequence:nextSequence(audits), companyId:actor.companyId, category:'authorization', action, actorId:actor.actorId, actorName:actor.name, effectiveUserId:updatedLinkedUser?.id ?? actor.id, occurredAt:now, summary, reason, outcome:'success', correlationId, metadata:{personnelId,effectiveDate,immediate,roleIds:lifecycleData.roleIds.join(',')}} satisfies AuditEvent);
+      await tx.put('domain_events', {id:newId('event'), aggregateType:'personnel', aggregateId:personnelId, eventType:immediate?'PersonnelRehired':'PersonnelRehireScheduled', actorId:actor.actorId, occurredAt:now, correlationId, payload:{linkedUserId:updatedLinkedUser?.id ?? null,roleIds:lifecycleData.roleIds}} satisfies DomainEvent);
+      await tx.put('meta', {id:'lastPersistedAt',value:now});
+    });
     return this.loadState();
   }
 
@@ -1154,6 +1248,7 @@ export class LocalFoundationService {
   async changePersonnelAssignment(personnelId: string, input: PersonnelAssignmentChangeInput): Promise<FoundationState> {
     const state = await this.loadState(); const actor = state.activeUser;
     requirePermission(actor, 'organization.personnel.manage', 'مجوز ثبت تغییر جایگاه پرسنل را ندارید.');
+    if (state.session.actingAdminUserId) throw new Error('در حالت مشاهده آزمایشی، تغییر جایگاه پرسنل مجاز نیست.');
     const existing = state.personnel.find((item) => item.id === personnelId); if (!existing) throw new Error('پرونده پرسنلی پیدا نشد.');
     if (existing.employmentStatus !== 'active') throw new Error('برای پرسنل خاتمه‌یافته نمی‌توان تغییر جایگاه ثبت کرد.');
     if (!input.reason.trim()) throw new Error('ثبت دلیل تغییر الزامی است.');
@@ -1204,7 +1299,7 @@ export class LocalFoundationService {
         : input.kind === 'unit_change'
           ? {...existing, unitId: input.targetId, positionId: input.targetPositionId!, movements: [...(existing.movements ?? []), movement, ...(positionMovement ? [positionMovement] : [])], updatedAt: now}
           : {...existing, [field]: input.targetId, movements: [...(existing.movements ?? []), movement], updatedAt: now};
-    await this.storage.put('personnel', updated);
+    let updatedLinkedUser: LocalUser | undefined;
     if (existing.linkedUserId) {
       const linkedUser = state.users.find((item) => item.id === existing.linkedUserId);
       if (linkedUser) {
@@ -1214,7 +1309,7 @@ export class LocalFoundationService {
           : input.kind === 'unit_change'
             ? {...linkedUser, unitId: input.targetId, positionId: input.targetPositionId}
             : {...linkedUser, [field]: input.targetId};
-        await this.storage.put('users', resolveUserAccess(linkedUpdate, state.roles));
+        updatedLinkedUser = resolveUserAccess(linkedUpdate, state.roles);
       }
     }
 
@@ -1226,23 +1321,45 @@ export class LocalFoundationService {
       : input.kind === 'branch_transfer'
       ? `انتقال شعبه «${existing.firstName} ${existing.lastName}» از «${sourceName}» به «${targetName}» ثبت شد.`
       : `${input.kind === 'unit_change' ? 'تغییر واحد' : 'تغییر سمت'} «${existing.firstName} ${existing.lastName}» از «${sourceName}» به «${targetName}» ثبت شد.`;
-    await this.appendAudit({actor, effectiveUser: actor, category: 'system', action, summary, reason: input.reason.trim(), outcome: 'success', metadata: {personnelId, movementId: movement.id, positionMovementId: positionMovement?.id ?? '', kind: input.kind, fromId: fromId ?? '', toId: input.targetId, targetPositionId: input.targetPositionId ?? '', effectiveDate: input.effectiveDate, previousEndedAt: movement.previousEndedAt ?? '', newStartedAt: movement.newStartedAt ?? ''}});
+    const correlationId = newId('correlation');
+    await this.storage.transaction(['personnel', 'users', 'security_roles', 'audit_events', 'domain_events', 'meta'], 'readwrite', async (tx) => {
+      const current = await tx.get<PersonnelRecord>('personnel', personnelId);
+      if (!current || current.updatedAt !== existing.updatedAt) throw new Error('پرونده پرسنلی در تب دیگری تغییر کرده است؛ تازه‌سازی کنید.');
+      let committedLinkedUser = updatedLinkedUser;
+      if (updatedLinkedUser && existing.linkedUserId) {
+        const currentUser = await tx.get<LocalUser>('users', existing.linkedUserId);
+        if (!currentUser || userConcurrencyToken(currentUser) !== userConcurrencyToken(state.users.find((item) => item.id === existing.linkedUserId)!)) throw new Error('حساب مرتبط در تب دیگری تغییر کرده است؛ تازه‌سازی کنید.');
+        const currentRoles = await tx.getAll<SecurityRole>('security_roles');
+        committedLinkedUser = resolveUserAccess({...currentUser, unitId: updatedLinkedUser.unitId, positionId: updatedLinkedUser.positionId, branchUnitId: updatedLinkedUser.branchUnitId, managerUserId: updatedLinkedUser.managerUserId}, currentRoles);
+      }
+      const audits = await tx.getAll<AuditEvent>('audit_events');
+      await tx.put('personnel', updated);
+      if (committedLinkedUser) await tx.put('users', committedLinkedUser);
+      await tx.put('audit_events', {id: newId('audit'), sequence: nextSequence(audits), companyId: actor.companyId, category: 'system', action, actorId: actor.actorId, actorName: actor.name, effectiveUserId: actor.id, occurredAt: now, summary, reason: input.reason.trim(), outcome: 'success', correlationId, metadata: {personnelId, linkedUserId: updatedLinkedUser?.id ?? '', movementId: movement.id, positionMovementId: positionMovement?.id ?? '', kind: input.kind, fromId: fromId ?? '', toId: input.targetId, targetPositionId: input.targetPositionId ?? '', effectiveDate: input.effectiveDate, previousEndedAt: movement.previousEndedAt ?? '', newStartedAt: movement.newStartedAt ?? ''}} satisfies AuditEvent);
+      await tx.put('domain_events', {id: newId('event'), aggregateType: 'personnel', aggregateId: personnelId, eventType: 'PersonnelAssignmentChanged', actorId: actor.actorId, occurredAt: now, correlationId, payload: {kind: input.kind, fromId: fromId ?? null, toId: input.targetId, linkedUserId: updatedLinkedUser?.id ?? null}} satisfies DomainEvent);
+      await tx.put('meta', {id: 'lastPersistedAt', value: now});
+    });
     return this.loadState();
   }
 
   async createUserForPersonnel(personnelId: string, input: {username: string; password: string; roleIds: string[]; status?: UserStatus}): Promise<FoundationState> {
     const state = await this.loadState(); const actor = state.activeUser;
     requirePermission(actor, 'organization.personnel.account.manage', 'مجوز ایجاد حساب کاربری برای پرسنل را ندارید.');
+    requirePermission(actor, 'organization.users.create', 'مجوز ایجاد کاربر را ندارید.');
+    requirePermission(actor, 'organization.roles.assign', 'مجوز انتساب نقش به حساب تازه را ندارید.');
     const record = state.personnel.find((item) => item.id === personnelId); if (!record) throw new Error('پرونده پرسنلی پیدا نشد.');
     if (record.linkedUserId || state.users.some((item) => item.personnelId === personnelId)) throw new Error('این پرسنل قبلاً به یک حساب کاربری متصل شده است.');
     if (record.employmentStatus !== 'active') throw new Error('برای پرسنل خاتمه‌یافته نمی‌توان حساب فعال ایجاد کرد.');
     const managerUserId = state.users.find((user) => user.personnelId === record.managerPersonnelId)?.id;
-    const createdState = await this.createUser({name: `${record.firstName} ${record.lastName}`, username: input.username, password: input.password, roleIds: input.roleIds, unitId: record.unitId, positionId: record.positionId, branchUnitId: record.branchUnitId, managerUserId, personnelId});
-    const created = createdState.users.find((user) => user.personnelId === personnelId); if (!created) throw new Error('ایجاد حساب کاربری کامل نشد.');
-    if (record.salesHierarchyLevel) await this.storage.put('users', {...created, salesHierarchyLevel: record.salesHierarchyLevel});
-    await this.storage.put('personnel', {...record, linkedUserId: created.id, updatedAt: new Date().toISOString()});
-    if (input.status === 'inactive') await this.storage.put('users', {...created, status: 'inactive'});
-    await this.appendAudit({actor, effectiveUser: created, category: 'system', action: 'organization.personnel.user_linked', summary: `حساب کاربری به پرونده پرسنلی «${record.firstName} ${record.lastName}» متصل شد.`, outcome: 'success', metadata: {personnelId, userId: created.id, status: input.status ?? 'active'}});
+    const name=`${record.firstName} ${record.lastName}`.trim();
+    const userInput:UserInput={name,username:input.username,password:input.password,roleIds:input.roleIds,unitId:record.unitId,positionId:record.positionId,branchUnitId:record.branchUnitId,managerUserId,personnelId};
+    validateUserInput(userInput,state);
+    if(input.password.length<8)throw new Error('رمز عبور اولیه باید حداقل ۸ نویسه باشد.');
+    assertDirectAccessAssignmentAllowed(actor,undefined,input.roleIds,[],[],state.roles,state.session.actingAdminUserId);
+    const now=new Date().toISOString();const userId=newId('user');const primary=state.roles.find((role)=>role.id===input.roleIds[0])!;
+    const created=resolveUserAccess({id:userId,actorId:newId('actor'),name,username:input.username.trim().toLowerCase(),passwordHash:await hashPassword(input.password),passwordUpdatedAt:now,roleId:primary.id,roleIds:[...input.roleIds],roles:[],roleTitle:primary.name,status:input.status??'active',isAdmin:false,description:primary.description,companyId:record.companyId??COMPANY_ID,unitId:record.unitId,positionId:record.positionId,branchUnitId:record.branchUnitId,managerUserId,personnelId,scope:primary.scope,permissions:[],accent:avatarColor(state.users.length),initials:makeInitials(name),salesHierarchyLevel:record.salesHierarchyLevel},state.roles);
+    const linkedPersonnel={...record,linkedUserId:userId,updatedAt:now};const correlationId=newId('correlation');
+    await this.storage.transaction(['users','personnel','security_roles','registration_requests','audit_events','domain_events','meta'],'readwrite',async(tx)=>{const current=await tx.get<PersonnelRecord>('personnel',personnelId);if(!current||current.updatedAt!==record.updatedAt||current.linkedUserId)throw new Error('پرونده پرسنلی در تب دیگری تغییر کرده است؛ تازه‌سازی کنید.');const [currentUsers,currentRoles,currentRequests]=await Promise.all([tx.getAll<LocalUser>('users'),tx.getAll<SecurityRole>('security_roles'),tx.getAll<RegistrationRequest>('registration_requests')]);if(currentUsers.some((item)=>item.username.toLowerCase()===created.username.toLowerCase())||currentRequests.some((request)=>!request.linkedUserId&&request.requestedUsername.toLowerCase()===created.username.toLowerCase()))throw new Error('نام کاربری هم‌زمان استفاده یا رزرو شده است.');if(created.roleIds.some((roleId)=>!currentRoles.some((role)=>role.id===roleId&&role.status==='active')))throw new Error('یکی از نقش‌ها هم‌زمان تغییر کرده یا غیرفعال شده است.');assertDirectAccessAssignmentAllowed(actor,undefined,created.roleIds,[],[],currentRoles,state.session.actingAdminUserId);const committed=resolveUserAccess(created,currentRoles);const audits=await tx.getAll<AuditEvent>('audit_events');await tx.put('users',committed);await tx.put('personnel',linkedPersonnel);await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:actor.companyId,category:'authorization',action:'organization.personnel.user_linked',actorId:actor.actorId,actorName:actor.name,effectiveUserId:userId,occurredAt:now,summary:`حساب کاربری به پرونده پرسنلی «${name}» متصل شد.`,outcome:'success',correlationId,metadata:{personnelId,userId,status:committed.status,roleIds:committed.roleIds.join(',')}} satisfies AuditEvent);await tx.put('domain_events',{id:newId('event'),aggregateType:'personnel',aggregateId:personnelId,eventType:'PersonnelUserLinked',actorId:actor.actorId,occurredAt:now,correlationId,payload:{userId,roleIds:committed.roleIds}} satisfies DomainEvent);await tx.put('meta',{id:'lastPersistedAt',value:now});});
     return this.loadState();
   }
 
@@ -1319,45 +1436,36 @@ export class LocalFoundationService {
     return this.loadState();
   }
 
-  async createRole(input: RoleInput): Promise<FoundationState> { const state = await this.loadState(); const actor = state.activeUser; requirePermission(actor, 'organization.roles.manage', 'مجوز ایجاد نقش را ندارید.'); validateRoleInput(input, state.roles); const now = new Date().toISOString(); const role: SecurityRole = {id: newId('role'), name: input.name.trim(), description: input.description.trim(), scope: input.scope, permissions: [...new Set(input.permissions)], status: 'active', protected: false, version: 1, createdAt: now, updatedAt: now}; await this.storage.put('security_roles', role); await this.storage.put('role_versions', {...role, id: `${role.id}-v1`, roleId: role.id}); await this.appendAudit({actor, effectiveUser: actor, category: 'system', action: 'organization.role.created', summary: `نقش دسترسی «${role.name}» ایجاد شد.`, outcome: 'success', metadata: {roleId: role.id, permissionCount: role.permissions.length, version: 1}}); return this.loadState(); }
+async createRole(input: RoleInput): Promise<FoundationState> { const state = await this.loadState(); const actor = state.activeUser; requirePermission(actor, 'organization.roles.manage', 'مجوز ایجاد نقش را ندارید.'); assertRoleDefinitionAllowed(actor, input.permissions, state.session.actingAdminUserId); validateRoleInput(input, state.roles); const now = new Date().toISOString(); const role: SecurityRole = {id: newId('role'), name: input.name.trim(), description: input.description.trim(), scope: input.scope, permissions: [...new Set(input.permissions)], status: 'active', protected: false, version: 1, createdAt: now, updatedAt: now}; const correlationId=newId('correlation'); await this.storage.transaction(['security_roles','role_versions','audit_events','domain_events','meta'],'readwrite',async(tx)=>{const currentRoles=await tx.getAll<SecurityRole>('security_roles');if(currentRoles.some((item)=>item.name.trim().toLocaleLowerCase('fa-IR')===role.name.trim().toLocaleLowerCase('fa-IR')))throw new Error('نقشی با این نام هم‌زمان ساخته شده است.');const audits=await tx.getAll<AuditEvent>('audit_events');await tx.put('security_roles',role);await tx.put('role_versions',{...role,id:`${role.id}-v1`,roleId:role.id});await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:actor.companyId,category:'authorization',action:'organization.role.created',actorId:actor.actorId,actorName:actor.name,effectiveUserId:actor.id,occurredAt:now,summary:`نقش دسترسی «${role.name}» ایجاد شد.`,outcome:'success',correlationId,metadata:{roleId:role.id,permissionCount:role.permissions.length,version:1}} satisfies AuditEvent);await tx.put('domain_events',{id:newId('event'),aggregateType:'role',aggregateId:role.id,eventType:'RoleCreated',actorId:actor.actorId,occurredAt:now,correlationId,payload:{permissionCount:role.permissions.length}} satisfies DomainEvent);await tx.put('meta',{id:'lastPersistedAt',value:now});}); return this.loadState(); }
 
-  async updateRole(roleId: string, input: RoleInput): Promise<FoundationState> { const state = await this.loadState(); const actor = state.activeUser; requirePermission(actor, 'organization.roles.manage', 'مجوز ویرایش نقش را ندارید.'); const existing = state.roles.find((role) => role.id === roleId); if (!existing) throw new Error('نقش پیدا نشد.'); validateRoleInput(input, state.roles, roleId); const updated: SecurityRole = {...existing, name: input.name.trim(), description: input.description.trim(), scope: input.scope, permissions: [...new Set(input.permissions)], version: (existing.version ?? 1) + 1, updatedAt: new Date().toISOString()}; await this.storage.transaction(['security_roles','role_versions'], 'readwrite', async (tx)=>{await tx.put('role_versions', {...existing, id: `${existing.id}-v${existing.version??1}`, roleId: existing.id}); await tx.put('security_roles', updated);}); await this.refreshUsersForRole(updated.id, state.users, state.roles.map((role) => role.id === updated.id ? updated : role)); await this.appendAudit({actor, effectiveUser: actor, category: 'system', action: 'organization.role.updated', summary: `نقش «${updated.name}» ویرایش و نسخه جدید منتشر شد.`, outcome: 'success', metadata: {roleId, permissionCount: updated.permissions.length, version: updated.version??1}}); if (!sameStrings(existing.permissions, updated.permissions)) await this.appendAudit({actor, effectiveUser: actor, category: 'authorization', action: 'organization.role.permissions_changed', summary: `مجوزهای نقش «${updated.name}» تغییر کرد.`, outcome: 'success', metadata: {roleId, beforeCount: existing.permissions.length, afterCount: updated.permissions.length}}); return this.loadState(); }
+async updateRole(roleId: string, expectedVersion: number, input: RoleInput): Promise<FoundationState> { const state = await this.loadState(); const actor = state.activeUser; requirePermission(actor, 'organization.roles.manage', 'مجوز ویرایش نقش را ندارید.'); const existing = state.roles.find((role) => role.id === roleId); if (!existing) throw new Error('نقش پیدا نشد.'); assertProtectedRoleMutationAllowed(actor, existing, state.session.actingAdminUserId); assertRoleDefinitionAllowed(actor, input.permissions, state.session.actingAdminUserId); validateRoleInput(input, state.roles, roleId); const now=new Date().toISOString(); const updated: SecurityRole = {...existing, name: input.name.trim(), description: input.description.trim(), scope: input.scope, permissions: [...new Set(input.permissions)], version: (existing.version ?? 1) + 1, updatedAt: now}; const affectedUserCount=state.users.filter((user)=>user.roleIds.includes(roleId)).length; const correlationId=newId('correlation'); await this.storage.transaction(['security_roles','role_versions','audit_events','domain_events','meta'],'readwrite',async(tx)=>{const current=await tx.get<SecurityRole>('security_roles',roleId);if(!current||(current.version??1)!==expectedVersion||(existing.version??1)!==expectedVersion)throw new Error('نقش در تب دیگری تغییر کرده است؛ تازه‌سازی کنید.');const currentRoles=await tx.getAll<SecurityRole>('security_roles');if(currentRoles.some((item)=>item.id!==roleId&&item.name.trim().toLocaleLowerCase('fa-IR')===updated.name.trim().toLocaleLowerCase('fa-IR')))throw new Error('نقش دیگری هم‌زمان با این نام ذخیره شده است.');const audits=await tx.getAll<AuditEvent>('audit_events');await tx.put('role_versions',{...existing,id:`${existing.id}-v${existing.version??1}`,roleId:existing.id});await tx.put('security_roles',updated);await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:actor.companyId,category:'authorization',action:'organization.role.updated',actorId:actor.actorId,actorName:actor.name,effectiveUserId:actor.id,occurredAt:now,summary:`نقش «${updated.name}» ویرایش و نسخه جدید منتشر شد.`,outcome:'success',correlationId,metadata:{roleId,permissionCount:updated.permissions.length,version:updated.version??1,affectedUserCount:affectedUserCount}} satisfies AuditEvent);await tx.put('domain_events',{id:newId('event'),aggregateType:'role',aggregateId:roleId,eventType:'RoleUpdated',actorId:actor.actorId,occurredAt:now,correlationId,payload:{affectedUserCount:affectedUserCount}} satisfies DomainEvent);await tx.put('meta',{id:'lastPersistedAt',value:now});});return this.loadState(); }
 
   async cloneRole(roleId: string): Promise<FoundationState> { const state = await this.loadState(); const source = state.roles.find((role) => role.id === roleId); if (!source) throw new Error('نقش مبدأ پیدا نشد.'); return this.createRole({name: `${source.name} - کپی`, description: `کپی از نقش ${source.name}`, scope: source.scope, permissions: [...source.permissions]}); }
 
-  async setRoleStatus(roleId: string, status: UserStatus): Promise<FoundationState> { const state = await this.loadState(); const actor = state.activeUser; requirePermission(actor, 'organization.roles.manage', 'مجوز تغییر وضعیت نقش را ندارید.'); const role = state.roles.find((item) => item.id === roleId); if (!role) throw new Error('نقش پیدا نشد.'); if (role.id === 'role-admin' && status === 'inactive') throw new Error('نقش پایه ادمین قابل غیرفعال‌سازی نیست.'); const updated = {...role, status, updatedAt: new Date().toISOString()}; await this.storage.put('security_roles', updated); await this.refreshUsersForRole(roleId, state.users, state.roles.map((item) => item.id === roleId ? updated : item)); await this.appendAudit({actor, effectiveUser: actor, category: 'system', action: 'organization.role.status_changed', summary: `نقش «${role.name}» ${status === 'active' ? 'فعال' : 'غیرفعال'} شد.`, outcome: 'success', metadata: {roleId, status}}); return this.loadState(); }
+async setRoleStatus(roleId: string, expectedVersion: number, status: UserStatus): Promise<FoundationState> { const state = await this.loadState(); const actor = state.activeUser; requirePermission(actor, 'organization.roles.manage', 'مجوز تغییر وضعیت نقش را ندارید.'); const role = state.roles.find((item) => item.id === roleId); if (!role) throw new Error('نقش پیدا نشد.'); assertProtectedRoleMutationAllowed(actor, role, state.session.actingAdminUserId); if (role.id === 'role-admin' && status === 'inactive') throw new Error('نقش پایه ادمین قابل غیرفعال‌سازی نیست.'); const now=new Date().toISOString();const correlationId=newId('correlation');await this.storage.transaction(['security_roles','users','audit_events','domain_events','meta'],'readwrite',async(tx)=>{const current=await tx.get<SecurityRole>('security_roles',roleId);if(!current||(current.version??1)!==expectedVersion||(role.version??1)!==expectedVersion)throw new Error('نقش در تب دیگری تغییر کرده است؛ تازه‌سازی کنید.');assertProtectedRoleMutationAllowed(actor,current,state.session.actingAdminUserId);if(current.id==='role-admin'&&status==='inactive')throw new Error('نقش پایه ادمین قابل غیرفعال‌سازی نیست.');const [currentUsers,audits]=await Promise.all([tx.getAll<LocalUser>('users'),tx.getAll<AuditEvent>('audit_events')]);const affectedUserCount=currentUsers.filter((user)=>user.roleIds.includes(roleId)).length;const updated={...current,status,version:(current.version??1)+1,updatedAt:now};await tx.put('security_roles',updated);await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:actor.companyId,category:'authorization',action:'organization.role.status_changed',actorId:actor.actorId,actorName:actor.name,effectiveUserId:actor.id,occurredAt:now,summary:`نقش «${current.name}» ${status==='active'?'فعال':'غیرفعال'} شد.`,outcome:'success',correlationId,metadata:{roleId,status,affectedUserCount}} satisfies AuditEvent);await tx.put('domain_events',{id:newId('event'),aggregateType:'role',aggregateId:roleId,eventType:'RoleStatusChanged',actorId:actor.actorId,occurredAt:now,correlationId,payload:{status}} satisfies DomainEvent);await tx.put('meta',{id:'lastPersistedAt',value:now});});return this.loadState(); }
 
-  async deleteRole(roleId: string): Promise<FoundationState> {
+  async deleteRole(roleId: string, expectedVersion: number): Promise<FoundationState> {
     const state = await this.loadState();
     const actor = state.activeUser;
     requirePermission(actor, 'organization.roles.manage', 'مجوز حذف نقش را ندارید.');
     const role = state.roles.find((item) => item.id === roleId);
     if (!role) throw new Error('نقش پیدا نشد.');
+    assertProtectedRoleMutationAllowed(actor, role, state.session.actingAdminUserId);
     if (role.protected) throw new Error('نقش پایه محافظت‌شده قابل حذف نیست.');
-    const assignedUsers = state.users.filter((user) => user.roleIds.includes(roleId));
-    if (assignedUsers.length) {
-      throw new Error(`نقش «${role.name}» به ${assignedUsers.length.toLocaleString('en-US')} کاربر تخصیص دارد؛ ابتدا تخصیص جاری را بردارید.`);
-    }
-    const wasPreviouslyAssigned = state.audits.some((audit) =>
-      (audit.action.includes('role.assignment') || audit.action.endsWith('role.assigned'))
-      && JSON.stringify(audit.metadata ?? {}).includes(roleId),
-    );
-    await this.storage.delete('security_roles', roleId);
-    await this.appendAudit({
-      actor,
-      effectiveUser: actor,
-      category: 'system',
-      action: 'organization.role.deleted',
-      summary: `نقش «${role.name}» حذف شد؛ نسخه‌ها و سابقه تخصیص آن برای گزارش‌گیری حفظ شدند.`,
-      reason: 'حذف نقش بدون تخصیص جاری',
-      outcome: 'success',
-      metadata: {
-        roleId,
-        roleName: role.name,
-        roleVersion: role.version ?? 1,
-        permissionCount: role.permissions.length,
-        wasPreviouslyAssigned,
-      },
+    const now=new Date().toISOString();const correlationId=newId('correlation');
+    await this.storage.transaction(['security_roles','users','audit_events','domain_events','meta'],'readwrite',async(tx)=>{
+      const current=await tx.get<SecurityRole>('security_roles',roleId);
+      if(!current||(current.version??1)!==expectedVersion||(role.version??1)!==expectedVersion)throw new Error('نقش در تب دیگری تغییر کرده است؛ تازه‌سازی کنید.');
+      assertProtectedRoleMutationAllowed(actor,current,state.session.actingAdminUserId);
+      if(current.protected)throw new Error('نقش پایه محافظت‌شده قابل حذف نیست.');
+      const [currentUsers,audits]=await Promise.all([tx.getAll<LocalUser>('users'),tx.getAll<AuditEvent>('audit_events')]);
+      const assignedUsers=currentUsers.filter((user)=>user.roleIds.includes(roleId));
+      if(assignedUsers.length)throw new Error(`نقش «${current.name}» به ${assignedUsers.length.toLocaleString('en-US')} کاربر تخصیص دارد؛ ابتدا تخصیص جاری را بردارید.`);
+      const wasPreviouslyAssigned=audits.some((audit)=>(audit.action.includes('role.assignment')||audit.action.endsWith('role.assigned'))&&JSON.stringify(audit.metadata??{}).includes(roleId));
+      await tx.delete('security_roles',roleId);
+      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:actor.companyId,category:'authorization',action:'organization.role.deleted',actorId:actor.actorId,actorName:actor.name,effectiveUserId:actor.id,occurredAt:now,summary:`نقش «${current.name}» حذف شد؛ نسخه‌ها و سابقه تخصیص آن برای گزارش‌گیری حفظ شدند.`,reason:'حذف نقش بدون تخصیص جاری',outcome:'success',correlationId,metadata:{roleId,roleName:current.name,roleVersion:current.version??1,permissionCount:current.permissions.length,wasPreviouslyAssigned}} satisfies AuditEvent);
+      await tx.put('domain_events',{id:newId('event'),aggregateType:'role',aggregateId:roleId,eventType:'RoleDeleted',actorId:actor.actorId,occurredAt:now,correlationId,payload:{}} satisfies DomainEvent);
+      await tx.put('meta',{id:'lastPersistedAt',value:now});
     });
     return this.loadState();
   }
@@ -1368,7 +1476,8 @@ export class LocalFoundationService {
     const state = await this.loadState();
     if (state.session.actingAdminUserId) throw new Error('ابتدا مشاهده دسترسی کاربر را پایان دهید.');
     const normalizedUsername = username.trim().toLowerCase();
-    const target = state.users.find((user) => user.username.toLowerCase() === normalizedUsername);
+    const rawUsers = await this.storage.getAll<LocalUser>('users');
+    const target = rawUsers.find((user) => user.username.toLowerCase() === normalizedUsername);
     const validPassword = target ? await verifyPassword(password, target.passwordHash) : false;
     if (!target || !validPassword) throw new Error('نام کاربری یا رمز عبور درست نیست.');
     if (target.status !== 'active') throw new Error('این حساب غیرفعال است. با ادمین سازمان تماس بگیرید.');
@@ -1409,10 +1518,10 @@ export class LocalFoundationService {
   }
 
   async requestPasswordRecovery(username: string, mobileValue: string): Promise<LocalSmsPreview> {
-    const state = await this.loadState();
+    const [users, personnelRecords] = await Promise.all([this.storage.getAll<LocalUser>('users'), this.storage.getAll<PersonnelRecord>('personnel')]);
     const mobile = normalizePhone(mobileValue);
-    const target = state.users.find((user) => user.username.toLowerCase() === username.trim().toLowerCase());
-    const personnel = target ? state.personnel.find((person) => person.id === target.personnelId || person.linkedUserId === target.id) : undefined;
+    const target = users.find((user) => user.username.toLowerCase() === username.trim().toLowerCase());
+    const personnel = target ? personnelRecords.find((person) => person.id === target.personnelId || person.linkedUserId === target.id) : undefined;
     if (!target || target.status !== 'active' || !/^09\d{9}$/.test(mobile) || normalizePhone(personnel?.primaryMobile) !== mobile) throw new Error('نام کاربری و شماره همراه با یک حساب فعال تطابق ندارند.');
     const verificationCode = await recoveryCodeFor(target, mobile);
     await this.appendSystemAudit('organization.session.password_recovery_requested', 'درخواست بازیابی رمز عبور از صفحه ورود ثبت شد.', target.id, {userId: target.id, channel: 'local-sms-simulation'});
@@ -1420,24 +1529,34 @@ export class LocalFoundationService {
   }
 
   async completePasswordRecovery(username: string, mobileValue: string, verificationCode: string, newPassword: string): Promise<void> {
-    const state = await this.loadState();
+    const [users, personnelRecords] = await Promise.all([this.storage.getAll<LocalUser>('users'), this.storage.getAll<PersonnelRecord>('personnel')]);
     const mobile = normalizePhone(mobileValue);
-    const target = state.users.find((user) => user.username.toLowerCase() === username.trim().toLowerCase());
-    const personnel = target ? state.personnel.find((person) => person.id === target.personnelId || person.linkedUserId === target.id) : undefined;
+    const target = users.find((user) => user.username.toLowerCase() === username.trim().toLowerCase());
+    const personnel = target ? personnelRecords.find((person) => person.id === target.personnelId || person.linkedUserId === target.id) : undefined;
     if (!target || target.status !== 'active' || normalizePhone(personnel?.primaryMobile) !== mobile) throw new Error('اطلاعات بازیابی معتبر نیست.');
     if ((await recoveryCodeFor(target, mobile)) !== normalizeDigits(verificationCode)) throw new Error('کد تأیید درست نیست.');
     if (newPassword.length < 8) throw new Error('رمز عبور جدید باید حداقل ۸ نویسه داشته باشد.');
     const now = new Date().toISOString();
-    await this.storage.put('users', {...target, passwordHash: await hashPassword(newPassword), passwordUpdatedAt: now});
-    await this.appendSystemAudit('organization.session.password_recovered', 'رمز عبور از مسیر بازیابی محلی تغییر کرد.', target.id, {userId: target.id, channel: 'local-sms-simulation'});
+    const passwordHash=await hashPassword(newPassword);const correlationId=newId('correlation');
+    await this.storage.transaction(['users','personnel','audit_events','domain_events','meta'],'readwrite',async(tx)=>{
+      const current=await tx.get<LocalUser>('users',target.id);
+      if(!current||current.status!=='active'||userConcurrencyToken(current)!==userConcurrencyToken(target))throw new Error('حساب در زمان بازیابی تغییر کرده است؛ فرایند را دوباره آغاز کنید.');
+      const currentPersonnel=current.personnelId?await tx.get<PersonnelRecord>('personnel',current.personnelId):undefined;
+      if(!currentPersonnel||normalizePhone(currentPersonnel.primaryMobile)!==mobile)throw new Error('اطلاعات بازیابی در زمان ثبت تغییر کرده است؛ فرایند را دوباره آغاز کنید.');
+      const audits=await tx.getAll<AuditEvent>('audit_events');
+      await tx.put('users',{...current,passwordHash,passwordUpdatedAt:now});
+      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:current.companyId,category:'system',action:'organization.session.password_recovered',actorId:current.actorId,actorName:current.name,effectiveUserId:current.id,occurredAt:now,summary:'رمز عبور از مسیر بازیابی محلی تغییر کرد.',reason:'بازیابی رمز با کد تأیید محلی',outcome:'success',correlationId,metadata:{userId:current.id,channel:'local-sms-simulation'}} satisfies AuditEvent);
+      await tx.put('domain_events',{id:newId('event'),aggregateType:'user',aggregateId:current.id,eventType:'UserPasswordRecovered',actorId:current.actorId,occurredAt:now,correlationId,payload:{channel:'local-sms-simulation'}} satisfies DomainEvent);
+      await tx.put('meta',{id:'lastPersistedAt',value:now});
+    });
   }
 
   async requestUsernameReminder(mobileValue: string): Promise<LocalSmsPreview> {
-    const state = await this.loadState();
+    const [users, personnel] = await Promise.all([this.storage.getAll<LocalUser>('users'), this.storage.getAll<PersonnelRecord>('personnel')]);
     const mobile = normalizePhone(mobileValue);
     if (!/^09\d{9}$/.test(mobile)) throw new Error('شماره همراه معتبر وارد کنید.');
-    const personnelIds = state.personnel.filter((person) => normalizePhone(person.primaryMobile) === mobile).map((person) => person.id);
-    const targets = state.users.filter((user) => user.status === 'active' && (personnelIds.includes(user.personnelId ?? '') || state.personnel.some((person) => person.linkedUserId === user.id && normalizePhone(person.primaryMobile) === mobile)));
+    const personnelIds = personnel.filter((person) => normalizePhone(person.primaryMobile) === mobile).map((person) => person.id);
+    const targets = users.filter((user) => user.status === 'active' && (personnelIds.includes(user.personnelId ?? '') || personnel.some((person) => person.linkedUserId === user.id && normalizePhone(person.primaryMobile) === mobile)));
     if (!targets.length) throw new Error('حساب فعالی برای این شماره همراه پیدا نشد.');
     const usernames = targets.map((user) => user.username).join('، ');
     await this.appendSystemAudit('organization.session.username_reminder_requested', 'درخواست یادآوری نام کاربری از صفحه ورود ثبت شد.', targets[0].id, {userIds: targets.map((user) => user.id).join(','), channel: 'local-sms-simulation'});
@@ -1855,6 +1974,7 @@ export class LocalFoundationService {
     const module = ERP_MODULES.find((item) => item.id === moduleId); if (!module) throw new Error('ماژول عملیاتی پیدا نشد.');
     if (moduleId === 'recruitment-case' && !allowSpecialized) throw new Error('پرونده جذب فقط از مسیر اختصاصی اعلام نیاز نیرو قابل ایجاد است.');
     if (moduleId === 'personnel-document' && !allowSpecialized) throw new Error('مدرک پرسنلی فقط از بخش «مدارک پرسنلی» پرونده یا حساب خود فرد ثبت می‌شود.');
+    if (moduleId === 'employee-advance') throw new Error('مساعده فقط از مسیر اختصاصی مساعده ثبت می‌شود.');
     const state = await this.loadState(); const effectiveUser = state.activeUser;
     requirePermission(effectiveUser, permissionFor(moduleId, 'create'), 'مجوز ایجاد رکورد در این ماژول را ندارید.');
     const preparedInput = moduleId === 'purchase-request' ? preparePurchaseRequestInput(state, input) : input;
@@ -1916,6 +2036,7 @@ export class LocalFoundationService {
   async updateOperationalRecord(moduleId: string, recordId: string, expectedVersion: number, input: Partial<OperationalRecordInput>): Promise<FoundationState> {
     const module = ERP_MODULES.find((item) => item.id === moduleId); if (!module) throw new Error('ماژول عملیاتی پیدا نشد.');
     if (moduleId === 'personnel-document') throw new Error('جایگزینی مدرک فقط از بخش «مدارک پرسنلی» انجام می‌شود تا نسخه قبلی حفظ شود.');
+    if (moduleId === 'employee-advance') throw new Error('ویرایش مساعده فقط از مسیر اختصاصی مساعده انجام می‌شود.');
     const state = await this.loadState(); const effectiveUser = state.activeUser; requirePermission(effectiveUser, permissionFor(moduleId, 'edit'), 'مجوز ویرایش این رکورد را ندارید.');
     const record = state.operationalRecords.find((item) => item.id === recordId && item.moduleId === moduleId); if (!record) throw new Error('رکورد پیدا نشد.');
     this.assertRecordScope(effectiveUser, record, 'edit'); if (record.version !== expectedVersion) throw new Error('این رکورد در تب دیگری تغییر کرده است. تازه‌سازی کنید و دوباره تلاش کنید.');
@@ -1931,6 +2052,7 @@ export class LocalFoundationService {
 
   async transitionOperationalRecord(moduleId: string, recordId: string, transitionId: string, reason = '', idempotencyKey?: string): Promise<FoundationState> {
     if (moduleId === 'personnel-document') throw new Error('گردش مدرک پرسنلی فقط از بخش تخصصی مدارک مدیریت می‌شود.');
+    if (moduleId === 'employee-advance') throw new Error('تصمیم مساعده فقط از مسیر اختصاصی مساعده انجام می‌شود.');
     const module = ERP_MODULES.find((item) => item.id === moduleId); if (!module) throw new Error('ماژول عملیاتی پیدا نشد.');
     const state = await this.loadState(); const effectiveUser = state.activeUser; const record = state.operationalRecords.find((item) => item.id === recordId && item.moduleId === moduleId); if (!record) throw new Error('رکورد پیدا نشد.');
     const workflow = workflowForRecord(state, module, record);
@@ -2300,6 +2422,7 @@ export class LocalFoundationService {
 
   async assignOperationalRecord(moduleId: string, recordId: string, assigneeUserId: string, reason: string): Promise<FoundationState> {
     if (moduleId === 'personnel-document') throw new Error('تخصیص مدرک پرسنلی از مسیر عمومی مجاز نیست.');
+    if (moduleId === 'employee-advance') throw new Error('تخصیص مساعده فقط از مسیر اختصاصی و مرحله مصوب آن انجام می‌شود.');
     const module = ERP_MODULES.find((item) => item.id === moduleId); if (!module) throw new Error('ماژول عملیاتی پیدا نشد.');
     const state = await this.loadState(); const effectiveUser = state.activeUser; requirePermission(effectiveUser, permissionFor(moduleId, 'manage'), 'مجوز تخصیص این رکورد را ندارید.');
     const record = state.operationalRecords.find((item) => item.id === recordId); const target = state.users.find((item) => item.id === assigneeUserId && item.status === 'active'); if (!record || !target) throw new Error('رکورد یا کاربر مقصد معتبر نیست.'); if (reason.trim().length < 3) throw new Error('دلیل تخصیص را وارد کنید.');
@@ -2329,34 +2452,89 @@ export class LocalFoundationService {
     const requestedPhones = new Set([mobile, secondaryMobile]);
     if (state.personnel.some((person) => [person.primaryMobile, person.secondaryMobile].some((value) => requestedPhones.has(normalizePhone(value)))) || state.registrationRequests.some((request) => [request.mobile, request.secondaryMobile].some((value) => requestedPhones.has(normalizePhone(value))))) throw new Error('برای یکی از شماره‌های همراه قبلاً پرونده یا درخواست ثبت‌نام وجود دارد.');
 
-    const now = new Date().toISOString();
-    const record: RegistrationRequest = {id: newId('registration'), trackingCode: `REG-${String(state.registrationRequests.length + 1).padStart(5, '0')}`, fullName: input.fullName.trim(), mobile, secondaryMobile, email: input.email?.trim().toLowerCase(), nationalId, gender: input.gender, province: input.province.trim(), city: input.city.trim(), address: input.address.trim(), postalCode: normalizeDigits(input.postalCode).replace(/\D/g, ''), bankName: input.bankName.trim(), cardNumber, requestedUsername: username, selfDeclaration: input.selfDeclaration ?? {}, status: 'submitted', version: 1, createdAt: now, updatedAt: now};
-    await this.storage.put('registration_requests', record);
-    await this.appendSystemAudit('organization.registration.submitted', `درخواست ثبت‌نام «${record.fullName}» دریافت شد.`, state.activeUser.id, {registrationId: record.id, submittedAt: now});
+    const now = new Date().toISOString(); const actor = state.activeUser; const correlationId = newId('correlation');
+    await this.storage.transaction(['users','personnel','registration_requests','audit_events','domain_events','meta'], 'readwrite', async (tx) => {
+      const [currentUsers,currentPersonnel,currentRequests,audits] = await Promise.all([tx.getAll<LocalUser>('users'),tx.getAll<PersonnelRecord>('personnel'),tx.getAll<RegistrationRequest>('registration_requests'),tx.getAll<AuditEvent>('audit_events')]);
+      if (currentUsers.some((user)=>user.username.toLowerCase()===username) || currentRequests.some((request)=>request.requestedUsername.toLowerCase()===username)) throw new Error('این نام کاربری هم‌زمان ثبت شده یا در صف بررسی است.');
+      if (currentPersonnel.some((person)=>normalizeNationalId(person.nationalId)===nationalId) || currentRequests.some((request)=>normalizeNationalId(request.nationalId)===nationalId)) throw new Error('برای این کد ملی هم‌زمان پرونده یا درخواست ثبت‌نام ایجاد شده است.');
+      if (currentPersonnel.some((person)=>[person.primaryMobile,person.secondaryMobile].some((value)=>requestedPhones.has(normalizePhone(value)))) || currentRequests.some((request)=>[request.mobile,request.secondaryMobile].some((value)=>requestedPhones.has(normalizePhone(value))))) throw new Error('برای یکی از شماره‌های همراه هم‌زمان پرونده یا درخواست ثبت‌نام ایجاد شده است.');
+      const record: RegistrationRequest = {id:newId('registration'),trackingCode:`REG-${String(currentRequests.length+1).padStart(5,'0')}`,fullName:input.fullName.trim(),mobile,secondaryMobile,email:input.email?.trim().toLowerCase(),nationalId,gender:input.gender,province:input.province.trim(),city:input.city.trim(),address:input.address.trim(),postalCode:normalizeDigits(input.postalCode).replace(/\D/g,''),bankName:input.bankName.trim(),cardNumber,requestedUsername:username,selfDeclaration:input.selfDeclaration??{},status:'submitted',version:1,createdAt:now,updatedAt:now};
+      await tx.put('registration_requests',record);
+      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:actor.companyId,category:'authorization',action:'organization.registration.submitted',actorId:actor.actorId,actorName:actor.name,effectiveUserId:actor.id,occurredAt:now,summary:`درخواست ثبت‌نام «${record.fullName}» دریافت شد.`,outcome:'success',correlationId,metadata:{registrationId:record.id,submittedAt:now}} satisfies AuditEvent);
+      await tx.put('domain_events',{id:newId('event'),aggregateType:'registration',aggregateId:record.id,eventType:'RegistrationSubmitted',actorId:actor.actorId,occurredAt:now,correlationId,payload:{trackingCode:record.trackingCode}} satisfies DomainEvent);
+      await tx.put('meta',{id:'lastPersistedAt',value:now});
+    });
     return this.loadState();
   }
 
-  async reviewRegistration(registrationId: string, decision: 'in_review'|'needs_correction'|'rejected'|'approved', reason: string, roleIds: string[] = [], initialPassword = ''): Promise<FoundationState> {
+  async reviewRegistration(registrationId: string, expectedVersion: number, decision: 'in_review'|'needs_correction'|'rejected'|'approved', reason: string, roleIds: string[] = [], _initialPassword = ''): Promise<FoundationState> {
     const state = await this.loadState(); const effectiveUser = state.activeUser; requirePermission(effectiveUser, 'organization.registrations.review', 'مجوز بررسی ثبت‌نام را ندارید.'); const request = state.registrationRequests.find((item) => item.id === registrationId); if (!request) throw new Error('درخواست ثبت‌نام پیدا نشد.');
+    if (state.session.actingAdminUserId) throw new Error('در حالت مشاهده آزمایشی، بررسی ثبت‌نام مجاز نیست.');
     if (request.status === 'activated') throw new Error('این درخواست قبلاً فعال شده است.');
     if (['needs_correction','rejected'].includes(decision) && reason.trim().length < 3) throw new Error('دلیل تصمیم الزامی است.'); const now = new Date().toISOString(); let updated: RegistrationRequest = {...request, status: decision, reviewReason: reason.trim() || undefined, version: request.version + 1, updatedAt: now};
     if (decision === 'approved') {
-      if (!roleIds.length) throw new Error('نقش حساب را بازبین تعیین می‌کند؛ حداقل یک نقش انتخاب کنید.');
-      if (roleIds.some((roleId) => !state.roles.some((role) => role.id === roleId && role.id !== 'role-admin' && role.status === 'active'))) throw new Error('یکی از نقش‌های انتخاب‌شده معتبر یا فعال نیست.');
-      if (initialPassword.length < 8) throw new Error('هنگام فعال‌سازی، رمز عبور اولیه حداقل ۸ نویسه‌ای تعیین کنید.');
-      if (state.users.some((user) => user.username.toLowerCase() === request.requestedUsername.toLowerCase()) || state.registrationRequests.some((item) => item.id !== request.id && item.requestedUsername.toLowerCase() === request.requestedUsername.toLowerCase())) throw new Error('نام کاربری این درخواست در فاصله بررسی توسط حساب یا درخواست دیگری استفاده شده است؛ فعال‌سازی متوقف شد.');
-      if (state.personnel.some((person) => normalizeNationalId(person.nationalId) === normalizeNationalId(request.nationalId)) || state.registrationRequests.some((item) => item.id !== request.id && normalizeNationalId(item.nationalId) === normalizeNationalId(request.nationalId))) throw new Error('کد ملی این درخواست قبلاً به پرونده یا درخواست دیگری متصل شده است؛ فعال‌سازی متوقف شد.');
-      const requestPhones = new Set([normalizePhone(request.mobile), normalizePhone(request.secondaryMobile)]);
-      if (state.personnel.some((person) => [person.primaryMobile, person.secondaryMobile].some((value) => requestPhones.has(normalizePhone(value)))) || state.registrationRequests.some((item) => item.id !== request.id && [item.mobile, item.secondaryMobile].some((value) => requestPhones.has(normalizePhone(value))))) throw new Error('یکی از شماره‌های همراه این درخواست قبلاً به پرونده یا درخواست دیگری متصل شده است؛ فعال‌سازی متوقف شد.');
-      const profileErrors = validateRequiredProfile(request);
-      if (profileErrors.length) throw new Error(`درخواست قدیمی ناقص است: ${profileErrors[0]}`);
-      const primary = state.roles.find((role) => role.id === roleIds[0])!;
-      const [firstName, ...lastParts] = request.fullName.split(/\s+/); const personnelId = newId('personnel'); const userId = newId('user');
-      const personnel: PersonnelRecord = {id: personnelId, companyId: COMPANY_ID, personnelCode: nextPersonnelCode(state.personnel), firstName, lastName: lastParts.join(' ') || 'ثبت‌نام', nationalId: request.nationalId, gender: request.gender, maritalStatus: 'unspecified', primaryMobile: request.mobile, secondaryMobile: request.secondaryMobile, personalEmail: request.email, province: request.province, city: request.city, address: request.address, postalCode: request.postalCode, bankName: request.bankName, cardNumber: request.cardNumber, employmentStatus: 'active', employmentType: 'در انتظار تعیین نوع همکاری', startDate: now.slice(0,10), unitId: 'unit-management', positionId: 'position-specialist', linkedUserId: userId, createdAt: now, updatedAt: now};
-      const user = resolveUserAccess({id: userId, actorId: newId('actor'), name: request.fullName, username: request.requestedUsername, passwordHash: await hashPassword(initialPassword), passwordUpdatedAt: now, roleId: primary.id, roleIds, roles: [], roleTitle: primary.name, status: 'active', isAdmin: false, description: primary.description, companyId: COMPANY_ID, unitId: personnel.unitId, positionId: personnel.positionId, personnelId, scope: primary.scope, permissions: [], accent: avatarColor(state.users.length), initials: makeInitials(request.fullName)}, state.roles);
-      await this.storage.transaction(['personnel','users'], 'readwrite', async (tx) => {await tx.put('personnel', personnel); await tx.put('users', user);}); updated = {...updated, status: 'activated', linkedPersonnelId: personnelId, linkedUserId: userId};
+      if (!roleIds.length) throw new Error('حداقل یک نقش ورودی مجاز پیشنهاد کنید.');
+      if (roleIds.some((roleId) => !REGISTRATION_ASSIGNABLE_ROLE_IDS.has(roleId))) throw new Error('یکی از نقش‌ها برای ثبت‌نام اولیه مجاز نیست و باید بعداً از فرایند مدیریت دسترسی داده شود.');
+      if (roleIds.some((roleId) => !state.roles.some((role) => role.id === roleId && role.status === 'active'))) throw new Error('یکی از نقش‌های پیشنهادی معتبر یا فعال نیست.');
+      updated = {...updated, proposedRoleIds: [...new Set(roleIds)], proposedByUserId: effectiveUser.id, proposedAt: now};
+    } else if (decision === 'needs_correction' || decision === 'rejected') {
+      updated = {...updated, proposedRoleIds: undefined, proposedByUserId: undefined, proposedAt: undefined};
     }
-    await this.storage.put('registration_requests', updated); await this.storage.put('registration_reviews', {id: newId('registration-review'), registrationId, decision, reason: reason.trim(), reviewerUserId: effectiveUser.id, occurredAt: now}); await this.appendAudit({actor: effectiveUser, effectiveUser, category: 'system', action: `organization.registration.${updated.status}`, summary: `درخواست ثبت‌نام «${request.fullName}» به وضعیت ${updated.status} رفت.`, reason, outcome: 'success', metadata: {registrationId, registeredAt: request.createdAt, reviewedAt: now, assignedRoleIds: decision === 'approved' ? roleIds.join(',') : ''}}); return this.loadState();
+    const correlationId = newId('correlation');
+    await this.storage.transaction(['registration_requests','registration_reviews','security_roles','audit_events','domain_events','meta'], 'readwrite', async (tx) => {
+      const current = await tx.get<RegistrationRequest>('registration_requests', registrationId);
+      if (!current || current.version !== expectedVersion || request.version !== expectedVersion || current.status === 'activated') throw new Error('درخواست در تب دیگری تغییر کرده است؛ تازه‌سازی کنید.');
+      if (decision === 'approved') {const currentRoles=await tx.getAll<SecurityRole>('security_roles');if(roleIds.some((roleId)=>!REGISTRATION_ASSIGNABLE_ROLE_IDS.has(roleId)||!currentRoles.some((role)=>role.id===roleId&&role.status==='active')))throw new Error('نقش پیشنهادی هم‌زمان تغییر کرده یا غیرفعال شده است؛ تازه‌سازی کنید.');}
+      const audits = await tx.getAll<AuditEvent>('audit_events');
+      await tx.put('registration_requests', updated);
+      await tx.put('registration_reviews', {id:newId('registration-review'),registrationId,decision,reason:reason.trim(),reviewerUserId:effectiveUser.id,occurredAt:now});
+      await tx.put('audit_events', {id:newId('audit'),sequence:nextSequence(audits),companyId:effectiveUser.companyId,category:'authorization',action:`organization.registration.${updated.status}`,actorId:effectiveUser.actorId,actorName:effectiveUser.name,effectiveUserId:effectiveUser.id,occurredAt:now,summary:`درخواست ثبت‌نام «${request.fullName}» به وضعیت ${updated.status} رفت.`,reason:reason.trim()||undefined,outcome:'success',correlationId,metadata:{registrationId,registeredAt:request.createdAt,reviewedAt:now,assignedRoleIds:decision==='approved'?roleIds.join(','):''}} satisfies AuditEvent);
+      await tx.put('domain_events', {id:newId('event'),aggregateType:'registration',aggregateId:registrationId,eventType:'RegistrationReviewed',actorId:effectiveUser.actorId,occurredAt:now,correlationId,payload:{decision,roleIds:decision==='approved'?roleIds:[]}} satisfies DomainEvent);
+      await tx.put('meta',{id:'lastPersistedAt',value:now});
+    });
+    return this.loadState();
+  }
+
+  async activateRegistration(registrationId: string, expectedVersion: number, initialPassword: string): Promise<FoundationState> {
+    const state = await this.loadState(); const actor = state.activeUser;
+    requirePermission(actor, 'organization.registrations.activate', 'مجوز فعال‌سازی نهایی حساب ثبت‌نام را ندارید.');
+    if (state.session.actingAdminUserId) throw new Error('فعال‌سازی حساب در حالت مشاهده آزمایشی مجاز نیست.');
+    if (initialPassword.length < 8) throw new Error('رمز عبور اولیه باید حداقل ۸ نویسه باشد.');
+    const request = state.registrationRequests.find((item) => item.id === registrationId); if (!request) throw new Error('درخواست ثبت‌نام پیدا نشد.');
+    if (request.status !== 'approved' || !request.proposedRoleIds?.length) throw new Error('این درخواست هنوز پیشنهاد نقش تأییدشده برای فعال‌سازی ندارد.');
+    if (request.proposedByUserId === actor.id) throw new Error('پیشنهاددهنده نقش نمی‌تواند همان درخواست را فعال کند؛ تفکیک بررسی و فعال‌سازی الزامی است.');
+    const roleIds = [...new Set(request.proposedRoleIds)];
+    if (roleIds.some((roleId) => !REGISTRATION_ASSIGNABLE_ROLE_IDS.has(roleId) || !state.roles.some((role) => role.id === roleId && role.status === 'active'))) throw new Error('پیشنهاد نقش منقضی یا نامعتبر شده است؛ منابع انسانی باید دوباره بررسی کند.');
+    if (state.users.some((user) => user.username.toLowerCase() === request.requestedUsername.toLowerCase()) || state.registrationRequests.some((item) => item.id !== request.id && item.requestedUsername.toLowerCase() === request.requestedUsername.toLowerCase())) throw new Error('نام کاربری این درخواست در فاصله بررسی استفاده شده است؛ فعال‌سازی متوقف شد.');
+    if (state.personnel.some((person) => normalizeNationalId(person.nationalId) === normalizeNationalId(request.nationalId)) || state.registrationRequests.some((item) => item.id !== request.id && normalizeNationalId(item.nationalId) === normalizeNationalId(request.nationalId))) throw new Error('کد ملی این درخواست قبلاً به پرونده یا درخواست دیگری متصل شده است؛ فعال‌سازی متوقف شد.');
+    const requestPhones = new Set([normalizePhone(request.mobile), normalizePhone(request.secondaryMobile)]);
+    if (state.personnel.some((person) => [person.primaryMobile, person.secondaryMobile].some((value) => requestPhones.has(normalizePhone(value)))) || state.registrationRequests.some((item) => item.id !== request.id && [item.mobile, item.secondaryMobile].some((value) => requestPhones.has(normalizePhone(value))))) throw new Error('یکی از شماره‌های همراه این درخواست قبلاً استفاده شده است؛ فعال‌سازی متوقف شد.');
+    const profileErrors = validateRequiredProfile(request); if (profileErrors.length) throw new Error(`درخواست ناقص است: ${profileErrors[0]}`);
+    const now = new Date().toISOString(); const primary = state.roles.find((role) => role.id === roleIds[0])!;
+    const [firstName, ...lastParts] = request.fullName.split(/\s+/); const personnelId = newId('personnel'); const userId = newId('user');
+    const personnel: PersonnelRecord = {id: personnelId, companyId: COMPANY_ID, personnelCode: nextPersonnelCode(state.personnel), firstName, lastName: lastParts.join(' ') || 'ثبت‌نام', nationalId: request.nationalId, gender: request.gender, maritalStatus: 'unspecified', primaryMobile: request.mobile, secondaryMobile: request.secondaryMobile, personalEmail: request.email, province: request.province, city: request.city, address: request.address, postalCode: request.postalCode, bankName: request.bankName, cardNumber: request.cardNumber, employmentStatus: 'active', employmentType: 'در انتظار تعیین نوع همکاری', startDate: now.slice(0,10), unitId: 'unit-management', positionId: 'position-specialist', linkedUserId: userId, createdAt: now, updatedAt: now};
+    const user = resolveUserAccess({id: userId, actorId: newId('actor'), name: request.fullName, username: request.requestedUsername, passwordHash: await hashPassword(initialPassword), passwordUpdatedAt: now, roleId: primary.id, roleIds, roles: [], roleTitle: primary.name, status: 'active', isAdmin: false, description: primary.description, companyId: COMPANY_ID, unitId: personnel.unitId, positionId: personnel.positionId, personnelId, scope: primary.scope, permissions: [], accent: avatarColor(state.users.length), initials: makeInitials(request.fullName)}, state.roles);
+    const updated: RegistrationRequest = {...request, status: 'activated', linkedPersonnelId: personnelId, linkedUserId: userId, activatedByUserId: actor.id, activatedAt: now, version: request.version + 1, updatedAt: now};
+    const correlationId = newId('correlation');
+    await this.storage.transaction(['personnel','users','security_roles','registration_requests','registration_reviews','audit_events','domain_events','meta'], 'readwrite', async (tx) => {
+      const current = await tx.get<RegistrationRequest>('registration_requests', registrationId);
+      if (!current || current.version !== expectedVersion || request.version !== expectedVersion || current.status !== 'approved') throw new Error('درخواست در تب دیگری تغییر کرده است؛ تازه‌سازی کنید.');
+      const [currentUsers,currentPersonnel,currentRequests,currentRoles] = await Promise.all([tx.getAll<LocalUser>('users'),tx.getAll<PersonnelRecord>('personnel'),tx.getAll<RegistrationRequest>('registration_requests'),tx.getAll<SecurityRole>('security_roles')]);
+      if(roleIds.some((roleId)=>!REGISTRATION_ASSIGNABLE_ROLE_IDS.has(roleId)||!currentRoles.some((role)=>role.id===roleId&&role.status==='active')))throw new Error('نقش پیشنهادی هم‌زمان تغییر کرده یا غیرفعال شده است؛ فعال‌سازی متوقف شد.');
+      if (currentUsers.some((item)=>item.username.toLowerCase()===request.requestedUsername.toLowerCase()) || currentRequests.some((item)=>item.id!==request.id&&item.requestedUsername.toLowerCase()===request.requestedUsername.toLowerCase())) throw new Error('نام کاربری این درخواست هم‌زمان استفاده شده است؛ فعال‌سازی متوقف شد.');
+      if (currentPersonnel.some((item)=>normalizeNationalId(item.nationalId)===normalizeNationalId(request.nationalId)) || currentRequests.some((item)=>item.id!==request.id&&normalizeNationalId(item.nationalId)===normalizeNationalId(request.nationalId))) throw new Error('کد ملی این درخواست هم‌زمان استفاده شده است؛ فعال‌سازی متوقف شد.');
+      if (currentPersonnel.some((item)=>[item.primaryMobile,item.secondaryMobile].some((value)=>requestPhones.has(normalizePhone(value)))) || currentRequests.some((item)=>item.id!==request.id&&[item.mobile,item.secondaryMobile].some((value)=>requestPhones.has(normalizePhone(value))))) throw new Error('شماره همراه این درخواست هم‌زمان استفاده شده است؛ فعال‌سازی متوقف شد.');
+      const committedPersonnel: PersonnelRecord = {...personnel, personnelCode: nextPersonnelCode(currentPersonnel)};
+      if (currentPersonnel.some((item) => item.personnelCode === committedPersonnel.personnelCode)) throw new Error('کد پرسنلی هم‌زمان رزرو شده است؛ فعال‌سازی را دوباره انجام دهید.');
+      const committedUser = resolveUserAccess({...user, unitId: committedPersonnel.unitId, positionId: committedPersonnel.positionId}, currentRoles);
+      const audits = await tx.getAll<AuditEvent>('audit_events');
+      await tx.put('personnel', committedPersonnel); await tx.put('users', committedUser); await tx.put('registration_requests', updated);
+      await tx.put('registration_reviews', {id: newId('registration-review'), registrationId, decision: 'activated', reason: 'فعال‌سازی نهایی مدیر سامانه', reviewerUserId: actor.id, occurredAt: now});
+      await tx.put('audit_events', {id: newId('audit'), sequence: nextSequence(audits), companyId: actor.companyId, category: 'authorization', action: 'organization.registration.activated', actorId: actor.actorId, actorName: actor.name, effectiveUserId: user.id, occurredAt: now, summary: `حساب «${request.fullName}» پس از تأیید منابع انسانی فعال شد.`, outcome: 'success', correlationId, metadata: {registrationId, personnelId, userId, proposedByUserId: request.proposedByUserId ?? '', assignedRoleIds: roleIds.join(',')}} satisfies AuditEvent);
+      await tx.put('domain_events', {id: newId('event'), aggregateType: 'registration', aggregateId: registrationId, eventType: 'RegistrationActivated', actorId: actor.actorId, occurredAt: now, correlationId, payload: {personnelId, userId, roleIds}} satisfies DomainEvent);
+      await tx.put('meta', {id: 'lastPersistedAt', value: now});
+    });
+    return this.loadState();
   }
 
   async generateLargeQaDataset(perRole = 10): Promise<FoundationState> {
@@ -2638,6 +2816,10 @@ function normalizeUserPermissionOverrides(input: Pick<UserInput, 'roleIds'|'perm
 function validateRoleInput(input: RoleInput, roles: SecurityRole[], excludeId?: string) { if (input.name.trim().length < 2) throw new Error('نام نقش باید حداقل ۲ نویسه باشد.'); if (roles.some((role) => role.id !== excludeId && role.name.trim().toLocaleLowerCase('fa') === input.name.trim().toLocaleLowerCase('fa'))) throw new Error('نقشی با این نام وجود دارد.'); }
 function wouldCreateCycle(unitId: string, parentId: string, units: OrganizationalUnit[]) { let cursor: string | undefined = parentId; const seen = new Set<string>(); while (cursor) {if (cursor === unitId || seen.has(cursor)) return true; seen.add(cursor); cursor = units.find((unit) => unit.id === cursor)?.parentId;} return false; }
 function sameStrings(a: string[], b: string[]) { return a.length === b.length && [...a].sort().every((value, index) => value === [...b].sort()[index]); }
+export function userConcurrencyToken(user: LocalUser) {
+  return JSON.stringify({name:user.name,username:user.username,status:user.status,passwordHash:user.passwordHash,passwordUpdatedAt:user.passwordUpdatedAt,unitId:user.unitId,positionId:user.positionId,branchUnitId:user.branchUnitId,managerUserId:user.managerUserId,personnelId:user.personnelId,roleId:user.roleId,roleIds:[...user.roleIds].sort(),permissionGrants:[...(user.permissionGrants??[])].sort(),permissionDenials:[...(user.permissionDenials??[])].sort()});
+}
+const userMutationFingerprint = userConcurrencyToken;
 async function hashPassword(password: string) {
   const iterations = 120_000;
   const salt = crypto.getRandomValues(new Uint8Array(16));
