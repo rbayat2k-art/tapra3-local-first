@@ -17,12 +17,13 @@ import {PRIMARY_ADMIN_USER_ID, PROTECTED_PERMISSION_CODES, PROTECTED_ROLE_IDS} f
 import {activeActingManager, effectiveUnitManagerUserId, flattenOrganizationUnits, organizationPeopleForUnit, organizationStructureHealth, type OrganizationPerson} from './organizationStructure';
 import {positionUsage} from './positionUsage';
 import {permissionDomainLabel, roleAttentionLabel, roleInsight} from './roleInsights';
+import {organizationActionItems, type OrganizationActionItem} from './organizationActionCenter';
 
 export type FoundationExecutor = (label: string, work: () => Promise<FoundationState>, success: string) => Promise<boolean>;
 
 interface PageProps {state: FoundationState; service: LocalFoundationService; execute: FoundationExecutor;}
 
-export function OrganizationOverviewPage({state}: Pick<PageProps, 'state'>) {
+export function OrganizationOverviewPage({state, onNavigate}: Pick<PageProps, 'state'> & {onNavigate: (page: OrganizationActionItem['page']) => void}) {
   const organizationalUnits = state.units.filter((unit) => unit.type !== 'شعبه');
   const activeUnits = organizationalUnits.filter((unit) => unit.status === 'active');
   const health = organizationStructureHealth(state);
@@ -31,6 +32,7 @@ export function OrganizationOverviewPage({state}: Pick<PageProps, 'state'>) {
   const peopleWithPosition = activePeople.filter((person) => person.positionId && state.positions.some((position) => position.id === person.positionId && position.status === 'active')).length;
   const fullyAssigned = activePeople.filter((person) => person.unitId && person.positionId && activeUnits.some((unit) => unit.id === person.unitId) && state.positions.some((position) => position.id === person.positionId && position.status === 'active' && position.unitIds.includes(person.unitId!))).length;
   const coverage = Math.round((fullyAssigned / Math.max(activePeople.length, 1)) * 100);
+  const actionItems = organizationActionItems(state).filter((item) => can(state.activeUser, item.permission));
   return <div className="page-stack">
     <OrgIntro icon={Network} eyebrow="سازمان / نمای سازمان" title="ساختار شرکت در یک نگاه" description="شرکت جاری به‌صورت ضمنی فعال است؛ واحدها، مسئولان و افراد بدون پیچیدگی چندشرکتی در یک نمای واحد دیده می‌شوند." />
     <section className="org-metrics">
@@ -38,6 +40,10 @@ export function OrganizationOverviewPage({state}: Pick<PageProps, 'state'>) {
       <OrgMetric icon={UsersRound} value={activePeople.length} label="پرسنل فعال" detail={`${peopleWithUnit.toLocaleString('en-US')} دارای واحد · ${peopleWithPosition.toLocaleString('en-US')} دارای سمت`} />
       <OrgMetric icon={BriefcaseBusiness} value={state.positions.filter((item) => item.status === 'active').length} label="سمت سازمانی" detail="مستقل از نقش دسترسی" />
       <OrgMetric icon={KeyRound} value={state.roles.filter((item) => item.status === 'active').length} label="نقش دسترسی" detail="منبع مجوزهای مؤثر" />
+    </section>
+    <section className="org-panel organization-action-center" aria-label="مرکز اقدام سلامت سازمان">
+      <OrgPanelHeading eyebrow="مرکز اقدام" title="ضعف‌های قابل پیگیری سازمان" text="هر عدد، پرونده‌هایی را نشان می‌دهد که برای اصلاح ساختار نیاز به بررسی دارند؛ با انتخاب هر کارت مستقیم وارد همان بخش شوید." />
+      <div className="organization-action-grid">{actionItems.map((item) => {const Icon = organizationActionIcon(item.id);return <button type="button" key={item.id} className={item.count ? 'has-issue' : 'is-clear'} onClick={() => onNavigate(item.page)}><span><Icon size={20}/></span><div><strong>{item.title}</strong><small>{item.detail}</small></div><b>{item.count.toLocaleString('en-US')}</b><i>{item.count ? 'نیازمند بررسی' : 'بدون مورد'}</i><ChevronLeft size={17}/></button>;})}</div>
     </section>
     <div className="org-overview-grid">
       <section className="org-panel org-panel--wide">
@@ -356,6 +362,10 @@ function UnitDialog({unit, state, onClose, onSubmit}: {unit?: OrganizationalUnit
   };
   const unitTypeOptions = [...new Set(['مدیریت', 'معاونت', 'واحد', 'دپارتمان', 'تیم', type].filter(Boolean))];
   return <OrgModal onClose={onClose}><DialogHeading eyebrow="واحد سازمانی" title={unit ? 'ویرایش واحد' : 'ایجاد واحد جدید'} text="مدیر دائم باید عضو همین واحد باشد؛ جانشین موقت فقط از واحد بالادست و با بازه زمانی مشخص انتخاب می‌شود." onClose={onClose} /><div className="org-form-grid"><FormValidationSummary errors={errors}/><Field label="نام واحد" required><input aria-required="true" aria-invalid={Boolean(errors.length)&&name.trim().length<2} autoFocus value={name} onChange={(event) => setName(event.target.value)} /></Field><Field label="نوع واحد" required><select aria-required="true" aria-invalid={Boolean(errors.length)&&type.trim().length<2} value={type} onChange={(event) => setType(event.target.value)}><option value="">انتخاب کنید</option>{unitTypeOptions.map((item) => <option value={item} key={item}>{item}</option>)}</select></Field><Field label="واحد بالادست"><select value={parentId} onChange={(event) => {setParentId(event.target.value);setActingManagerUserId('');if(!event.target.value)setHasActingManager(false);}}><option value="">سطح اصلی</option>{state.units.filter((item) => item.id !== unit?.id && item.status === 'active' && item.type !== 'شعبه').map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></Field><Field label="مدیر دائم"><select value={managerUserId} disabled={!unit} onChange={(event) => setManagerUserId(event.target.value)}><option value="">تعیین نشده</option>{selectedPermanentManager&&!permanentManagers.some((user)=>user.id===selectedPermanentManager.id)&&<option value={selectedPermanentManager.id}>{userDisplayLabel(selectedPermanentManager,state)} — نیازمند اصلاح جایگاه</option>}{permanentManagers.map((user) => <option key={user.id} value={user.id}>{userDisplayLabel(user,state)}</option>)}</select><small>{unit ? 'فقط افراد فعال همین واحد نمایش داده می‌شوند.' : 'پس از ایجاد واحد و انتقال فرد به آن، مدیر دائم را تعیین کنید.'}</small></Field><label className="check-field field-label--full"><input type="checkbox" checked={hasActingManager} disabled={!unit || !parentId} onChange={(event) => setHasActingManager(event.target.checked)}/><span><strong>ثبت جانشین موقت از واحد بالادست</strong><small>جانشینی در پایان تاریخ تعیین‌شده خودکار خاتمه می‌یابد و مدیر دائم تغییر نمی‌کند.</small></span></label>{hasActingManager && <><Field label="فرد جانشین" required full><select aria-required="true" value={actingManagerUserId} onChange={(event) => setActingManagerUserId(event.target.value)}><option value="">انتخاب فرد فعال واحد بالادست</option>{selectedActingManager&&!actingManagers.some((user)=>user.id===selectedActingManager.id)&&<option value={selectedActingManager.id}>{userDisplayLabel(selectedActingManager,state)} — نیازمند اصلاح جایگاه</option>}{actingManagers.map((user) => <option key={user.id} value={user.id}>{userDisplayLabel(user,state)}</option>)}</select></Field><Field label="تاریخ شروع جانشینی" required><PersianDateInput value={actingManagerStartsOn} required onChange={setActingManagerStartsOn} ariaLabel="تاریخ شمسی شروع جانشینی موقت" /></Field><Field label="تاریخ پایان جانشینی" required><PersianDateInput value={actingManagerEndsOn} min={actingManagerStartsOn} required onChange={setActingManagerEndsOn} ariaLabel="تاریخ شمسی پایان جانشینی موقت" /></Field><Field label="دلیل جانشینی" required full><textarea aria-required="true" rows={3} value={actingManagerReason} onChange={(event) => setActingManagerReason(event.target.value)} placeholder="مثلاً مرخصی مدیر، مأموریت یا فاصله تا انتصاب مدیر جدید" /></Field></>}<Field label="توضیحات" full><textarea value={description} onChange={(event) => setDescription(event.target.value)} /></Field></div><DialogActions onClose={onClose} submit={unit ? 'ذخیره تغییرات' : 'ایجاد واحد'} onSubmit={submit} /></OrgModal>;
+}
+
+function organizationActionIcon(id: OrganizationActionItem['id']): LucideIcon {
+  return ({units:GitBranch, branches:Building2, positions:BriefcaseBusiness, personnel:UsersRound, sales:Network, users:UserCheck, roles:KeyRound, registrations:BadgeCheck})[id];
 }
 
 function UnitPositionDialog({position,initialUnitId,state,onClose,onSubmit}:{position?:OrganizationalPosition;initialUnitId:string;state:FoundationState;onClose:()=>void;onSubmit:(input:PositionInput)=>void}) {

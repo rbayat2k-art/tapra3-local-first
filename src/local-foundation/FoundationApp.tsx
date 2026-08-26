@@ -809,7 +809,7 @@ export function LocalFoundationApp() {
             aria-hidden={tab.id !== activeWorkspaceTabId}
           >
             {tab.page === 'dashboard' && <Dashboard state={foundation} navigate={navigateToPage} destinations={navigationDestinations} usage={navigationUsage} onDestination={openNavigationDestination} />}
-            {tab.page === 'organization' && <OrganizationOverviewPage state={foundation} />}
+            {tab.page === 'organization' && <OrganizationOverviewPage state={foundation} onNavigate={navigateToPage} />}
             {tab.page === 'units' && <UnitsPage state={foundation} service={service} execute={run} />}
             {tab.page === 'branches' && <BranchesPage state={foundation} service={service} execute={run} />}
             {tab.page === 'positions' && <PositionsPage state={foundation} service={service} execute={run} />}

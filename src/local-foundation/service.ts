@@ -22,7 +22,7 @@ import {preparePurchaseRequestInput, purchasePayloadForRecord, readPurchaseReque
 import {canRequestTreasuryFollowUp, linkedTreasuryQueueRecords, treasuryFollowUpDedupeKey} from './purchaseFollowUp';
 import {advanceBranchIds, canEmployeeAdvanceReviewerDecide, canProxyAdvance, canSelfSubmitAdvance, canUserTakeAdvanceStage, readEmployeeAdvancePayload, resolveAdvanceStageAssignee, type AdvanceDecision, type AdvanceStage, type EmployeeAdvanceInput} from './employeeAdvance';
 import {isValidBankCard, isValidIranianLandline, isValidIranianMobile, isValidPostalCode} from '../utils/operationalFormat';
-import {activeWorkflowFor, approvalStagesForRoute, defaultApprovalStages, roleIdsForWorkflowState, selectWorkflowRoute, validateWorkflowPolicy, workflowForRecord, workflowStageAllows} from './workflowPolicy';
+import {activeWorkflowFor, approvalStagesForRoute, defaultApprovalStages, roleIdsForWorkflowState, routeVariantForBranch, selectWorkflowRoute, validateWorkflowPolicy, workflowForRecord, workflowStageAllows} from './workflowPolicy';
 import {createDefaultSalesCompensationRecord, validateSalesCompensationInput, type SalesCompensationInput} from './salesCompensation';
 import {canRequestWorkforceForBranch, resolveWorkforceRequestScope} from './salesManagementScope';
 import {normalizePositionUnitIds, positionSupportsUnit} from './unitPosition';
@@ -584,36 +584,56 @@ export class LocalFoundationService {
     const state = await this.loadState(); const actor = state.activeUser;
     requirePermission(actor, 'organization.personnel.manage', 'مجوز ساخت مسیر فروش را ندارید.');
     validateSalesStructureInput(input, state);
-    const now = new Date().toISOString();
-    const branchCount = state.salesStructures.filter((item) => item.branchUnitId === input.branchUnitId).length + 1;
-    const structure: SalesStructure = {id: newId('sales-structure'), code: `SS-${String(state.salesStructures.length + 1).padStart(3, '0')}`, branchUnitId: input.branchUnitId, salesVicePersonnelId: input.salesVicePersonnelId || undefined, salesManagerPersonnelId: input.salesManagerPersonnelId, seniorSupervisorPersonnelId: input.seniorSupervisorPersonnelId, callCenterSupervisorPersonnelId: input.callCenterSupervisorPersonnelId, status: 'active', version: branchCount, createdAt: now, updatedAt: now};
-    await this.storage.put('sales_structures', structure);
-    await this.appendAudit({actor, effectiveUser: actor, category: 'system', action: 'organization.sales_structure.created', summary: `مسیر فروش سرپرست کال‌سنتر «${salesStructureSupervisorName(structure, state.personnel)}» ایجاد شد.`, outcome: 'success', metadata: {salesStructureId: structure.id, branchUnitId: structure.branchUnitId, callCenterSupervisorPersonnelId: structure.callCenterSupervisorPersonnelId, version: structure.version}});
+    const structureId = newId('sales-structure');
+    await this.storage.transaction(['sales_structures','personnel','organizational_units','audit_events','domain_events','meta'], 'readwrite', async (tx) => {
+      const [salesStructures, personnel, units] = await Promise.all([tx.getAll<SalesStructure>('sales_structures'), tx.getAll<PersonnelRecord>('personnel'), tx.getAll<OrganizationalUnit>('organizational_units')]);
+      const currentState = {...state, salesStructures, personnel, units};
+      validateSalesStructureInput(input, currentState);
+      const now = new Date().toISOString();
+      const branchCount = salesStructures.filter((item) => item.branchUnitId === input.branchUnitId).length + 1;
+      const nextSequence = Math.max(0, ...salesStructures.map((item) => Number(item.code.match(/(\d+)$/)?.[1] ?? 0))) + 1;
+      const structure: SalesStructure = {id: structureId, code: `SS-${String(nextSequence).padStart(3, '0')}`, branchUnitId: input.branchUnitId, salesVicePersonnelId: input.salesVicePersonnelId || undefined, salesManagerPersonnelId: input.salesManagerPersonnelId, seniorSupervisorPersonnelId: input.seniorSupervisorPersonnelId, callCenterSupervisorPersonnelId: input.callCenterSupervisorPersonnelId, status: 'active', version: branchCount, createdAt: now, updatedAt: now};
+      await tx.put('sales_structures', structure);
+      await appendOrganizationMutation(tx, {actor, action: 'organization.sales_structure.created', summary: `مسیر فروش سرپرست کال‌سنتر «${salesStructureSupervisorName(structure, personnel)}» ایجاد شد.`, aggregateType: 'sales-structure', aggregateId: structure.id, eventType: 'SalesStructureCreated', metadata: {salesStructureId: structure.id, branchUnitId: structure.branchUnitId, callCenterSupervisorPersonnelId: structure.callCenterSupervisorPersonnelId, version: structure.version}});
+    });
     return this.loadState();
   }
 
-  async updateSalesStructure(structureId: string, input: SalesStructureInput): Promise<FoundationState> {
+  async updateSalesStructure(structureId: string, expectedUpdatedAt: string, input: SalesStructureInput): Promise<FoundationState> {
     const state = await this.loadState(); const actor = state.activeUser;
     requirePermission(actor, 'organization.personnel.manage', 'مجوز ویرایش مسیر فروش را ندارید.');
     const existing = state.salesStructures.find((item) => item.id === structureId);
     if (!existing) throw new Error('مسیر فروش پیدا نشد.');
+    if (existing.updatedAt !== expectedUpdatedAt) throw new Error('این مسیر فروش در پنجره دیگری تغییر کرده است. صفحه را تازه کنید.');
     if (salesStructureHasAssignmentHistory(structureId, state.personnel)) throw new Error('این مسیر سابقه انتساب پرسنل دارد و برای حفظ تاریخچه قابل ویرایش نیست؛ مسیر جدید بسازید.');
     validateSalesStructureInput(input, state, structureId);
-    const updated: SalesStructure = {...existing, branchUnitId: input.branchUnitId, salesVicePersonnelId: input.salesVicePersonnelId || undefined, salesManagerPersonnelId: input.salesManagerPersonnelId, seniorSupervisorPersonnelId: input.seniorSupervisorPersonnelId, callCenterSupervisorPersonnelId: input.callCenterSupervisorPersonnelId, updatedAt: new Date().toISOString()};
-    await this.storage.put('sales_structures', updated);
-    await this.appendAudit({actor, effectiveUser: actor, category: 'system', action: 'organization.sales_structure.updated', summary: `مسیر فروش سرپرست کال‌سنتر «${salesStructureSupervisorName(updated, state.personnel)}» ویرایش شد.`, outcome: 'success', metadata: {salesStructureId: updated.id, branchUnitId: updated.branchUnitId, callCenterSupervisorPersonnelId: updated.callCenterSupervisorPersonnelId}});
+    await this.storage.transaction(['sales_structures','personnel','organizational_units','audit_events','domain_events','meta'], 'readwrite', async (tx) => {
+      const [current, salesStructures, personnel, units] = await Promise.all([tx.get<SalesStructure>('sales_structures', structureId), tx.getAll<SalesStructure>('sales_structures'), tx.getAll<PersonnelRecord>('personnel'), tx.getAll<OrganizationalUnit>('organizational_units')]);
+      if (!current || current.updatedAt !== expectedUpdatedAt) throw new Error('این مسیر فروش در پنجره دیگری تغییر کرده است. صفحه را تازه کنید.');
+      if (salesStructureHasAssignmentHistory(structureId, personnel)) throw new Error('این مسیر سابقه انتساب پرسنل دارد و برای حفظ تاریخچه قابل ویرایش نیست؛ مسیر جدید بسازید.');
+      validateSalesStructureInput(input, {...state, salesStructures, personnel, units}, structureId);
+      const updated: SalesStructure = {...current, branchUnitId: input.branchUnitId, salesVicePersonnelId: input.salesVicePersonnelId || undefined, salesManagerPersonnelId: input.salesManagerPersonnelId, seniorSupervisorPersonnelId: input.seniorSupervisorPersonnelId, callCenterSupervisorPersonnelId: input.callCenterSupervisorPersonnelId, updatedAt: new Date().toISOString()};
+      await tx.put('sales_structures', updated);
+      await appendOrganizationMutation(tx, {actor, action: 'organization.sales_structure.updated', summary: `مسیر فروش سرپرست کال‌سنتر «${salesStructureSupervisorName(updated, personnel)}» ویرایش شد.`, aggregateType: 'sales-structure', aggregateId: updated.id, eventType: 'SalesStructureUpdated', metadata: {salesStructureId: updated.id, branchUnitId: updated.branchUnitId, callCenterSupervisorPersonnelId: updated.callCenterSupervisorPersonnelId}});
+    });
     return this.loadState();
   }
 
-  async setSalesStructureStatus(structureId: string, status: UserStatus): Promise<FoundationState> {
+  async setSalesStructureStatus(structureId: string, expectedUpdatedAt: string, status: UserStatus): Promise<FoundationState> {
     const state = await this.loadState(); const actor = state.activeUser;
     requirePermission(actor, 'organization.personnel.manage', 'مجوز تغییر وضعیت مسیر فروش را ندارید.');
     const structure = state.salesStructures.find((item) => item.id === structureId); if (!structure) throw new Error('مسیر فروش پیدا نشد.');
+    if (structure.updatedAt !== expectedUpdatedAt) throw new Error('وضعیت این مسیر در پنجره دیگری تغییر کرده است. صفحه را تازه کنید.');
     if (status === 'active' && state.salesStructures.some((item) => item.id !== structureId && item.status === 'active' && item.callCenterSupervisorPersonnelId === structure.callCenterSupervisorPersonnelId)) throw new Error('این سرپرست کال‌سنتر مسیر فعال دیگری دارد و این مسیر قابل فعال‌سازی نیست.');
-    const updated: SalesStructure = {...structure, status, updatedAt: new Date().toISOString()};
-    const affectedSellerCount = state.personnel.filter((item) => item.employmentStatus === 'active' && item.salesStructureId === structureId).length;
-    await this.storage.put('sales_structures', updated);
-    await this.appendAudit({actor, effectiveUser: actor, category: 'system', action: 'organization.sales_structure.status_changed', summary: `مسیر فروش سرپرست کال‌سنتر «${salesStructureSupervisorName(structure, state.personnel)}» ${status === 'active' ? 'فعال' : 'غیرفعال'} شد.`, reason: status === 'inactive' && affectedSellerCount ? `${affectedSellerCount.toLocaleString('en-US')} فروشنده فعال باید به مسیر دیگری منتقل شوند.` : undefined, outcome: 'success', metadata: {salesStructureId: structure.id, callCenterSupervisorPersonnelId: structure.callCenterSupervisorPersonnelId, status, affectedSellerCount}});
+    await this.storage.transaction(['sales_structures','personnel','audit_events','domain_events','meta'], 'readwrite', async (tx) => {
+      const [current, salesStructures, personnel] = await Promise.all([tx.get<SalesStructure>('sales_structures', structureId), tx.getAll<SalesStructure>('sales_structures'), tx.getAll<PersonnelRecord>('personnel')]);
+      if (!current || current.updatedAt !== expectedUpdatedAt) throw new Error('وضعیت این مسیر در پنجره دیگری تغییر کرده است. صفحه را تازه کنید.');
+      if (status === 'active' && salesStructures.some((item) => item.id !== structureId && item.status === 'active' && item.callCenterSupervisorPersonnelId === current.callCenterSupervisorPersonnelId)) throw new Error('این سرپرست کال‌سنتر مسیر فعال دیگری دارد و این مسیر قابل فعال‌سازی نیست.');
+      const updated: SalesStructure = {...current, status, updatedAt: new Date().toISOString()};
+      const affectedSellerCount = personnel.filter((item) => item.employmentStatus === 'active' && item.salesStructureId === structureId).length;
+      await tx.put('sales_structures', updated);
+      await appendOrganizationMutation(tx, {actor, action: 'organization.sales_structure.status_changed', summary: `مسیر فروش سرپرست کال‌سنتر «${salesStructureSupervisorName(current, personnel)}» ${status === 'active' ? 'فعال' : 'غیرفعال'} شد.`, reason: status === 'inactive' && affectedSellerCount ? `${affectedSellerCount.toLocaleString('en-US')} فروشنده فعال باید به مسیر دیگری منتقل شوند.` : undefined, aggregateType: 'sales-structure', aggregateId: current.id, eventType: 'SalesStructureStatusChanged', metadata: {salesStructureId: current.id, callCenterSupervisorPersonnelId: current.callCenterSupervisorPersonnelId, status, affectedSellerCount}});
+    });
     return this.loadState();
   }
 
@@ -2891,7 +2911,7 @@ function normalizeCustomerInput(input: CustomerInput): CustomerInput { return {.
 function validateCustomerInput(input: CustomerInput) { const name = customerDisplayName(input); if (name.length < 2) throw new Error(input.type === 'legal' ? 'نام حقوقی مشتری را وارد کنید.' : 'نام و نام خانوادگی مشتری را وارد کنید.'); if (!input.source.trim()) throw new Error('منبع آشنایی مشتری را مشخص کنید.'); if (input.nationalId && !isValidIranianNationalId(input.nationalId)) throw new Error('کد ملی مشتری معتبر نیست.'); for (const phone of input.phones) {const number = normalizePhone(phone.number); if (!isValidIranianMobile(number) && !isValidIranianLandline(number)) throw new Error('شماره تماس باید همراه ۱۱ رقمی یا تلفن ثابت همراه پیش‌شماره باشد.');} for (const address of input.addresses) {if (address.postalCode && !isValidPostalCode(address.postalCode)) throw new Error('کد پستی مشتری باید دقیقاً ۱۰ رقم باشد.');} if (input.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input.email)) throw new Error('ایمیل مشتری معتبر نیست.'); }
 export function findDuplicateCustomers(customers: CustomerRecord[], target: CustomerInput | CustomerRecord, excludeId?: string) { const phones = new Set(target.phones.map((item) => normalizePhone(item.number)).filter(Boolean)); const nationalId = normalizeNationalId(target.nationalId); const businessId = normalizeNationalId(target.businessId); return customers.filter((item) => item.id !== excludeId && !item.mergedIntoCustomerId && ((nationalId && normalizeNationalId(item.nationalId) === nationalId) || (businessId && normalizeNationalId(item.businessId) === businessId) || item.phones.some((phone) => phones.has(normalizePhone(phone.number))))); }
 function customerStatusLabel(status: CustomerRecord['status']) { return status === 'active' ? 'فعال' : status === 'inactive' ? 'غیرفعال' : 'بالقوه'; }
-function validateUnitInput(input: UnitInput, state: Pick<FoundationState, 'units'|'users'|'personnel'>, excludeId?: string) {
+function validateUnitInput(input: UnitInput, state: Pick<FoundationState, 'units'|'users'|'personnel'|'roles'|'workflows'>, excludeId?: string) {
   const {units, users, personnel} = state;
   if (input.name.trim().length < 2) throw new Error('نام واحد باید حداقل ۲ نویسه باشد.');
   if (input.type.trim().length < 2) throw new Error('نوع واحد را مشخص کنید.');
@@ -2899,7 +2919,14 @@ function validateUnitInput(input: UnitInput, state: Pick<FoundationState, 'units
   if (excludeId && input.parentId === excludeId) throw new Error('یک واحد نمی‌تواند والد خودش باشد.');
   if (input.parentId && !units.some((unit) => unit.id === input.parentId && unit.status === 'active' && unit.type !== 'شعبه')) throw new Error('واحد بالادست باید یک واحد سازمانی فعال و معتبر باشد.');
   if (input.type.trim() === 'شعبه') {
-    if (input.managerUserId && !users.some((user) => user.id === input.managerUserId && user.status === 'active')) throw new Error('مسئول شعبه باید یک حساب کاربری فعال باشد.');
+    if (input.managerUserId) {
+      const manager = users.find((user) => user.id === input.managerUserId && user.status === 'active');
+      const workflow = state.workflows.find((item) => item.moduleId === 'employee-advance');
+      const routeId = workflow && excludeId ? routeVariantForBranch(workflow, excludeId)?.id : undefined;
+      const managerRoleIds = roleIdsForWorkflowState(state, 'employee-advance', 'branch_review', ['role-advance-branch-manager'], workflow?.version, routeId);
+      if (!manager) throw new Error('مسئول شعبه باید یک حساب کاربری فعال باشد.');
+      if (!manager.roleIds.some((roleId) => managerRoleIds.includes(roleId))) throw new Error('مسئول شعبه باید نقش مصوب مرحله بررسی شعبه را داشته باشد.');
+    }
     return;
   }
   if (!excludeId && input.managerUserId) throw new Error('ابتدا واحد را ایجاد و پرسنل را به آن منتقل کنید؛ سپس مدیر دائم همان واحد را تعیین کنید.');
@@ -2945,7 +2972,7 @@ async function appendOrganizationMutation(tx: StorageTransaction, input: {
   actor: LocalUser;
   action: string;
   summary: string;
-  aggregateType: 'organizational-unit' | 'organizational-position';
+  aggregateType: 'organizational-unit' | 'organizational-position' | 'sales-structure';
   aggregateId: string;
   eventType: string;
   metadata?: AuditEvent['metadata'];
