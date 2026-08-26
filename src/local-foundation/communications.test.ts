@@ -4,7 +4,7 @@ import {FOUNDATION_STORES} from './model';
 import {createSeedData} from './seed';
 import {LocalFoundationService} from './service';
 import type {StorageAdapter, StorageTransaction} from './storage';
-import {chatMemberUserIds, validateChatAttachment} from './communications';
+import {chatHiddenForUserIds, chatMemberUserIds, normalizeChatSearch, validateChatAttachment} from './communications';
 
 class MemoryStorage implements StorageAdapter {
   private stores = new Map<FoundationStoreName, Map<IDBValidKey, unknown>>(FOUNDATION_STORES.map((store)=>[store,new Map()]));
@@ -64,5 +64,37 @@ describe('specialized organizational conversations',()=>{
     const state=await service.createChatConversation({kind:'direct',memberUserIds:['persona-user-manager']});const chat=state.operationalRecords.find((record)=>record.moduleId==='chat')!;
     await service.sendChatMessage({conversationId:chat.id,attachment:{kind:'voice',fileName:'voice.ogg',mimeType:'audio/ogg',size:3,dataUrl:'data:audio/ogg;base64,QUJD'}});
     await expect(service.exportSnapshot()).rejects.toThrow('فقط پشتیبان رمزگذاری‌شده');
+  });
+
+  it('hides a direct chat only for the current user and resurfaces it on a new message',async()=>{
+    const storage=new MemoryStorage();await storage.replaceAll(createSeedData());const service=new LocalFoundationService(storage);
+    await sessionAs(storage,'persona-seller');
+    let state=await service.createChatConversation({kind:'direct',memberUserIds:['persona-user-manager']});
+    let chat=state.operationalRecords.find((record)=>record.moduleId==='chat')!;
+    state=await service.sendChatMessage({conversationId:chat.id,body:'این سابقه باید برای طرف مقابل باقی بماند.'});
+    chat=state.operationalRecords.find((record)=>record.id===chat.id)!;
+    state=await service.hideChatForMe(chat.id,chat.version);
+    expect(state.operationalRecords.some((record)=>record.id===chat.id||record.relatedRecordId===chat.id)).toBe(false);
+    const stored=await storage.get<OperationalRecord>('chats',chat.id);
+    expect(chatHiddenForUserIds(stored!)).toEqual(['persona-seller']);
+
+    await sessionAs(storage,'persona-user-manager');state=await service.loadState();
+    expect(state.operationalRecords.some((record)=>record.id===chat.id)).toBe(true);
+    await service.sendChatMessage({conversationId:chat.id,body:'پیام تازه برای بازگرداندن گفتگو'});
+
+    await sessionAs(storage,'persona-seller');state=await service.loadState();
+    expect(state.operationalRecords.some((record)=>record.id===chat.id)).toBe(true);
+    expect(state.operationalRecords.filter((record)=>record.relatedRecordId===chat.id)).toHaveLength(2);
+  });
+
+  it('does not let a user hide the organizational-unit conversation',async()=>{
+    const storage=new MemoryStorage();await storage.replaceAll(createSeedData());const service=new LocalFoundationService(storage);
+    await sessionAs(storage,'persona-seller');const state=await service.createChatConversation({kind:'unit',unitId:'unit-sales'});
+    const chat=state.operationalRecords.find((record)=>record.moduleId==='chat')!;
+    await expect(service.hideChatForMe(chat.id,chat.version)).rejects.toThrow('گفتگوی واحد سازمانی');
+  });
+
+  it('normalizes Persian variants and zero-width spaces for member search',()=>{
+    expect(normalizeChatSearch('  كارشناس‌ فروش  ')).toBe(normalizeChatSearch('کارشناس فروش'));
   });
 });

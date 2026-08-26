@@ -45,6 +45,10 @@ export function chatMemberUserIds(record: OperationalRecord): string[] {
   return [...new Set(payloadStrings(record.payload.memberUserIds))];
 }
 
+export function chatHiddenForUserIds(record: OperationalRecord): string[] {
+  return [...new Set(payloadStrings(record.payload.hiddenForUserIds))];
+}
+
 export function isChatMember(record: OperationalRecord, user: LocalUser): boolean {
   if (record.moduleId !== 'chat' || record.companyId !== user.companyId) return false;
   if (chatKind(record) === 'unit') return Boolean(record.unitId && record.unitId === user.unitId);
@@ -52,7 +56,11 @@ export function isChatMember(record: OperationalRecord, user: LocalUser): boolea
 }
 
 export function visibleChatRecords(records: OperationalRecord[], user: LocalUser): OperationalRecord[] {
-  return records.filter((record) => record.moduleId === 'chat' && isChatMember(record, user));
+  return records.filter((record) => record.moduleId === 'chat' && isChatMember(record, user) && !chatHiddenForUserIds(record).includes(user.id));
+}
+
+export function normalizeChatSearch(value: string): string {
+  return value.normalize('NFKC').replace(/[يى]/g, 'ی').replace(/ك/g, 'ک').replace(/[\u200c\u200f]/g, ' ').replace(/\s+/g, ' ').trim().toLocaleLowerCase('fa');
 }
 
 export function chatMessages(state: FoundationState, conversationId: string): OperationalRecord[] {

@@ -18,12 +18,27 @@ async function enterAsAdmin(page: Page) {
 
 test('گفت‌وگوی شخصی با هویت متمایز، متن، فایل و ویس روی موبایل کار می‌کند',async({page})=>{
   test.setTimeout(60_000);
+  await page.addInitScript(()=>{
+    class FakeMediaRecorder {
+      static isTypeSupported(){return true;}
+      state:'inactive'|'recording'='inactive';mimeType:string;ondataavailable:((event:{data:Blob})=>void)|null=null;onstop:(()=>void)|null=null;onerror:(()=>void)|null=null;
+      constructor(_stream:MediaStream,options?:MediaRecorderOptions){this.mimeType=options?.mimeType??'audio/webm';}
+      start(){this.state='recording';}
+      stop(){this.state='inactive';this.ondataavailable?.({data:new Blob(['recorded voice'],{type:'audio/webm'})});this.onstop?.();}
+    }
+    Object.defineProperty(window,'MediaRecorder',{value:FakeMediaRecorder,configurable:true});
+    Object.defineProperty(navigator,'mediaDevices',{value:{getUserMedia:async()=>({getTracks:()=>[{stop(){}}]})},configurable:true});
+  });
   await enterAsAdmin(page);
   await page.getByRole('button',{name:/گفت‌وگوی جدید/}).first().click();
   const dialog=page.getByRole('dialog',{name:'ساخت گفت‌وگوی جدید'});
   await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText('@s.moradi');
-  await expect(dialog).toContainText('@s.moradi.sales');
+  const memberSearch=dialog.getByRole('textbox',{name:'جست‌وجوی شخص یا عضو'});
+  await memberSearch.fill('s.moradi');
+  await expect(dialog).toContainText('@s.moradi');await expect(dialog).toContainText('@s.moradi.sales');
+  await memberSearch.fill('P-2002');
+  await expect(dialog.locator('.chat-member-picker label')).toHaveCount(1);
+  await memberSearch.fill('s.moradi');
   const target=dialog.locator('.chat-member-picker label').filter({hasText:'@s.moradi'}).filter({hasNotText:'@s.moradi.sales'}).first();
   await target.locator('input').check();
   await dialog.getByRole('button',{name:'ساخت گفت‌وگو'}).click();
@@ -34,13 +49,15 @@ test('گفت‌وگوی شخصی با هویت متمایز، متن، فایل 
   await composer.getByRole('button',{name:'ارسال پیام'}).click();
   await expect(page.locator('.chat-message--mine')).toContainText('فایل برنامه');
 
-  await composer.locator('input[type="file"]').first().setInputFiles({name:'plan.txt',mimeType:'text/plain',buffer:Buffer.from('Shahrah chat attachment')});
+  await page.locator('.chat-message-list').evaluate((element)=>{const dataTransfer=new DataTransfer();dataTransfer.items.add(new File(['Shahrah chat attachment'],'plan.txt',{type:'text/plain'}));element.dispatchEvent(new DragEvent('dragenter',{bubbles:true,dataTransfer}));element.dispatchEvent(new DragEvent('drop',{bubbles:true,dataTransfer}));});
   await expect(composer).toContainText('plan.txt');
   await composer.getByRole('button',{name:'ارسال پیام'}).click();
   await expect(page.locator('a[download="plan.txt"]')).toBeVisible();
 
-  await composer.locator('input[type="file"]').nth(1).setInputFiles({name:'voice.ogg',mimeType:'audio/ogg',buffer:Buffer.from('voice')});
-  await expect(composer).toContainText('voice.ogg');
+  await composer.getByRole('button',{name:'شروع ضبط ویس'}).click();
+  await expect(composer).toContainText('در حال ضبط ویس');
+  await composer.getByRole('button',{name:'توقف ضبط ویس'}).click();
+  await expect(composer).toContainText(/voice-\d+\.webm/);
   await composer.getByRole('button',{name:'ارسال پیام'}).click();
   await expect(page.locator('.chat-voice audio')).toBeVisible();
 
@@ -50,4 +67,11 @@ test('گفت‌وگوی شخصی با هویت متمایز، متن، فایل 
   expect(await page.locator('body').evaluate((element)=>element.scrollWidth>element.clientWidth+1)).toBe(false);
   const results=await new AxeBuilder({page}).withTags(['wcag2a','wcag2aa','wcag21a','wcag21aa']).analyze();
   expect(results.violations.filter((item)=>item.impact==='serious'||item.impact==='critical'),JSON.stringify(results.violations,null,2)).toEqual([]);
+
+  await page.setViewportSize({width:1280,height:900});
+  await page.getByRole('button',{name:'حذف گفتگو از فهرست من'}).click();
+  const hideDialog=page.getByRole('dialog',{name:'حذف گفتگو از فهرست من'});
+  await expect(hideDialog).toContainText('برای طرف مقابل یا اعضای گروه حذف نمی‌شوند');
+  await hideDialog.getByRole('button',{name:'حذف از فهرست من'}).click();
+  await expect(page.locator('.chat-thread-header')).toHaveCount(0);
 });

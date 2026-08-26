@@ -36,7 +36,7 @@ import {
   REGISTRATION_ASSIGNABLE_ROLE_IDS,
 } from './accessPolicy';
 import {
-  chatAttachment, chatKind, chatMemberUserIds, isChatMember, validateChatAttachment,
+  chatAttachment, chatHiddenForUserIds, chatKind, chatMemberUserIds, isChatMember, validateChatAttachment,
   type ChatConversationInput, type ChatMessageInput,
 } from './communications';
 import {
@@ -579,7 +579,7 @@ export class LocalFoundationService {
     const visibleChatIds = new Set(
       effectiveSession.actingAdminUserId
         ? []
-        : allOperationalRecords.filter((record) => record.moduleId === 'chat' && isChatMember(record, activeUser)).map((record) => record.id),
+        : allOperationalRecords.filter((record) => record.moduleId === 'chat' && isChatMember(record, activeUser) && !chatHiddenForUserIds(record).includes(activeUser.id)).map((record) => record.id),
     );
     const visibleLetterIds = new Set(effectiveSession.actingAdminUserId ? [] : allOperationalRecords.filter((record) => {
       if (record.moduleId !== 'letter') return false;
@@ -614,9 +614,9 @@ export class LocalFoundationService {
     const requestedIds = [...new Set((input.memberUserIds ?? []).filter((id) => id && id !== actor.id))];
     const now = new Date().toISOString(); const conversationId = newId('chat'); const correlationId = newId('correlation');
     await this.storage.transaction(['users','organizational_units','chats','workflow_history','audit_events','domain_events','meta'], 'readwrite', async (tx) => {
-      const [users, units, chats, audits] = await Promise.all([
+      const [users, units, chats, history, audits] = await Promise.all([
         tx.getAll<LocalUser>('users'), tx.getAll<OrganizationalUnit>('organizational_units'),
-        tx.getAll<OperationalRecord>('chats'), tx.getAll<AuditEvent>('audit_events'),
+        tx.getAll<OperationalRecord>('chats'), tx.getAll<OperationalRecordHistory>('workflow_history'), tx.getAll<AuditEvent>('audit_events'),
       ]);
       const currentActor = users.find((user) => user.id === actor.id && user.status === 'active');
       if (!currentActor || currentActor.companyId !== actor.companyId) throw new Error('حساب شما هم‌زمان تغییر کرده است؛ دوباره وارد شوید.');
@@ -640,7 +640,18 @@ export class LocalFoundationService {
         memberUserIds = [actor.id, ...requestedIds].sort();
         if (input.kind === 'direct') {
           const existing = chats.find((record) => record.status === 'active' && chatKind(record) === 'direct' && JSON.stringify(chatMemberUserIds(record).sort()) === JSON.stringify(memberUserIds));
-          if (existing) return;
+          if (existing) {
+            const hiddenForUserIds = chatHiddenForUserIds(existing).filter((id) => id !== currentActor.id);
+            if (hiddenForUserIds.length !== chatHiddenForUserIds(existing).length) {
+              const updated = {...existing,updatedByActorId:currentActor.actorId,updatedAt:now,version:existing.version+1,payload:{...existing.payload,hiddenForUserIds}};
+              await tx.put('chats', updated);
+              await tx.put('workflow_history',{id:newId('history'),recordId:existing.id,moduleId:'chat',sequence:history.filter((item)=>item.recordId===existing.id).length+1,eventType:'edited',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,snapshot:{action:'restored_for_user'},occurredAt:now} satisfies OperationalRecordHistory);
+              await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:actor.companyId,category:'system',action:'communications.chat.restored',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:`گفت‌وگوی «${existing.title}» به فهرست بازگردانده شد.`,outcome:'success',correlationId,metadata:{conversationId:existing.id}} satisfies AuditEvent);
+              await tx.put('domain_events',{id:newId('event'),aggregateType:'chat',aggregateId:existing.id,eventType:'ChatRestoredForUser',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{userId:currentActor.id}} satisfies DomainEvent);
+              await tx.put('meta',{id:'lastPersistedAt',value:now});
+            }
+            return;
+          }
           title = selected[0]!.name;
         } else if (title.length < 3) throw new Error('نام گروه باید حداقل ۳ نویسه باشد.');
       }
@@ -673,15 +684,40 @@ export class LocalFoundationService {
       const committedAttachment = attachment ? validateChatAttachment(attachment) : undefined;
       const attachmentPayload = committedAttachment ? {kind:committedAttachment.kind,fileName:committedAttachment.fileName,mimeType:committedAttachment.mimeType,size:committedAttachment.size,dataUrl:committedAttachment.dataUrl} : null;
       const message: OperationalRecord = {id:messageId,moduleId:'message',domain:'communications',trackingCode:`MSG-${new Date().getFullYear()}-${String(messages.length+1).padStart(5,'0')}`,title:body.slice(0,80)||(committedAttachment?.kind==='voice'?'ویس':'فایل'),description:body,status:'sent',priority:'normal',companyId:actor.companyId,unitId:currentActor.unitId,ownerPersonnelId:currentActor.personnelId,assigneeUserId:currentActor.id,relatedRecordId:conversation.id,createdByActorId:currentActor.actorId,createdByUserId:currentActor.id,updatedByActorId:currentActor.actorId,workflowVersion:1,version:1,payload:{conversationId:conversation.id,senderUserId:currentActor.id,messageKind:committedAttachment?.kind??'text',attachment:attachmentPayload},createdAt:now,updatedAt:now};
-      await tx.put('messages', message);
-      await tx.put('chats', {...conversation,updatedByActorId:currentActor.actorId,updatedAt:now,version:conversation.version+1,payload:{...conversation.payload,lastMessageAt:now,lastMessageSenderUserId:currentActor.id}});
-      await tx.put('workflow_history',{id:newId('history'),recordId:message.id,moduleId:'message',sequence:1,eventType:'created',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,snapshot:{conversationId:conversation.id,messageKind:committedAttachment?.kind??'text',hasText:Boolean(body),fileName:committedAttachment?.fileName??null,fileSize:committedAttachment?.size??null},occurredAt:now} satisfies OperationalRecordHistory);
       const recipients = chatKind(conversation)==='unit'
         ? users.filter((user)=>user.status==='active'&&user.companyId===actor.companyId&&user.unitId===conversation.unitId&&user.id!==actor.id)
         : chatMemberUserIds(conversation).filter((id)=>id!==actor.id).map((id)=>users.find((user)=>user.id===id&&user.status==='active')).filter((user):user is LocalUser=>Boolean(user));
+      const recipientIds = new Set(recipients.map((recipient) => recipient.id));
+      const hiddenForUserIds = chatHiddenForUserIds(conversation).filter((id) => !recipientIds.has(id));
+      await tx.put('messages', message);
+      await tx.put('chats', {...conversation,updatedByActorId:currentActor.actorId,updatedAt:now,version:conversation.version+1,payload:{...conversation.payload,lastMessageAt:now,lastMessageSenderUserId:currentActor.id,hiddenForUserIds}});
+      await tx.put('workflow_history',{id:newId('history'),recordId:message.id,moduleId:'message',sequence:1,eventType:'created',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,snapshot:{conversationId:conversation.id,messageKind:committedAttachment?.kind??'text',hasText:Boolean(body),fileName:committedAttachment?.fileName??null,fileSize:committedAttachment?.size??null},occurredAt:now} satisfies OperationalRecordHistory);
       for (const recipient of recipients) await tx.put('notifications',{id:newId('notification'),userId:recipient.id,kind:'chat_message',title:`پیام جدید در ${conversation.title}`,message:`${currentActor.name} پیام تازه‌ای فرستاد.`,actorUserId:currentActor.id,relatedRecordId:conversation.id,relatedModuleId:'chat',dedupeKey:`chat:${conversation.id}:${recipient.id}:${message.id}`,createdAt:now} satisfies UserNotification);
       await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:actor.companyId,category:'system',action:'communications.message.sent',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:`پیام جدید در گفت‌وگوی «${conversation.title}» ثبت شد.`,outcome:'success',correlationId,metadata:{conversationId:conversation.id,messageId,messageKind:committedAttachment?.kind??'text',recipientCount:recipients.length}} satisfies AuditEvent);
       await tx.put('domain_events',{id:newId('event'),aggregateType:'chat',aggregateId:conversation.id,eventType:'ChatMessageSent',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{messageId,messageKind:committedAttachment?.kind??'text',recipientCount:recipients.length}} satisfies DomainEvent);
+      await tx.put('meta',{id:'lastPersistedAt',value:now});
+    });
+    return this.loadState();
+  }
+
+  async hideChatForMe(conversationId: string, expectedVersion: number): Promise<FoundationState> {
+    const state = await this.loadState(); const actor = state.activeUser;
+    if (state.session.actingAdminUserId) throw new Error('حذف گفتگو در حالت مشاهده آزمایشی مجاز نیست.');
+    const now = new Date().toISOString(); const correlationId = newId('correlation');
+    await this.storage.transaction(['users','chats','workflow_history','audit_events','domain_events','meta'],'readwrite',async(tx)=>{
+      const [users,conversation,history,audits]=await Promise.all([
+        tx.getAll<LocalUser>('users'),tx.get<OperationalRecord>('chats',conversationId),tx.getAll<OperationalRecordHistory>('workflow_history'),tx.getAll<AuditEvent>('audit_events'),
+      ]);
+      const currentActor=users.find((user)=>user.id===actor.id&&user.status==='active'&&user.companyId===actor.companyId);
+      if(!currentActor||!conversation||conversation.version!==expectedVersion)throw new Error('این گفتگو هم‌زمان تغییر کرده است؛ صفحه را تازه کنید.');
+      if(!isChatMember(conversation,currentActor))throw new Error('این گفتگو در دسترس شما نیست.');
+      if(chatKind(conversation)==='unit')throw new Error('گفتگوی واحد سازمانی از فهرست حذف نمی‌شود.');
+      const hiddenForUserIds=[...new Set([...chatHiddenForUserIds(conversation),currentActor.id])];
+      const updated={...conversation,updatedByActorId:currentActor.actorId,updatedAt:now,version:conversation.version+1,payload:{...conversation.payload,hiddenForUserIds}};
+      await tx.put('chats',updated);
+      await tx.put('workflow_history',{id:newId('history'),recordId:conversation.id,moduleId:'chat',sequence:history.filter((item)=>item.recordId===conversation.id).length+1,eventType:'edited',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,snapshot:{action:'hidden_for_user'},occurredAt:now} satisfies OperationalRecordHistory);
+      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:actor.companyId,category:'system',action:'communications.chat.hidden',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:`گفتگوی «${conversation.title}» از فهرست کاربر حذف شد.`,outcome:'success',correlationId,metadata:{conversationId:conversation.id}} satisfies AuditEvent);
+      await tx.put('domain_events',{id:newId('event'),aggregateType:'chat',aggregateId:conversation.id,eventType:'ChatHiddenForUser',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{userId:currentActor.id}} satisfies DomainEvent);
       await tx.put('meta',{id:'lastPersistedAt',value:now});
     });
     return this.loadState();
