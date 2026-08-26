@@ -773,6 +773,32 @@ export class LocalFoundationService {
     });return this.loadState();
   }
 
+  async updateLetter(letterId:string,expectedVersion:number,input:LetterInput):Promise<FoundationState>{
+    const state=await this.loadState();const actor=state.activeUser;
+    if(state.session.actingAdminUserId)throw new Error('ویرایش نامه در حالت مشاهده آزمایشی مجاز نیست.');
+    const subject=input.subject.trim(),body=input.body.trim(),externalParty=input.externalParty?.trim()??'';
+    const recipientUserIds=[...new Set((input.recipientUserIds??[]).filter((id)=>id&&id!==actor.id))];
+    const recipientUnitIds=[...new Set((input.recipientUnitIds??[]).filter(Boolean))];
+    if(subject.length<3)throw new Error('موضوع نامه باید حداقل ۳ نویسه باشد.');if(body.length<5)throw new Error('متن نامه را کامل وارد کنید.');
+    if(input.direction!=='outgoing'&&!recipientUserIds.length&&!recipientUnitIds.length)throw new Error('برای نامه حداقل یک فرد یا واحد گیرنده انتخاب کنید.');
+    if(input.direction!=='internal'&&externalParty.length<2)throw new Error('نام فرستنده یا گیرنده بیرونی را وارد کنید.');
+    const attachment=input.attachment?validateLetterAttachment(input.attachment):undefined;const now=new Date().toISOString(),correlationId=newId('correlation');
+    await this.storage.transaction(['users','organizational_units','letters','workflow_history','audit_events','domain_events','meta'],'readwrite',async(tx)=>{
+      const [users,units,current,history,audits]=await Promise.all([tx.getAll<LocalUser>('users'),tx.getAll<OrganizationalUnit>('organizational_units'),tx.get<OperationalRecord>('letters',letterId),tx.getAll<OperationalRecordHistory>('workflow_history'),tx.getAll<AuditEvent>('audit_events')]);
+      const currentActor=users.find((user)=>user.id===actor.id&&user.status==='active'&&user.companyId===actor.companyId);if(!currentActor||!current||current.version!==expectedVersion)throw new Error('این نامه هم‌زمان تغییر کرده است؛ صفحه را تازه کنید.');
+      if(current.createdByUserId!==currentActor.id)throw new Error('فقط نویسنده نامه می‌تواند آن را ویرایش کند.');
+      if(!['draft','in_review'].includes(current.status))throw new Error('پس از اقدام بازبین یا صدور مجوز، ویرایش نامه ممکن نیست.');
+      const actedByOther=history.some((item)=>item.recordId===current.id&&item.actorId!==currentActor.actorId);if(actedByOther)throw new Error('شخص دیگری روی این نامه اقدام کرده است؛ ویرایش دیگر مجاز نیست.');
+      const recipients=recipientUserIds.map((id)=>users.find((user)=>user.id===id&&user.status==='active'&&user.companyId===actor.companyId));if(recipients.some((user)=>!user))throw new Error('یکی از گیرندگان دیگر فعال یا هم‌شرکت نیست.');
+      const recipientUnits=recipientUnitIds.map((id)=>units.find((unit)=>unit.id===id&&unit.status==='active'));if(recipientUnits.some((unit)=>!unit))throw new Error('یکی از واحدهای گیرنده دیگر فعال نیست.');
+      const senderUnit=units.find((unit)=>unit.id===currentActor.unitId);const previousStatus=current.status;
+      const updated:OperationalRecord={...current,title:subject,description:body.slice(0,180),status:'draft',unitId:currentActor.unitId,updatedByActorId:currentActor.actorId,updatedAt:now,version:current.version+1,payload:{...current.payload,direction:input.direction,body,recipientUserIds,recipientUnitIds,senderUnitId:currentActor.unitId??null,senderUnitName:senderUnit?.name??null,externalParty:externalParty||null,attachment:attachment?{fileName:attachment.fileName,mimeType:attachment.mimeType,size:attachment.size,dataUrl:attachment.dataUrl}:null,reviewRequestedByUserId:null,approvedByUserId:null,sentByUserId:null,senderSignature:null}};
+      await tx.put('letters',updated);await tx.put('workflow_history',{id:newId('history'),recordId:current.id,moduleId:'letter',sequence:history.filter((item)=>item.recordId===current.id).length+1,eventType:'edited',fromState:previousStatus,toState:'draft',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,snapshot:{action:'edited',subjectChanged:current.title!==subject,recipientCount:recipientUserIds.length,recipientUnitCount:recipientUnitIds.length,hasAttachment:Boolean(attachment)},occurredAt:now} satisfies OperationalRecordHistory);
+      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:current.companyId,category:'system',action:'letter.edited',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:`نامه «${current.title}» ویرایش و به پیش‌نویس بازگردانده شد.`,outcome:'success',correlationId,metadata:{letterId:current.id,previousVersion:current.version,nextVersion:updated.version,fromState:previousStatus,toState:'draft'}} satisfies AuditEvent);
+      await tx.put('domain_events',{id:newId('event'),aggregateType:'letter',aggregateId:current.id,eventType:'LetterEdited',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{fromState:previousStatus,toState:'draft',version:updated.version}} satisfies DomainEvent);await tx.put('meta',{id:'lastPersistedAt',value:now});
+    });return this.loadState();
+  }
+
   async transitionLetter(letterId:string,expectedVersion:number,action:LetterAction):Promise<FoundationState>{
     const state=await this.loadState();const actor=state.activeUser;if(state.session.actingAdminUserId)throw new Error('اقدام روی نامه در حالت مشاهده آزمایشی مجاز نیست.');const now=new Date().toISOString(),correlationId=newId('correlation');
     await this.storage.transaction(['users','organizational_units','letters','workflow_history','notifications','audit_events','domain_events','meta'],'readwrite',async(tx)=>{
