@@ -40,8 +40,8 @@ import {
   type ChatConversationInput, type ChatMessageInput,
 } from './communications';
 import {
-  isLetterParticipant, letterAttachment, letterDirection, letterRecipientUserIds, validateLetterAttachment,
-  type LetterAction, type LetterInput,
+  isLetterParticipant, letterAttachment, letterDirection, letterRecipientUnitIds, letterRecipientUserIds, letterSignatureCanonicalText, validateLetterAttachment,
+  type LetterAction, type LetterDigitalSignature, type LetterInput,
 } from './letters';
 
 export interface UnitInput {
@@ -338,8 +338,21 @@ export class LocalFoundationService {
       ...seededRecruitmentRecords.filter((seedRecord) => !priorRecruitmentRecords.some((record) => record.id === seedRecord.id)),
     ];
     const priorLetterRecords = existing.letters as OperationalRecord[];
+    const formalizedSeedLetters = priorLetterRecords.map((record) => {
+      const template = seededLetterRecords.find((candidate) => candidate.id === record.id);
+      if (!template) return record;
+      return {
+        ...record,
+        payload: {
+          ...record.payload,
+          recipientUnitIds: Array.isArray(record.payload.recipientUnitIds) ? record.payload.recipientUnitIds : template.payload.recipientUnitIds,
+          senderUnitId: typeof record.payload.senderUnitId === 'string' ? record.payload.senderUnitId : template.payload.senderUnitId,
+          senderUnitName: typeof record.payload.senderUnitName === 'string' ? record.payload.senderUnitName : template.payload.senderUnitName,
+        },
+      };
+    });
     seeded.letters = [
-      ...priorLetterRecords,
+      ...formalizedSeedLetters,
       ...seededLetterRecords.filter((seedRecord) => !priorLetterRecords.some((record) => record.id === seedRecord.id)),
     ];
     const migratedRecruitmentIds = new Set((seeded.recruitment_cases as OperationalRecord[]).map((record) => record.id));
@@ -737,36 +750,43 @@ export class LocalFoundationService {
     if(state.session.actingAdminUserId)throw new Error('ثبت نامه در حالت مشاهده آزمایشی مجاز نیست.');
     const subject=input.subject.trim(),body=input.body.trim(),externalParty=input.externalParty?.trim()??'';
     const recipientUserIds=[...new Set((input.recipientUserIds??[]).filter((id)=>id&&id!==actor.id))];
+    const recipientUnitIds=[...new Set((input.recipientUnitIds??[]).filter(Boolean))];
     if(subject.length<3)throw new Error('موضوع نامه باید حداقل ۳ نویسه باشد.');if(body.length<5)throw new Error('متن نامه را کامل وارد کنید.');
-    if(input.direction!=='outgoing'&&!recipientUserIds.length)throw new Error('برای نامه حداقل یک گیرنده داخلی انتخاب کنید.');
+    if(input.direction!=='outgoing'&&!recipientUserIds.length&&!recipientUnitIds.length)throw new Error('برای نامه حداقل یک فرد یا واحد گیرنده انتخاب کنید.');
     if(input.direction!=='internal'&&externalParty.length<2)throw new Error('نام فرستنده یا گیرنده بیرونی را وارد کنید.');
     if(input.direction==='incoming')requirePermission(actor,permissionFor('letter','create'),'ثبت نامه وارده فقط برای دبیرخانه مجاز است.');
     const attachment=input.attachment?validateLetterAttachment(input.attachment):undefined;const now=new Date().toISOString(),letterId=newId('letter'),correlationId=newId('correlation');
-    await this.storage.transaction(['users','letters','workflow_history','notifications','audit_events','domain_events','meta'],'readwrite',async(tx)=>{
-      const [users,letters,audits]=await Promise.all([tx.getAll<LocalUser>('users'),tx.getAll<OperationalRecord>('letters'),tx.getAll<AuditEvent>('audit_events')]);
+    await this.storage.transaction(['users','organizational_units','letters','workflow_history','notifications','audit_events','domain_events','meta'],'readwrite',async(tx)=>{
+      const [users,units,letters,audits]=await Promise.all([tx.getAll<LocalUser>('users'),tx.getAll<OrganizationalUnit>('organizational_units'),tx.getAll<OperationalRecord>('letters'),tx.getAll<AuditEvent>('audit_events')]);
       const currentActor=users.find((user)=>user.id===actor.id&&user.status==='active'&&user.companyId===actor.companyId);if(!currentActor)throw new Error('حساب شما هم‌زمان تغییر کرده است؛ دوباره وارد شوید.');
       const recipients=recipientUserIds.map((id)=>users.find((user)=>user.id===id&&user.status==='active'&&user.companyId===actor.companyId));if(recipients.some((user)=>!user))throw new Error('یکی از گیرندگان دیگر فعال یا هم‌شرکت نیست.');
+      const recipientUnits=recipientUnitIds.map((id)=>units.find((unit)=>unit.id===id&&unit.status==='active'));if(recipientUnits.some((unit)=>!unit))throw new Error('یکی از واحدهای گیرنده دیگر فعال نیست.');
       const committedAttachment=attachment?validateLetterAttachment(attachment):undefined;const status=input.direction==='incoming'?'sent':'draft';
-      const letter:OperationalRecord={id:letterId,moduleId:'letter',domain:'letter',trackingCode:`LTR-${new Date().getFullYear()}-${String(letters.length+1).padStart(5,'0')}`,title:subject,description:body.slice(0,180),status,priority:'normal',companyId:actor.companyId,unitId:currentActor.unitId,ownerPersonnelId:currentActor.personnelId,assigneeUserId:currentActor.id,createdByActorId:currentActor.actorId,createdByUserId:currentActor.id,updatedByActorId:currentActor.actorId,workflowVersion:1,version:1,payload:{direction:input.direction,body,recipientUserIds,externalParty:externalParty||null,attachment:committedAttachment?{fileName:committedAttachment.fileName,mimeType:committedAttachment.mimeType,size:committedAttachment.size,dataUrl:committedAttachment.dataUrl}:null},createdAt:now,updatedAt:now};
-      await tx.put('letters',letter);await tx.put('workflow_history',{id:newId('history'),recordId:letter.id,moduleId:'letter',sequence:1,eventType:'created',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,snapshot:{direction:input.direction,status,recipientCount:recipientUserIds.length,externalParty:externalParty||null,hasAttachment:Boolean(committedAttachment),fileName:committedAttachment?.fileName??null},occurredAt:now} satisfies OperationalRecordHistory);
-      if(status==='sent')for(const recipient of recipients.filter((item):item is LocalUser=>Boolean(item)))await tx.put('notifications',{id:newId('notification'),userId:recipient.id,kind:'letter_received',title:`نامه جدید: ${subject}`,message:`نامه ${letter.trackingCode} در کارتابل شما ثبت شد.`,actorUserId:currentActor.id,relatedRecordId:letter.id,relatedModuleId:'letter',dedupeKey:`letter:${letter.id}:${recipient.id}`,createdAt:now} satisfies UserNotification);
-      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:actor.companyId,category:'system',action:'letter.created',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:`نامه «${subject}» ثبت شد.`,outcome:'success',correlationId,metadata:{letterId,direction:input.direction,status,recipientCount:recipientUserIds.length,hasAttachment:Boolean(committedAttachment)}} satisfies AuditEvent);
+      const persianYear=new Intl.DateTimeFormat('fa-IR-u-nu-latn',{year:'numeric'}).format(new Date(now)).replace(/\D/g,'');
+      const letterSequence=letters.reduce((maximum,record)=>{const match=new RegExp(`^LTR-${persianYear}-(\\d+)$`).exec(record.trackingCode);return match?Math.max(maximum,Number(match[1])):maximum;},0)+1;
+      const senderUnit=units.find((unit)=>unit.id===currentActor.unitId);
+      const letter:OperationalRecord={id:letterId,moduleId:'letter',domain:'letter',trackingCode:`LTR-${persianYear}-${String(letterSequence).padStart(5,'0')}`,title:subject,description:body.slice(0,180),status,priority:'normal',companyId:actor.companyId,unitId:currentActor.unitId,ownerPersonnelId:currentActor.personnelId,assigneeUserId:currentActor.id,createdByActorId:currentActor.actorId,createdByUserId:currentActor.id,updatedByActorId:currentActor.actorId,workflowVersion:1,version:1,payload:{direction:input.direction,body,recipientUserIds,recipientUnitIds,senderUnitId:currentActor.unitId??null,senderUnitName:senderUnit?.name??null,externalParty:externalParty||null,attachment:committedAttachment?{fileName:committedAttachment.fileName,mimeType:committedAttachment.mimeType,size:committedAttachment.size,dataUrl:committedAttachment.dataUrl}:null},createdAt:now,updatedAt:now};
+      await tx.put('letters',letter);await tx.put('workflow_history',{id:newId('history'),recordId:letter.id,moduleId:'letter',sequence:1,eventType:'created',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,snapshot:{direction:input.direction,status,recipientCount:recipientUserIds.length,recipientUnitCount:recipientUnitIds.length,externalParty:externalParty||null,hasAttachment:Boolean(committedAttachment),fileName:committedAttachment?.fileName??null},occurredAt:now} satisfies OperationalRecordHistory);
+      if(status==='sent'){const notifiedIds=new Set([...recipients.filter((item):item is LocalUser=>Boolean(item)).map((item)=>item.id),...users.filter((user)=>user.status==='active'&&user.companyId===actor.companyId&&user.id!==currentActor.id&&Boolean(user.unitId&&recipientUnitIds.includes(user.unitId))).map((user)=>user.id)]);for(const recipientId of notifiedIds)await tx.put('notifications',{id:newId('notification'),userId:recipientId,kind:'letter_received',title:`نامه جدید: ${subject}`,message:`نامه ${letter.trackingCode} در کارتابل شما ثبت شد.`,actorUserId:currentActor.id,relatedRecordId:letter.id,relatedModuleId:'letter',dedupeKey:`letter:${letter.id}:${recipientId}`,createdAt:now} satisfies UserNotification);}
+      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:actor.companyId,category:'system',action:'letter.created',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:`نامه «${subject}» ثبت شد.`,outcome:'success',correlationId,metadata:{letterId,direction:input.direction,status,recipientCount:recipientUserIds.length,recipientUnitCount:recipientUnitIds.length,hasAttachment:Boolean(committedAttachment)}} satisfies AuditEvent);
       await tx.put('domain_events',{id:newId('event'),aggregateType:'letter',aggregateId:letter.id,eventType:'LetterCreated',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{direction:input.direction,status}} satisfies DomainEvent);await tx.put('meta',{id:'lastPersistedAt',value:now});
     });return this.loadState();
   }
 
   async transitionLetter(letterId:string,expectedVersion:number,action:LetterAction):Promise<FoundationState>{
     const state=await this.loadState();const actor=state.activeUser;if(state.session.actingAdminUserId)throw new Error('اقدام روی نامه در حالت مشاهده آزمایشی مجاز نیست.');const now=new Date().toISOString(),correlationId=newId('correlation');
-    await this.storage.transaction(['users','letters','workflow_history','notifications','audit_events','domain_events','meta'],'readwrite',async(tx)=>{
-      const [users,current,history,audits]=await Promise.all([tx.getAll<LocalUser>('users'),tx.get<OperationalRecord>('letters',letterId),tx.getAll<OperationalRecordHistory>('workflow_history'),tx.getAll<AuditEvent>('audit_events')]);
+    await this.storage.transaction(['users','organizational_units','letters','workflow_history','notifications','audit_events','domain_events','meta'],'readwrite',async(tx)=>{
+      const [users,units,current,history,audits]=await Promise.all([tx.getAll<LocalUser>('users'),tx.getAll<OrganizationalUnit>('organizational_units'),tx.get<OperationalRecord>('letters',letterId),tx.getAll<OperationalRecordHistory>('workflow_history'),tx.getAll<AuditEvent>('audit_events')]);
       const currentActor=users.find((user)=>user.id===actor.id&&user.status==='active');if(!currentActor||!current||current.version!==expectedVersion)throw new Error('این نامه در پنجره دیگری تغییر کرده است؛ صفحه را تازه کنید.');
       if(letterDirection(current)==='incoming')throw new Error('نامه وارده نیاز به چرخه ارسال ندارد.');let nextStatus:string,eventType:string;
       if(action==='submit_review'){if(current.status!=='draft'||(current.createdByUserId!==actor.id&&!can(actor,permissionFor('letter','edit'))))throw new Error('این پیش‌نویس قابل ارسال برای بازبینی نیست.');nextStatus='in_review';eventType='LetterSubmittedForReview';}
       else if(action==='approve'){requirePermission(actor,permissionFor('letter','approve'),'مجوز تأیید نامه را ندارید.');if(current.status!=='in_review')throw new Error('فقط نامه در حال بازبینی قابل تأیید است.');if(current.createdByUserId===actor.id)throw new Error('سازنده نامه نمی‌تواند همان نامه را تأیید کند.');nextStatus='approved_for_send';eventType='LetterApproved';}
       else{if(current.status!=='approved_for_send')throw new Error('نامه هنوز مجوز ارسال ندارد.');if(current.createdByUserId!==actor.id&&!can(actor,permissionFor('letter','transition')))throw new Error('ارسال این نامه در اختیار شما نیست.');nextStatus='sent';eventType='LetterSent';}
-      const updated:OperationalRecord={...current,status:nextStatus,updatedByActorId:currentActor.actorId,updatedAt:now,version:current.version+1,payload:{...current.payload,[action==='approve'?'approvedByUserId':action==='send'?'sentByUserId':'reviewRequestedByUserId']:currentActor.id}};await tx.put('letters',updated);
+      const signerUnit=units.find((unit)=>unit.id===currentActor.unitId);const signatureIdentity={signerUserId:currentActor.id,signerActorId:currentActor.actorId,signerName:currentActor.name,signerUnitId:currentActor.unitId??'',signerUnitName:signerUnit?.name??'',signedAt:now};
+      const senderSignature:LetterDigitalSignature|undefined=action==='send'?{kind:'system-sha256-v1',...signatureIdentity,digestSha256:await sha256TextHex(letterSignatureCanonicalText(current,signatureIdentity))}:undefined;
+      const updated:OperationalRecord={...current,status:nextStatus,updatedByActorId:currentActor.actorId,updatedAt:now,version:current.version+1,payload:{...current.payload,[action==='approve'?'approvedByUserId':action==='send'?'sentByUserId':'reviewRequestedByUserId']:currentActor.id,...(senderSignature?{senderSignature}: {})}};await tx.put('letters',updated);
       const sequence=history.filter((item)=>item.recordId===current.id).length+1;await tx.put('workflow_history',{id:newId('history'),recordId:current.id,moduleId:'letter',sequence,eventType:'transitioned',fromState:current.status,toState:nextStatus,actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,snapshot:{action,status:nextStatus},occurredAt:now} satisfies OperationalRecordHistory);
-      if(action==='send')for(const recipientId of letterRecipientUserIds(current)){const recipient=users.find((user)=>user.id===recipientId&&user.status==='active');if(recipient)await tx.put('notifications',{id:newId('notification'),userId:recipient.id,kind:'letter_received',title:`نامه جدید: ${current.title}`,message:`نامه ${current.trackingCode} در کارتابل شما ثبت شد.`,actorUserId:currentActor.id,relatedRecordId:current.id,relatedModuleId:'letter',dedupeKey:`letter:${current.id}:${recipient.id}`,createdAt:now} satisfies UserNotification);}
+      if(action==='send'){const unitIds=letterRecipientUnitIds(current);const recipientIds=new Set([...letterRecipientUserIds(current),...users.filter((user)=>user.status==='active'&&user.companyId===current.companyId&&user.id!==currentActor.id&&Boolean(user.unitId&&unitIds.includes(user.unitId))).map((user)=>user.id)]);for(const recipientId of recipientIds){const recipient=users.find((user)=>user.id===recipientId&&user.status==='active'&&user.companyId===current.companyId);if(recipient)await tx.put('notifications',{id:newId('notification'),userId:recipient.id,kind:'letter_received',title:`نامه جدید: ${current.title}`,message:`نامه ${current.trackingCode} در کارتابل شما ثبت شد.`,actorUserId:currentActor.id,relatedRecordId:current.id,relatedModuleId:'letter',dedupeKey:`letter:${current.id}:${recipient.id}`,createdAt:now} satisfies UserNotification);}}
       await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:current.companyId,category:'system',action:`letter.${action}`,actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:`وضعیت نامه «${current.title}» به ${nextStatus} تغییر کرد.`,outcome:'success',correlationId,metadata:{letterId:current.id,fromState:current.status,toState:nextStatus,action}} satisfies AuditEvent);await tx.put('domain_events',{id:newId('event'),aggregateType:'letter',aggregateId:current.id,eventType,actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{fromState:current.status,toState:nextStatus}} satisfies DomainEvent);await tx.put('meta',{id:'lastPersistedAt',value:now});
     });return this.loadState();
   }
@@ -3244,4 +3264,5 @@ async function sha256DataUrlContent(value: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', bytes);
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
+async function sha256TextHex(value:string):Promise<string>{const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value));return Array.from(new Uint8Array(digest),(byte)=>byte.toString(16).padStart(2,'0')).join('');}
 export function isEncryptedSnapshot(value: unknown): value is EncryptedSnapshot { return Boolean(value && typeof value === 'object' && (value as EncryptedSnapshot).format === 'tapra2-local-snapshot-encrypted'); }

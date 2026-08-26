@@ -317,6 +317,18 @@ export function seedOperationalRecords(): Record<string, OperationalRecord[]> {
       createdAt:'2026-08-25T06:20:00.000Z',updatedAt:'2026-08-25T09:10:00.000Z',
     },
   ];
+  const formalLetterRouting: Record<string,{recipientUnitIds:string[];senderUnitId:string;senderUnitName:string}> = {
+    'letter-sample-incoming-bank': {recipientUnitIds:['unit-management','unit-finance'],senderUnitId:'unit-management',senderUnitName:'مدیریت'},
+    'letter-sample-outgoing-support': {recipientUnitIds:[],senderUnitId:'unit-management',senderUnitName:'مدیریت'},
+    'letter-sample-internal-performance': {recipientUnitIds:['unit-management'],senderUnitId:'unit-human-resources',senderUnitName:'منابع انسانی'},
+    'letter-sample-draft-archive': {recipientUnitIds:['unit-management','unit-human-resources'],senderUnitId:'unit-management',senderUnitName:'مدیریت'},
+    'letter-sample-review-tax': {recipientUnitIds:[],senderUnitId:'unit-human-resources',senderUnitName:'منابع انسانی'},
+    'letter-sample-approved-supplier': {recipientUnitIds:[],senderUnitId:'unit-management',senderUnitName:'مدیریت'},
+  };
+  for (const record of result.letters as OperationalRecord[]) {
+    const routing=formalLetterRouting[record.id];
+    if(routing)record.payload={...record.payload,...routing};
+  }
   const recruitmentModule = ERP_MODULES.find((item) => item.id === 'recruitment-case');
   if (recruitmentModule) {
     const basePayload = {

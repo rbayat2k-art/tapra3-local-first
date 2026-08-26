@@ -4,6 +4,7 @@ import {FOUNDATION_STORES} from './model';
 import {createSeedData} from './seed';
 import {LocalFoundationService} from './service';
 import type {StorageAdapter,StorageTransaction} from './storage';
+import {letterDigitalSignature,letterPdfBaseName,letterSignatureCanonicalText} from './letters';
 
 class MemoryStorage implements StorageAdapter{
   private stores=new Map<FoundationStoreName,Map<IDBValidKey,unknown>>(FOUNDATION_STORES.map((store)=>[store,new Map()]));
@@ -13,6 +14,7 @@ class MemoryStorage implements StorageAdapter{
   async exportSnapshot():Promise<SnapshotManifest>{throw new Error('not used');}async importSnapshot():Promise<void>{throw new Error('not used');}
 }
 async function sessionAs(storage:MemoryStorage,userId:string,actingAdminUserId?:string){const session=await storage.get<FoundationSession>('sessions','active-session');await storage.put('sessions',{...session!,activeUserId:userId,actingAdminUserId,signedOutAt:undefined});}
+async function sha256(value:string){const bytes=new TextEncoder().encode(value);const digest=await crypto.subtle.digest('SHA-256',bytes);return [...new Uint8Array(digest)].map((item)=>item.toString(16).padStart(2,'0')).join('');}
 
 describe('specialized formal correspondence',()=>{
   it('seeds persistent incoming, outgoing, draft and review examples with realistic history',()=>{
@@ -23,6 +25,8 @@ describe('specialized formal correspondence',()=>{
     ]);
     expect(letters.map((record)=>record.status)).toEqual(['sent','sent','sent','draft','in_review','approved_for_send']);
     expect(letters.map((record)=>record.payload.direction)).toEqual(['incoming','outgoing','internal','internal','outgoing','outgoing']);
+    expect(letters.find((record)=>record.id==='letter-sample-incoming-bank')?.payload.recipientUnitIds).toEqual(['unit-management','unit-finance']);
+    expect(letters.find((record)=>record.id==='letter-sample-internal-performance')?.payload.senderUnitName).toBe('منابع انسانی');
     expect(history.filter((item)=>item.recordId==='letter-sample-outgoing-support').map((item)=>item.toState)).toEqual(['draft','in_review','approved_for_send','sent']);
     expect(history.filter((item)=>item.recordId==='letter-sample-review-tax')).toHaveLength(2);
     expect(history.filter((item)=>item.recordId==='letter-sample-approved-supplier').at(-1)?.actorId).toBe('actor-system-admin');
@@ -47,12 +51,24 @@ describe('specialized formal correspondence',()=>{
   it('keeps a draft private, enforces independent review and delivers only after final send',async()=>{
     const storage=new MemoryStorage();await storage.replaceAll(createSeedData());const service=new LocalFoundationService(storage);
     await sessionAs(storage,'persona-seller');let state=await service.createLetter({direction:'internal',subject:'برنامه جلسه فروش',body:'زمان‌بندی جلسه فروش برای بررسی ارسال می‌شود.',recipientUserIds:['persona-user-manager']});let letter=state.operationalRecords.find((record)=>record.moduleId==='letter')!;expect(letter.status).toBe('draft');
+    const persianYear=new Intl.DateTimeFormat('fa-IR-u-nu-latn',{year:'numeric'}).format(new Date()).replace(/\D/g,'');expect(letter.trackingCode).toMatch(new RegExp(`^LTR-${persianYear}-\\d{5}$`));
     await sessionAs(storage,'persona-user-manager');expect((await service.loadState()).operationalRecords.some((record)=>record.id===letter.id)).toBe(false);
     await sessionAs(storage,'persona-seller');state=await service.transitionLetter(letter.id,letter.version,'submit_review');letter=state.operationalRecords.find((record)=>record.id===letter.id)!;expect(letter.status).toBe('in_review');await expect(service.transitionLetter(letter.id,letter.version,'approve')).rejects.toThrow();
     await sessionAs(storage,'persona-product-owner');state=await service.loadState();letter=state.operationalRecords.find((record)=>record.id===letter.id)!;state=await service.transitionLetter(letter.id,letter.version,'approve');letter=state.operationalRecords.find((record)=>record.id===letter.id)!;expect(letter.status).toBe('approved_for_send');
-    await sessionAs(storage,'persona-seller');state=await service.loadState();letter=state.operationalRecords.find((record)=>record.id===letter.id)!;await service.transitionLetter(letter.id,letter.version,'send');
+    await sessionAs(storage,'persona-seller');state=await service.loadState();letter=state.operationalRecords.find((record)=>record.id===letter.id)!;state=await service.transitionLetter(letter.id,letter.version,'send');letter=state.operationalRecords.find((record)=>record.id===letter.id)!;const signature=letterDigitalSignature(letter);expect(signature?.digestSha256).toMatch(/^[a-f0-9]{64}$/);const {kind:_,digestSha256,...identity}=signature!;expect(await sha256(letterSignatureCanonicalText(letter,identity))).toBe(digestSha256);expect(letterPdfBaseName('  برنامه / جلسه: فروش  ')).toBe('برنامه - جلسه- فروش');
     await sessionAs(storage,'persona-user-manager');state=await service.loadState();expect(state.operationalRecords.find((record)=>record.id===letter.id)?.status).toBe('sent');expect(state.notifications.some((item)=>item.kind==='letter_received'&&item.relatedRecordId===letter.id)).toBe(true);
     await sessionAs(storage,'persona-purchase-requester');expect((await service.loadState()).operationalRecords.some((record)=>record.id===letter.id)).toBe(false);
+  });
+
+  it('delivers an internal letter to every active member of the selected organizational unit',async()=>{
+    const storage=new MemoryStorage();await storage.replaceAll(createSeedData());const service=new LocalFoundationService(storage);
+    await sessionAs(storage,'persona-seller');let state=await service.createLetter({direction:'internal',subject:'هماهنگی زیرساخت فناوری اطلاعات',body:'این نامه برای همه اعضای فعال واحد فناوری اطلاعات ارسال می‌شود.',recipientUnitIds:['unit-it']});let letter=state.operationalRecords.find((record)=>record.title==='هماهنگی زیرساخت فناوری اطلاعات')!;
+    state=await service.transitionLetter(letter.id,letter.version,'submit_review');letter=state.operationalRecords.find((record)=>record.id===letter.id)!;
+    await sessionAs(storage,'persona-product-owner');state=await service.loadState();letter=state.operationalRecords.find((record)=>record.id===letter.id)!;state=await service.transitionLetter(letter.id,letter.version,'approve');letter=state.operationalRecords.find((record)=>record.id===letter.id)!;
+    await sessionAs(storage,'persona-seller');state=await service.loadState();letter=state.operationalRecords.find((record)=>record.id===letter.id)!;await service.transitionLetter(letter.id,letter.version,'send');
+    await sessionAs(storage,'persona-user-manager');state=await service.loadState();expect(state.operationalRecords.some((record)=>record.id===letter.id)).toBe(true);expect(state.notifications.some((item)=>item.relatedRecordId===letter.id)).toBe(true);
+    await sessionAs(storage,'persona-purchase-requester');expect((await service.loadState()).operationalRecords.some((record)=>record.id===letter.id)).toBe(false);
+    await sessionAs(storage,'persona-seller');await expect(service.createLetter({direction:'internal',subject:'واحد نامعتبر',body:'نامه‌ای که نباید ثبت شود.',recipientUnitIds:['unit-does-not-exist']})).rejects.toThrow('واحدهای گیرنده');
   });
 
   it('rejects QA writes and requires encryption for a letter attachment',async()=>{
