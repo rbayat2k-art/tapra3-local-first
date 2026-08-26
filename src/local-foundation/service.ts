@@ -35,6 +35,14 @@ import {
   assertDirectAccessAssignmentAllowed, assertProtectedRoleMutationAllowed, assertRoleDefinitionAllowed, PRIMARY_ADMIN_USER_ID,
   REGISTRATION_ASSIGNABLE_ROLE_IDS,
 } from './accessPolicy';
+import {
+  chatAttachment, chatKind, chatMemberUserIds, isChatMember, validateChatAttachment,
+  type ChatConversationInput, type ChatMessageInput,
+} from './communications';
+import {
+  isLetterParticipant, letterAttachment, letterDirection, letterRecipientUserIds, validateLetterAttachment,
+  type LetterAction, type LetterInput,
+} from './letters';
 
 export interface UnitInput {
   name: string;
@@ -568,7 +576,21 @@ export class LocalFoundationService {
     // expose no event rows. Audit summaries and actor fields often contain PII.
     const projectedAudits = auditorView ? [] : normalizedAudits;
     const allOperationalRecords = operationalParts.flat();
+    const visibleChatIds = new Set(
+      effectiveSession.actingAdminUserId
+        ? []
+        : allOperationalRecords.filter((record) => record.moduleId === 'chat' && isChatMember(record, activeUser)).map((record) => record.id),
+    );
+    const visibleLetterIds = new Set(effectiveSession.actingAdminUserId ? [] : allOperationalRecords.filter((record) => {
+      if (record.moduleId !== 'letter') return false;
+      if (isLetterParticipant(record, activeUser)) return true;
+      if (!['in_review','approved_for_send'].includes(record.status)) return false;
+      return ['approve','transition','view'].some((action) => authorize({persona:activeUser,permission:permissionFor('letter',action as 'approve'|'transition'|'view'),action:action as 'approve'|'transition'|'view',resource:operationalRecordResource(activeUser,record)}).allowed);
+    }).map((record) => record.id));
     const operationalRecords = (auditorView ? [] : allOperationalRecords).filter((record) => {
+      if (record.moduleId === 'chat') return visibleChatIds.has(record.id);
+      if (record.moduleId === 'message') return Boolean(record.relatedRecordId && visibleChatIds.has(record.relatedRecordId));
+      if (record.moduleId === 'letter') return visibleLetterIds.has(record.id);
       if (record.moduleId !== 'personnel-document') return true;
       const target = personnel.find((item) => item.id === record.ownerPersonnelId);
       if (!target) return false;
@@ -577,7 +599,131 @@ export class LocalFoundationService {
       return Boolean(permission && authorize({persona: activeUser, permission, action: 'view', resource: this.personnelResource({users, activeUser} as FoundationState, target)}).allowed);
     }).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     const projectedActiveUser = projectedUsers.find((user) => user.id === activeUser.id) ?? activeUser;
-    return {users: projectedUsers, activeUser: projectedActiveUser, session: effectiveSession, units: units.sort((a, b) => a.order - b.order || a.name.localeCompare(b.name, 'fa')), positions: positions.sort((a, b) => a.title.localeCompare(b.title, 'fa')), roles: roles.sort((a, b) => Number(b.protected) - Number(a.protected) || a.name.localeCompare(b.name, 'fa')), personnel: projectedPersonnel.sort((a, b) => a.personnelCode.localeCompare(b.personnelCode, 'fa')), personnelProfileChangeRequests: auditorView ? [] : profileChangeRequests.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), salesStructures: auditorView ? [] : salesStructures.sort((a, b) => salesStructureSupervisorName(a, personnel).localeCompare(salesStructureSupervisorName(b, personnel), 'fa')), customers: auditorView ? [] : customers.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), customerImports: auditorView ? [] : customerImports.sort((a, b) => b.createdAt.localeCompare(a.createdAt)), workflows, workflowVersions, operationalRecords, operationalHistory: auditorView ? [] : history.sort((a, b) => b.occurredAt.localeCompare(a.occurredAt)), notifications: notifications.filter((item) => item.userId === activeUser.id).sort((a, b) => b.createdAt.localeCompare(a.createdAt)), registrationRequests: auditorView ? [] : registrations.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), qaDataset: qaManifests.find((item) => item.id === 'large-qa') ?? {id: 'large-qa', status: 'empty', roleCount: 0, userCount: 0, seed: 'tapra2-large-qa-v1'}, projections: auditorView ? [] : projections, audits: projectedAudits.sort((a, b) => b.sequence - a.sequence), recordCount: auditorView ? projectedAudits.length : records.length + personnel.length + profileChangeRequests.length + salesStructures.length + customers.length + operationalRecords.length + notifications.length, lastPersistedAt: typeof persistedAt?.value === 'string' ? persistedAt.value : effectiveSession.switchedAt};
+    const projectedOperationalHistory = auditorView ? [] : history.filter((item) => {
+      if (['chat','message'].includes(item.moduleId)) return visibleChatIds.has(item.recordId) || operationalRecords.some((record) => record.id === item.recordId);
+      if (item.moduleId === 'letter') return visibleLetterIds.has(item.recordId);
+      return true;
+    }).sort((a, b) => b.occurredAt.localeCompare(a.occurredAt));
+    return {users: projectedUsers, activeUser: projectedActiveUser, session: effectiveSession, units: units.sort((a, b) => a.order - b.order || a.name.localeCompare(b.name, 'fa')), positions: positions.sort((a, b) => a.title.localeCompare(b.title, 'fa')), roles: roles.sort((a, b) => Number(b.protected) - Number(a.protected) || a.name.localeCompare(b.name, 'fa')), personnel: projectedPersonnel.sort((a, b) => a.personnelCode.localeCompare(b.personnelCode, 'fa')), personnelProfileChangeRequests: auditorView ? [] : profileChangeRequests.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), salesStructures: auditorView ? [] : salesStructures.sort((a, b) => salesStructureSupervisorName(a, personnel).localeCompare(salesStructureSupervisorName(b, personnel), 'fa')), customers: auditorView ? [] : customers.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), customerImports: auditorView ? [] : customerImports.sort((a, b) => b.createdAt.localeCompare(a.createdAt)), workflows, workflowVersions, operationalRecords, operationalHistory: projectedOperationalHistory, notifications: notifications.filter((item) => item.userId === activeUser.id).sort((a, b) => b.createdAt.localeCompare(a.createdAt)), registrationRequests: auditorView ? [] : registrations.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), qaDataset: qaManifests.find((item) => item.id === 'large-qa') ?? {id: 'large-qa', status: 'empty', roleCount: 0, userCount: 0, seed: 'tapra2-large-qa-v1'}, projections: auditorView ? [] : projections, audits: projectedAudits.sort((a, b) => b.sequence - a.sequence), recordCount: auditorView ? projectedAudits.length : records.length + personnel.length + profileChangeRequests.length + salesStructures.length + customers.length + operationalRecords.length + notifications.length, lastPersistedAt: typeof persistedAt?.value === 'string' ? persistedAt.value : effectiveSession.switchedAt};
+  }
+
+  async createChatConversation(input: ChatConversationInput): Promise<FoundationState> {
+    const state = await this.loadState(); const actor = state.activeUser;
+    if (state.session.actingAdminUserId) throw new Error('گفت‌وگو در حالت مشاهده آزمایشی در دسترس نیست؛ با حساب واقعی وارد شوید.');
+    if (actor.status !== 'active') throw new Error('حساب غیرفعال نمی‌تواند گفت‌وگو بسازد.');
+    const requestedIds = [...new Set((input.memberUserIds ?? []).filter((id) => id && id !== actor.id))];
+    const now = new Date().toISOString(); const conversationId = newId('chat'); const correlationId = newId('correlation');
+    await this.storage.transaction(['users','organizational_units','chats','workflow_history','audit_events','domain_events','meta'], 'readwrite', async (tx) => {
+      const [users, units, chats, audits] = await Promise.all([
+        tx.getAll<LocalUser>('users'), tx.getAll<OrganizationalUnit>('organizational_units'),
+        tx.getAll<OperationalRecord>('chats'), tx.getAll<AuditEvent>('audit_events'),
+      ]);
+      const currentActor = users.find((user) => user.id === actor.id && user.status === 'active');
+      if (!currentActor || currentActor.companyId !== actor.companyId) throw new Error('حساب شما هم‌زمان تغییر کرده است؛ دوباره وارد شوید.');
+      let title = input.title?.trim() ?? '';
+      let unitId: string | undefined;
+      let memberUserIds: string[];
+      if (input.kind === 'unit') {
+        unitId = input.unitId || currentActor.unitId;
+        if (!unitId || unitId !== currentActor.unitId) throw new Error('هر کاربر فقط گفت‌وگوی واحد سازمانی خودش را می‌سازد.');
+        const unit = units.find((item) => item.id === unitId && item.status === 'active');
+        if (!unit) throw new Error('واحد سازمانی فعال پیدا نشد.');
+        const existing = chats.find((record) => record.status === 'active' && chatKind(record) === 'unit' && record.companyId === actor.companyId && record.unitId === unitId);
+        if (existing) return;
+        memberUserIds = users.filter((user) => user.status === 'active' && user.companyId === actor.companyId && user.unitId === unitId).map((user) => user.id);
+        title = `گفت‌وگوی واحد ${unit.name}`;
+      } else {
+        if (input.kind === 'direct' && requestedIds.length !== 1) throw new Error('برای گفت‌وگوی شخصی دقیقاً یک نفر را انتخاب کنید.');
+        if (input.kind === 'group' && requestedIds.length < 1) throw new Error('برای گروه حداقل یک عضو دیگر انتخاب کنید.');
+        const selected = requestedIds.map((id) => users.find((user) => user.id === id && user.status === 'active' && user.companyId === actor.companyId));
+        if (selected.some((user) => !user)) throw new Error('یکی از اعضا دیگر فعال یا هم‌شرکت نیست.');
+        memberUserIds = [actor.id, ...requestedIds].sort();
+        if (input.kind === 'direct') {
+          const existing = chats.find((record) => record.status === 'active' && chatKind(record) === 'direct' && JSON.stringify(chatMemberUserIds(record).sort()) === JSON.stringify(memberUserIds));
+          if (existing) return;
+          title = selected[0]!.name;
+        } else if (title.length < 3) throw new Error('نام گروه باید حداقل ۳ نویسه باشد.');
+      }
+      const sequence = chats.length + 1;
+      const conversation: OperationalRecord = {id:conversationId,moduleId:'chat',domain:'communications',trackingCode:`CHT-${new Date().getFullYear()}-${String(sequence).padStart(4,'0')}`,title,description:'',status:'active',priority:'normal',companyId:actor.companyId,unitId,ownerPersonnelId:actor.personnelId,assigneeUserId:actor.id,createdByActorId:actor.actorId,createdByUserId:actor.id,updatedByActorId:actor.actorId,workflowVersion:1,version:1,payload:{conversationKind:input.kind,memberUserIds,lastMessageAt:null},createdAt:now,updatedAt:now};
+      await tx.put('chats', conversation);
+      await tx.put('workflow_history', {id:newId('history'),recordId:conversation.id,moduleId:'chat',sequence:1,eventType:'created',actorId:actor.actorId,actorName:actor.name,effectiveUserId:actor.id,snapshot:{conversationKind:input.kind,memberCount:memberUserIds.length,unitId:unitId??null},occurredAt:now} satisfies OperationalRecordHistory);
+      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:actor.companyId,category:'system',action:'communications.chat.created',actorId:actor.actorId,actorName:actor.name,effectiveUserId:actor.id,occurredAt:now,summary:`گفت‌وگوی «${title}» ساخته شد.`,outcome:'success',correlationId,metadata:{conversationId,kind:input.kind,memberCount:memberUserIds.length}} satisfies AuditEvent);
+      await tx.put('domain_events',{id:newId('event'),aggregateType:'chat',aggregateId:conversationId,eventType:'ChatCreated',actorId:actor.actorId,occurredAt:now,correlationId,payload:{kind:input.kind,memberCount:memberUserIds.length}} satisfies DomainEvent);
+      await tx.put('meta',{id:'lastPersistedAt',value:now});
+    });
+    return this.loadState();
+  }
+
+  async sendChatMessage(input: ChatMessageInput): Promise<FoundationState> {
+    const state = await this.loadState(); const actor = state.activeUser;
+    if (state.session.actingAdminUserId) throw new Error('ارسال پیام در حالت مشاهده آزمایشی مجاز نیست.');
+    const body = input.body?.trim() ?? '';
+    if (body.length > 4000) throw new Error('متن پیام نباید بیشتر از ۴۰۰۰ نویسه باشد.');
+    const attachment = input.attachment ? validateChatAttachment(input.attachment) : undefined;
+    if (!body && !attachment) throw new Error('متن، فایل یا ویس را برای ارسال انتخاب کنید.');
+    const now = new Date().toISOString(); const messageId = newId('message'); const correlationId = newId('correlation');
+    await this.storage.transaction(['users','chats','messages','workflow_history','notifications','audit_events','domain_events','meta'], 'readwrite', async (tx) => {
+      const [users, conversation, messages, audits] = await Promise.all([
+        tx.getAll<LocalUser>('users'), tx.get<OperationalRecord>('chats', input.conversationId), tx.getAll<OperationalRecord>('messages'),
+        tx.getAll<AuditEvent>('audit_events'),
+      ]);
+      const currentActor = users.find((user) => user.id === actor.id && user.status === 'active');
+      if (!currentActor || !conversation || conversation.status !== 'active' || !isChatMember(conversation, currentActor)) throw new Error('این گفت‌وگو در دسترس شما نیست یا بسته شده است.');
+      const committedAttachment = attachment ? validateChatAttachment(attachment) : undefined;
+      const attachmentPayload = committedAttachment ? {kind:committedAttachment.kind,fileName:committedAttachment.fileName,mimeType:committedAttachment.mimeType,size:committedAttachment.size,dataUrl:committedAttachment.dataUrl} : null;
+      const message: OperationalRecord = {id:messageId,moduleId:'message',domain:'communications',trackingCode:`MSG-${new Date().getFullYear()}-${String(messages.length+1).padStart(5,'0')}`,title:body.slice(0,80)||(committedAttachment?.kind==='voice'?'ویس':'فایل'),description:body,status:'sent',priority:'normal',companyId:actor.companyId,unitId:currentActor.unitId,ownerPersonnelId:currentActor.personnelId,assigneeUserId:currentActor.id,relatedRecordId:conversation.id,createdByActorId:currentActor.actorId,createdByUserId:currentActor.id,updatedByActorId:currentActor.actorId,workflowVersion:1,version:1,payload:{conversationId:conversation.id,senderUserId:currentActor.id,messageKind:committedAttachment?.kind??'text',attachment:attachmentPayload},createdAt:now,updatedAt:now};
+      await tx.put('messages', message);
+      await tx.put('chats', {...conversation,updatedByActorId:currentActor.actorId,updatedAt:now,version:conversation.version+1,payload:{...conversation.payload,lastMessageAt:now,lastMessageSenderUserId:currentActor.id}});
+      await tx.put('workflow_history',{id:newId('history'),recordId:message.id,moduleId:'message',sequence:1,eventType:'created',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,snapshot:{conversationId:conversation.id,messageKind:committedAttachment?.kind??'text',hasText:Boolean(body),fileName:committedAttachment?.fileName??null,fileSize:committedAttachment?.size??null},occurredAt:now} satisfies OperationalRecordHistory);
+      const recipients = chatKind(conversation)==='unit'
+        ? users.filter((user)=>user.status==='active'&&user.companyId===actor.companyId&&user.unitId===conversation.unitId&&user.id!==actor.id)
+        : chatMemberUserIds(conversation).filter((id)=>id!==actor.id).map((id)=>users.find((user)=>user.id===id&&user.status==='active')).filter((user):user is LocalUser=>Boolean(user));
+      for (const recipient of recipients) await tx.put('notifications',{id:newId('notification'),userId:recipient.id,kind:'chat_message',title:`پیام جدید در ${conversation.title}`,message:`${currentActor.name} پیام تازه‌ای فرستاد.`,actorUserId:currentActor.id,relatedRecordId:conversation.id,relatedModuleId:'chat',dedupeKey:`chat:${conversation.id}:${recipient.id}:${message.id}`,createdAt:now} satisfies UserNotification);
+      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:actor.companyId,category:'system',action:'communications.message.sent',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:`پیام جدید در گفت‌وگوی «${conversation.title}» ثبت شد.`,outcome:'success',correlationId,metadata:{conversationId:conversation.id,messageId,messageKind:committedAttachment?.kind??'text',recipientCount:recipients.length}} satisfies AuditEvent);
+      await tx.put('domain_events',{id:newId('event'),aggregateType:'chat',aggregateId:conversation.id,eventType:'ChatMessageSent',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{messageId,messageKind:committedAttachment?.kind??'text',recipientCount:recipients.length}} satisfies DomainEvent);
+      await tx.put('meta',{id:'lastPersistedAt',value:now});
+    });
+    return this.loadState();
+  }
+
+  async createLetter(input:LetterInput):Promise<FoundationState>{
+    const state=await this.loadState();const actor=state.activeUser;
+    if(state.session.actingAdminUserId)throw new Error('ثبت نامه در حالت مشاهده آزمایشی مجاز نیست.');
+    const subject=input.subject.trim(),body=input.body.trim(),externalParty=input.externalParty?.trim()??'';
+    const recipientUserIds=[...new Set((input.recipientUserIds??[]).filter((id)=>id&&id!==actor.id))];
+    if(subject.length<3)throw new Error('موضوع نامه باید حداقل ۳ نویسه باشد.');if(body.length<5)throw new Error('متن نامه را کامل وارد کنید.');
+    if(input.direction!=='outgoing'&&!recipientUserIds.length)throw new Error('برای نامه حداقل یک گیرنده داخلی انتخاب کنید.');
+    if(input.direction!=='internal'&&externalParty.length<2)throw new Error('نام فرستنده یا گیرنده بیرونی را وارد کنید.');
+    if(input.direction==='incoming')requirePermission(actor,permissionFor('letter','create'),'ثبت نامه وارده فقط برای دبیرخانه مجاز است.');
+    const attachment=input.attachment?validateLetterAttachment(input.attachment):undefined;const now=new Date().toISOString(),letterId=newId('letter'),correlationId=newId('correlation');
+    await this.storage.transaction(['users','letters','workflow_history','notifications','audit_events','domain_events','meta'],'readwrite',async(tx)=>{
+      const [users,letters,audits]=await Promise.all([tx.getAll<LocalUser>('users'),tx.getAll<OperationalRecord>('letters'),tx.getAll<AuditEvent>('audit_events')]);
+      const currentActor=users.find((user)=>user.id===actor.id&&user.status==='active'&&user.companyId===actor.companyId);if(!currentActor)throw new Error('حساب شما هم‌زمان تغییر کرده است؛ دوباره وارد شوید.');
+      const recipients=recipientUserIds.map((id)=>users.find((user)=>user.id===id&&user.status==='active'&&user.companyId===actor.companyId));if(recipients.some((user)=>!user))throw new Error('یکی از گیرندگان دیگر فعال یا هم‌شرکت نیست.');
+      const committedAttachment=attachment?validateLetterAttachment(attachment):undefined;const status=input.direction==='incoming'?'sent':'draft';
+      const letter:OperationalRecord={id:letterId,moduleId:'letter',domain:'letter',trackingCode:`LTR-${new Date().getFullYear()}-${String(letters.length+1).padStart(5,'0')}`,title:subject,description:body.slice(0,180),status,priority:'normal',companyId:actor.companyId,unitId:currentActor.unitId,ownerPersonnelId:currentActor.personnelId,assigneeUserId:currentActor.id,createdByActorId:currentActor.actorId,createdByUserId:currentActor.id,updatedByActorId:currentActor.actorId,workflowVersion:1,version:1,payload:{direction:input.direction,body,recipientUserIds,externalParty:externalParty||null,attachment:committedAttachment?{fileName:committedAttachment.fileName,mimeType:committedAttachment.mimeType,size:committedAttachment.size,dataUrl:committedAttachment.dataUrl}:null},createdAt:now,updatedAt:now};
+      await tx.put('letters',letter);await tx.put('workflow_history',{id:newId('history'),recordId:letter.id,moduleId:'letter',sequence:1,eventType:'created',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,snapshot:{direction:input.direction,status,recipientCount:recipientUserIds.length,externalParty:externalParty||null,hasAttachment:Boolean(committedAttachment),fileName:committedAttachment?.fileName??null},occurredAt:now} satisfies OperationalRecordHistory);
+      if(status==='sent')for(const recipient of recipients.filter((item):item is LocalUser=>Boolean(item)))await tx.put('notifications',{id:newId('notification'),userId:recipient.id,kind:'letter_received',title:`نامه جدید: ${subject}`,message:`نامه ${letter.trackingCode} در کارتابل شما ثبت شد.`,actorUserId:currentActor.id,relatedRecordId:letter.id,relatedModuleId:'letter',dedupeKey:`letter:${letter.id}:${recipient.id}`,createdAt:now} satisfies UserNotification);
+      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:actor.companyId,category:'system',action:'letter.created',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:`نامه «${subject}» ثبت شد.`,outcome:'success',correlationId,metadata:{letterId,direction:input.direction,status,recipientCount:recipientUserIds.length,hasAttachment:Boolean(committedAttachment)}} satisfies AuditEvent);
+      await tx.put('domain_events',{id:newId('event'),aggregateType:'letter',aggregateId:letter.id,eventType:'LetterCreated',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{direction:input.direction,status}} satisfies DomainEvent);await tx.put('meta',{id:'lastPersistedAt',value:now});
+    });return this.loadState();
+  }
+
+  async transitionLetter(letterId:string,expectedVersion:number,action:LetterAction):Promise<FoundationState>{
+    const state=await this.loadState();const actor=state.activeUser;if(state.session.actingAdminUserId)throw new Error('اقدام روی نامه در حالت مشاهده آزمایشی مجاز نیست.');const now=new Date().toISOString(),correlationId=newId('correlation');
+    await this.storage.transaction(['users','letters','workflow_history','notifications','audit_events','domain_events','meta'],'readwrite',async(tx)=>{
+      const [users,current,history,audits]=await Promise.all([tx.getAll<LocalUser>('users'),tx.get<OperationalRecord>('letters',letterId),tx.getAll<OperationalRecordHistory>('workflow_history'),tx.getAll<AuditEvent>('audit_events')]);
+      const currentActor=users.find((user)=>user.id===actor.id&&user.status==='active');if(!currentActor||!current||current.version!==expectedVersion)throw new Error('این نامه در پنجره دیگری تغییر کرده است؛ صفحه را تازه کنید.');
+      if(letterDirection(current)==='incoming')throw new Error('نامه وارده نیاز به چرخه ارسال ندارد.');let nextStatus:string,eventType:string;
+      if(action==='submit_review'){if(current.status!=='draft'||(current.createdByUserId!==actor.id&&!can(actor,permissionFor('letter','edit'))))throw new Error('این پیش‌نویس قابل ارسال برای بازبینی نیست.');nextStatus='in_review';eventType='LetterSubmittedForReview';}
+      else if(action==='approve'){requirePermission(actor,permissionFor('letter','approve'),'مجوز تأیید نامه را ندارید.');if(current.status!=='in_review')throw new Error('فقط نامه در حال بازبینی قابل تأیید است.');if(current.createdByUserId===actor.id)throw new Error('سازنده نامه نمی‌تواند همان نامه را تأیید کند.');nextStatus='approved_for_send';eventType='LetterApproved';}
+      else{if(current.status!=='approved_for_send')throw new Error('نامه هنوز مجوز ارسال ندارد.');if(current.createdByUserId!==actor.id&&!can(actor,permissionFor('letter','transition')))throw new Error('ارسال این نامه در اختیار شما نیست.');nextStatus='sent';eventType='LetterSent';}
+      const updated:OperationalRecord={...current,status:nextStatus,updatedByActorId:currentActor.actorId,updatedAt:now,version:current.version+1,payload:{...current.payload,[action==='approve'?'approvedByUserId':action==='send'?'sentByUserId':'reviewRequestedByUserId']:currentActor.id}};await tx.put('letters',updated);
+      const sequence=history.filter((item)=>item.recordId===current.id).length+1;await tx.put('workflow_history',{id:newId('history'),recordId:current.id,moduleId:'letter',sequence,eventType:'transitioned',fromState:current.status,toState:nextStatus,actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,snapshot:{action,status:nextStatus},occurredAt:now} satisfies OperationalRecordHistory);
+      if(action==='send')for(const recipientId of letterRecipientUserIds(current)){const recipient=users.find((user)=>user.id===recipientId&&user.status==='active');if(recipient)await tx.put('notifications',{id:newId('notification'),userId:recipient.id,kind:'letter_received',title:`نامه جدید: ${current.title}`,message:`نامه ${current.trackingCode} در کارتابل شما ثبت شد.`,actorUserId:currentActor.id,relatedRecordId:current.id,relatedModuleId:'letter',dedupeKey:`letter:${current.id}:${recipient.id}`,createdAt:now} satisfies UserNotification);}
+      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:current.companyId,category:'system',action:`letter.${action}`,actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:`وضعیت نامه «${current.title}» به ${nextStatus} تغییر کرد.`,outcome:'success',correlationId,metadata:{letterId:current.id,fromState:current.status,toState:nextStatus,action}} satisfies AuditEvent);await tx.put('domain_events',{id:newId('event'),aggregateType:'letter',aggregateId:current.id,eventType,actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{fromState:current.status,toState:nextStatus}} satisfies DomainEvent);await tx.put('meta',{id:'lastPersistedAt',value:now});
+    });return this.loadState();
   }
 
   async createSalesStructure(input: SalesStructureInput): Promise<FoundationState> {
@@ -2703,6 +2849,10 @@ async setRoleStatus(roleId: string, expectedVersion: number, status: UserStatus)
     if (state.session.actingAdminUserId) throw new Error('دریافت پشتیبان در حالت مشاهده دسترسی مجاز نیست.');
     requirePermission(state.activeUser, 'foundation.data.export', 'مجوز دریافت پشتیبان داده را ندارید.');
     const sensitiveFiles = await this.storage.getAll<PersonnelDocumentFile>('personnel_document_files');
+    const [chatMessagesForBackup,lettersForBackup] = await Promise.all([this.storage.getAll<OperationalRecord>('messages'),this.storage.getAll<OperationalRecord>('letters')]);
+    const hasChatAttachments = chatMessagesForBackup.some((message) => message.moduleId === 'message' && Boolean(chatAttachment(message)?.dataUrl));
+    const hasLetterAttachments=lettersForBackup.some((letter)=>letter.moduleId==='letter'&&Boolean(letterAttachment(letter)?.dataUrl));
+    if ((hasChatAttachments||hasLetterAttachments) && !password) throw new Error('به دلیل وجود فایل گفتگو یا پیوست نامه، فقط پشتیبان رمزگذاری‌شده مجاز است.');
     if (sensitiveFiles.length) {
       if (!password) throw new Error('به دلیل وجود مدارک هویتی، فقط پشتیبان رمزگذاری‌شده مجاز است.');
       const contentPermission = state.activeUser.permissions.includes(PERSONNEL_DOCUMENT_PERMISSION_READ)

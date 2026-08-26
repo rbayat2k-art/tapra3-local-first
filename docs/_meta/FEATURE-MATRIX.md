@@ -102,9 +102,9 @@
 | 61 | `asset-transfer` | asset | `asset_transfers` | `Implemented-Unverified` |
 | 62 | `asset-maintenance` | asset | `asset_maintenance` | `Implemented-Unverified` |
 | 63 | `task` | task | `tasks` | `Implemented-Unverified` |
-| 64 | `chat` | communications | `chats` | `Implemented-Unverified` |
-| 65 | `message` | communications | `messages` | `Implemented-Unverified` |
-| 66 | `letter` | letter | `letters` | `Implemented-Unverified` |
+| 64 | `chat` | communications | `chats` | `Verified` |
+| 65 | `message` | communications | `messages` | `Verified` |
+| 66 | `letter` | letter | `letters` | `Verified` |
 | 67 | `document` | document | `documents` | `Implemented-Unverified` |
 
 ## وابستگی و Side effect

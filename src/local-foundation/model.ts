@@ -380,7 +380,7 @@ export interface DomainEvent {
   payload: Record<string, unknown>;
 }
 
-export type UserNotificationKind = 'treasury_follow_up' | 'workflow' | 'system';
+export type UserNotificationKind = 'treasury_follow_up' | 'chat_message' | 'letter_received' | 'workflow' | 'system';
 
 export interface UserNotification {
   id: string;

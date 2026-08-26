@@ -41,6 +41,8 @@ import {PRODUCT_NAME, PRODUCT_TAGLINE} from './branding';
 import {DEFAULT_PREFERENCES, normalizeUiPreferences, type UiPreferences} from './appearancePreferences';
 import {WorkflowAdminPage} from './WorkflowAdminPage';
 import {RecruitmentPage} from './RecruitmentPage';
+import {CommunicationsPage} from './CommunicationsPage';
+import {LettersPage} from './LettersPage';
 import {NavigationSearch, type NavigationSearchDestination} from './NavigationSearch';
 import {notifyWorkspaceTabActivated, requestWorkspaceTabClose} from './windowWorkspaceGuard';
 import {userOrganizationHealth, userOrganizationIssueLabel} from './userOrganizationHealth';
@@ -258,6 +260,7 @@ export function LocalFoundationApp() {
 
   const visibleNavigation = useMemo(() => foundation
     ? NAVIGATION.filter((item) => {
+      if (item.id === 'communications' || item.id === 'letters') return foundation.activeUser.status === 'active' && !foundation.session.actingAdminUserId;
       if (item.id === 'my-account' || item.anyPermissions.some((permission) => can(foundation.activeUser, permission))) return true;
       if (item.id !== 'personnel' || !foundation.activeUser.personnelId) return false;
       return foundation.personnel.some((person) => person.employmentStatus === 'active' && (person.managerPersonnelId === foundation.activeUser.personnelId || person.salesSupervisorPersonnelId === foundation.activeUser.personnelId));
@@ -665,7 +668,11 @@ export function LocalFoundationApp() {
   async function openNotification(notification: UserNotification) {
     setNotificationOpen(false);
     if (!notification.readAt) await run('notification-read', () => service.markNotificationRead(notification.id), 'اعلان خوانده شد.');
-    const destination = navigationDestinations.find((item) => item.moduleId === notification.relatedModuleId);
+    const destination = ['chat','message'].includes(notification.relatedModuleId ?? '')
+      ? navigationDestinations.find((item) => item.id === 'page:communications')
+      : notification.relatedModuleId === 'letter'
+        ? navigationDestinations.find((item) => item.id === 'page:letters')
+      : navigationDestinations.find((item) => item.moduleId === notification.relatedModuleId);
     if (destination) openNavigationDestination(destination, {track: false});
   }
 
@@ -820,7 +827,9 @@ export function LocalFoundationApp() {
             {tab.page === 'registrations' && <RegistrationPage state={foundation} service={service} execute={run} />}
             {tab.page === 'recruitment' && <RecruitmentPage state={foundation} service={service} execute={run} />}
             {tab.page === 'customers' && <CustomersPage state={foundation} service={service} execute={run} />}
-            {DOMAIN_PAGE_MODULES[tab.page] && <ErpWorkspacePage
+            {tab.page === 'communications' && <CommunicationsPage state={foundation} service={service} execute={run} />}
+            {tab.page === 'letters' && <LettersPage state={foundation} service={service} execute={run} />}
+            {DOMAIN_PAGE_MODULES[tab.page] && tab.page !== 'communications' && tab.page !== 'letters' && <ErpWorkspacePage
               state={foundation}
               moduleIds={DOMAIN_PAGE_MODULES[tab.page]}
               service={service}
