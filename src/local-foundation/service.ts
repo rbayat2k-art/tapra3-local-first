@@ -312,6 +312,8 @@ export class LocalFoundationService {
     const seeded = createSeedData() as Record<FoundationStoreName, unknown[]>;
     const seededRecruitmentRecords = seeded.recruitment_cases as OperationalRecord[];
     const seededRecruitmentHistory = (seeded.workflow_history as OperationalRecordHistory[]).filter((item) => item.moduleId === 'recruitment-case');
+    const seededLetterRecords = seeded.letters as OperationalRecord[];
+    const seededLetterHistory = (seeded.workflow_history as OperationalRecordHistory[]).filter((item) => item.moduleId === 'letter');
     const seededWorkflowDefinitions = seeded.workflow_definitions as WorkflowDefinition[];
     const seededWorkflowVersions = seeded.workflow_versions as WorkflowDefinition[];
     const existingEntries = await this.storage.transaction([...FOUNDATION_STORES], 'readonly', (tx) =>
@@ -335,11 +337,18 @@ export class LocalFoundationService {
       ...priorRecruitmentRecords,
       ...seededRecruitmentRecords.filter((seedRecord) => !priorRecruitmentRecords.some((record) => record.id === seedRecord.id)),
     ];
+    const priorLetterRecords = existing.letters as OperationalRecord[];
+    seeded.letters = [
+      ...priorLetterRecords,
+      ...seededLetterRecords.filter((seedRecord) => !priorLetterRecords.some((record) => record.id === seedRecord.id)),
+    ];
     const migratedRecruitmentIds = new Set((seeded.recruitment_cases as OperationalRecord[]).map((record) => record.id));
+    const migratedLetterIds = new Set((seeded.letters as OperationalRecord[]).map((record) => record.id));
     const priorWorkflowHistory = existing.workflow_history as OperationalRecordHistory[];
     seeded.workflow_history = [
-      ...priorWorkflowHistory.filter((item) => !seededRecruitmentHistory.some((seedItem) => seedItem.id === item.id)),
+      ...priorWorkflowHistory.filter((item) => !seededRecruitmentHistory.some((seedItem) => seedItem.id === item.id) && !seededLetterHistory.some((seedItem) => seedItem.id === item.id)),
       ...seededRecruitmentHistory.filter((item) => migratedRecruitmentIds.has(item.recordId)),
+      ...seededLetterHistory.filter((item) => migratedLetterIds.has(item.recordId)),
     ];
 
     const priorRoles = existing.security_roles as SecurityRole[];

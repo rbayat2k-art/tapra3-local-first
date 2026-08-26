@@ -17,11 +17,12 @@ export function LettersPage({state,service,execute}:Props){
   const letters=useMemo(()=>state.operationalRecords.filter((record)=>record.moduleId==='letter'),[state.operationalRecords]);
   const mine=(record:OperationalRecord)=>record.createdByUserId===state.activeUser.id;const recipient=(record:OperationalRecord)=>letterRecipientUserIds(record).includes(state.activeUser.id)&&record.status==='sent';
   const mayReview=can(state.activeUser,permissionFor('letter','approve'));
-  const shown=letters.filter((record)=>box==='inbox'?recipient(record):box==='outbox'?mine(record)&&record.status!=='draft':box==='drafts'?mine(record)&&record.status==='draft':mayReview&&['in_review','approved_for_send'].includes(record.status));
+  const outgoing=(record:OperationalRecord)=>mine(record)&&letterDirection(record)!=='incoming';
+  const shown=letters.filter((record)=>box==='inbox'?recipient(record):box==='outbox'?outgoing(record)&&record.status!=='draft':box==='drafts'?outgoing(record)&&record.status==='draft':mayReview&&['in_review','approved_for_send'].includes(record.status));
   const counts:{box:Box;label:string;icon:typeof Inbox;count:number}[]=[
     {box:'inbox',label:'دریافتی',icon:Inbox,count:letters.filter(recipient).length},
-    {box:'outbox',label:'ارسالی و در جریان',icon:Send,count:letters.filter((record)=>mine(record)&&record.status!=='draft').length},
-    {box:'drafts',label:'پیش‌نویس‌ها',icon:FileText,count:letters.filter((record)=>mine(record)&&record.status==='draft').length},
+    {box:'outbox',label:'ارسالی و در جریان',icon:Send,count:letters.filter((record)=>outgoing(record)&&record.status!=='draft').length},
+    {box:'drafts',label:'پیش‌نویس‌ها',icon:FileText,count:letters.filter((record)=>outgoing(record)&&record.status==='draft').length},
     ...(mayReview?[{box:'review' as const,label:'صف بازبینی',icon:ShieldCheck,count:letters.filter((record)=>['in_review','approved_for_send'].includes(record.status)).length}]:[]),
   ];
   return <section className="letters-page"><header className="letters-hero"><div><span className="eyebrow">دبیرخانه دیجیتال</span><h2>نامه‌نگاری سازمانی</h2><p>نامه‌های داخلی، وارده و صادره را از پیش‌نویس تا مجوز ارسال در یک کارتابل نگه دارید.</p></div><button className="button button--primary" onClick={()=>setCompose(true)}><Mail size={18}/> نامه جدید</button></header>

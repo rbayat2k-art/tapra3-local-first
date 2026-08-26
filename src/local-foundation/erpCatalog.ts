@@ -273,6 +273,50 @@ export function seedOperationalRecords(): Record<string, OperationalRecord[]> {
     };
     (result[module.store]??=[]).push(record);
   });
+  result.letters = [
+    {
+      id:'letter-sample-incoming-bank',moduleId:'letter',domain:'letter',trackingCode:'LTR-1405-0001',title:'ابلاغ برنامه قطعی نگهداری شبکه بانکی',
+      description:'اطلاع‌رسانی بانک درباره بازه نگهداری سرویس‌های پرداخت و لزوم هماهنگی واحدهای مالی.',status:'sent',priority:'high',companyId:COMPANY_ID,
+      unitId:'unit-management',ownerPersonnelId:'personnel-admin',assigneeUserId:'persona-product-owner',createdByActorId:'actor-product-owner',createdByUserId:'persona-product-owner',updatedByActorId:'actor-product-owner',workflowVersion:1,version:1,
+      payload:{direction:'incoming',body:'با سلام؛ به اطلاع می‌رساند عملیات نگهداری دوره‌ای شبکه بانکی در روز پنج‌شنبه از ساعت ۰۰:۳۰ تا ۰۳:۰۰ انجام می‌شود. لطفاً پرداخت‌های ضروری پیش از این بازه ثبت و مسئولان خزانه نیز مطلع شوند.',recipientUserIds:['persona-product-owner','persona-treasury-executor'],externalParty:'بانک ملت — مدیریت امور مشتریان سازمانی',attachment:null},
+      createdAt:'2026-08-20T07:15:00.000Z',updatedAt:'2026-08-20T07:15:00.000Z',
+    },
+    {
+      id:'letter-sample-outgoing-support',moduleId:'letter',domain:'letter',trackingCode:'LTR-1405-0002',title:'درخواست تمدید قرارداد خدمات پشتیبانی',
+      description:'درخواست رسمی تمدید قرارداد پشتیبانی و اعلام برنامه حضور کارشناسان پیمانکار.',status:'sent',priority:'normal',companyId:COMPANY_ID,
+      unitId:'unit-management',ownerPersonnelId:'personnel-admin',assigneeUserId:'persona-product-owner',createdByActorId:'actor-product-owner',createdByUserId:'persona-product-owner',updatedByActorId:'actor-product-owner',workflowVersion:1,version:4,
+      payload:{direction:'outgoing',body:'با سلام؛ با توجه به پایان دوره جاری قرارداد خدمات پشتیبانی، خواهشمند است پیشنهاد تمدید یک‌ساله، برنامه حضور کارشناسان و سطح خدمات پیشنهادی حداکثر تا پایان هفته ارسال شود.',recipientUserIds:[],externalParty:'شرکت راهکاران شبکه آریا',attachment:null,reviewRequestedByUserId:'persona-product-owner',approvedByUserId:'persona-system-admin',sentByUserId:'persona-product-owner'},
+      createdAt:'2026-08-21T08:10:00.000Z',updatedAt:'2026-08-21T11:40:00.000Z',
+    },
+    {
+      id:'letter-sample-internal-performance',moduleId:'letter',domain:'letter',trackingCode:'LTR-1405-0003',title:'اعلام تقویم ارزیابی عملکرد نیم‌سال',
+      description:'تقویم تکمیل فرم‌ها و جلسات ارزیابی عملکرد نیم‌سال اول برای مدیران واحدها.',status:'sent',priority:'normal',companyId:COMPANY_ID,
+      unitId:'unit-human-resources',ownerPersonnelId:'personnel-hr-manager',assigneeUserId:'persona-hr-manager',createdByActorId:'actor-hr-manager',createdByUserId:'persona-hr-manager',updatedByActorId:'actor-hr-manager',workflowVersion:1,version:4,
+      payload:{direction:'internal',body:'مدیران محترم؛ فرم‌های ارزیابی عملکرد نیم‌سال اول تا دهم شهریور تکمیل شود. جلسات جمع‌بندی از دوازدهم تا پانزدهم شهریور برگزار خواهد شد و نتیجه نهایی در پرونده پرسنلی ثبت می‌شود.',recipientUserIds:['persona-product-owner','persona-system-admin','persona-organization-manager'],externalParty:null,attachment:null,reviewRequestedByUserId:'persona-hr-manager',approvedByUserId:'persona-system-admin',sentByUserId:'persona-hr-manager'},
+      createdAt:'2026-08-22T06:45:00.000Z',updatedAt:'2026-08-22T10:20:00.000Z',
+    },
+    {
+      id:'letter-sample-draft-archive',moduleId:'letter',domain:'letter',trackingCode:'LTR-1405-0004',title:'پیش‌نویس دستورالعمل بایگانی قراردادها',
+      description:'نسخه اولیه دستورالعمل نام‌گذاری، نگهداری و دسترسی به قراردادهای سازمان.',status:'draft',priority:'normal',companyId:COMPANY_ID,
+      unitId:'unit-management',ownerPersonnelId:'personnel-admin',assigneeUserId:'persona-product-owner',createdByActorId:'actor-product-owner',createdByUserId:'persona-product-owner',updatedByActorId:'actor-product-owner',workflowVersion:1,version:1,
+      payload:{direction:'internal',body:'این پیش‌نویس برای تعیین روش یکسان نام‌گذاری، سطح دسترسی و مدت نگهداری قراردادها تهیه شده است. پیش از ارسال برای بازبینی، جدول مسئولیت واحدها باید تکمیل شود.',recipientUserIds:['persona-system-admin','persona-hr-manager'],externalParty:null,attachment:null},
+      createdAt:'2026-08-23T09:30:00.000Z',updatedAt:'2026-08-23T09:30:00.000Z',
+    },
+    {
+      id:'letter-sample-review-tax',moduleId:'letter',domain:'letter',trackingCode:'LTR-1405-0005',title:'پاسخ پیشنهادی به استعلام اداره مالیات',
+      description:'متن پیشنهادی پاسخ به استعلام برای بازبینی و صدور مجوز ارسال.',status:'in_review',priority:'high',companyId:COMPANY_ID,
+      unitId:'unit-human-resources',ownerPersonnelId:'personnel-hr-operator',assigneeUserId:'persona-hr-operator',createdByActorId:'actor-hr-operator',createdByUserId:'persona-hr-operator',updatedByActorId:'actor-hr-operator',workflowVersion:1,version:2,
+      payload:{direction:'outgoing',body:'با احترام؛ در پاسخ به استعلام آن اداره، فهرست اطلاعات مورد درخواست بررسی و با سوابق ثبت‌شده تطبیق داده شد. متن حاضر جهت بازبینی نهایی و اعلام مجوز ارسال ارائه می‌شود.',recipientUserIds:[],externalParty:'اداره کل امور مالیاتی تهران',attachment:null,reviewRequestedByUserId:'persona-hr-operator'},
+      createdAt:'2026-08-24T07:50:00.000Z',updatedAt:'2026-08-24T08:35:00.000Z',
+    },
+    {
+      id:'letter-sample-approved-supplier',moduleId:'letter',domain:'letter',trackingCode:'LTR-1405-0006',title:'پاسخ تأییدشده به درخواست تأمین‌کننده',
+      description:'پاسخ آماده ارسال درباره زمان‌بندی تحویل و مدارک تسویه تأمین‌کننده.',status:'approved_for_send',priority:'normal',companyId:COMPANY_ID,
+      unitId:'unit-management',ownerPersonnelId:'personnel-admin',assigneeUserId:'persona-product-owner',createdByActorId:'actor-product-owner',createdByUserId:'persona-product-owner',updatedByActorId:'actor-system-admin',workflowVersion:1,version:3,
+      payload:{direction:'outgoing',body:'با سلام؛ برنامه تحویل پیشنهادی مورد تأیید قرار گرفت. لطفاً اصل فاکتور، رسید تحویل و اطلاعات حساب حقوقی را همراه محموله ارائه کنید تا فرایند تطبیق و تسویه بدون وقفه انجام شود.',recipientUserIds:[],externalParty:'شرکت تأمین گستر پارس',attachment:null,reviewRequestedByUserId:'persona-product-owner',approvedByUserId:'persona-system-admin'},
+      createdAt:'2026-08-25T06:20:00.000Z',updatedAt:'2026-08-25T09:10:00.000Z',
+    },
+  ];
   const recruitmentModule = ERP_MODULES.find((item) => item.id === 'recruitment-case');
   if (recruitmentModule) {
     const basePayload = {

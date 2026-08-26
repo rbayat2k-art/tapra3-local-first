@@ -362,10 +362,43 @@ function seedRecruitmentHistory(records: OperationalRecord[]): OperationalRecord
   });
 }
 
+const letterStatePaths: Record<string, string[]> = {
+  draft: ['draft'],
+  in_review: ['draft','in_review'],
+  approved_for_send: ['draft','in_review','approved_for_send'],
+  sent: ['draft','in_review','approved_for_send','sent'],
+};
+
+function seedLetterHistory(records: OperationalRecord[]): OperationalRecordHistory[] {
+  return records.flatMap((record) => {
+    const incoming = record.payload.direction === 'incoming';
+    const states = incoming ? ['sent'] : letterStatePaths[record.status] ?? [record.status];
+    return states.map((state, index) => {
+      const approved = state === 'approved_for_send';
+      const actor = approved
+        ? {actorId:'actor-system-admin', actorName:'سارا احمدی', effectiveUserId:'persona-system-admin'}
+        : record.createdByUserId === 'persona-hr-manager'
+          ? {actorId:'actor-hr-manager', actorName:'نازنین اکبری', effectiveUserId:'persona-hr-manager'}
+          : record.createdByUserId === 'persona-hr-operator'
+            ? {actorId:'actor-hr-operator', actorName:'مریم توکلی', effectiveUserId:'persona-hr-operator'}
+            : {actorId:'actor-product-owner', actorName:'ایلیا بیات', effectiveUserId:'persona-product-owner'};
+      const previous = index ? states[index - 1] : undefined;
+      const occurredAt = new Date(new Date(record.createdAt).getTime() + index * 45 * 60 * 1000).toISOString();
+      return {
+        id:`history-${record.id}-${index + 1}`,recordId:record.id,moduleId:'letter',sequence:index + 1,
+        eventType:index ? 'transitioned' : 'created',fromState:previous,toState:state,...actor,
+        reason:index ? state === 'in_review' ? 'ارسال نامه برای بازبینی' : state === 'approved_for_send' ? 'صدور مجوز ارسال نامه' : 'ارسال نهایی نامه' : incoming ? 'ثبت نامه وارده در دبیرخانه' : 'ثبت اولیه نامه',
+        snapshot:{direction:record.payload.direction,status:state,recipientUserIds:record.payload.recipientUserIds,externalParty:record.payload.externalParty,hasAttachment:false},occurredAt,
+      } satisfies OperationalRecordHistory;
+    });
+  });
+}
+
 export function createSeedData() {
   const emptyStores = Object.fromEntries(FOUNDATION_STORES.map((store) => [store, []])) as Record<FoundationStoreName, unknown[]>;
   const operationalStores = seedOperationalRecords();
   const recruitmentHistory = seedRecruitmentHistory((operationalStores.recruitment_cases ?? []) as OperationalRecord[]);
+  const letterHistory = seedLetterHistory((operationalStores.letters ?? []) as OperationalRecord[]);
   return {
     ...emptyStores,
     meta: SEED_META.map((item) => ({...item})), users: LOCAL_USERS.map((item) => ({...item, roleIds: [...item.roleIds], roles: [...item.roles], permissions: [...item.permissions], permissionGrants: [...(item.permissionGrants ?? [])], permissionDenials: [...(item.permissionDenials ?? [])]})),
@@ -375,7 +408,7 @@ export function createSeedData() {
     domain_events: SEED_DOMAIN_EVENTS.map((item) => ({...item, payload: {...item.payload}})), foundation_records: [],
     workflow_definitions: ERP_WORKFLOWS.map((item) => ({...item, approvalStages: defaultApprovalStages(item, SECURITY_ROLES), transitions: item.transitions.map((transition) => ({...transition})), stateLabels: {...item.stateLabels}})),
     workflow_versions: ERP_WORKFLOWS.map((item) => ({...item, id: `${item.id}-v${item.version}`, workflowId: item.id, approvalStages: defaultApprovalStages(item, SECURITY_ROLES), transitions: item.transitions.map((transition) => ({...transition})), stateLabels: {...item.stateLabels}})),
-    registration_requests: [], registration_reviews: [], workflow_history: recruitmentHistory, role_versions: [],
+    registration_requests: [], registration_reviews: [], workflow_history: [...recruitmentHistory,...letterHistory], role_versions: [],
     qa_dataset_manifests: [{id: 'large-qa', status: 'empty', roleCount: 0, userCount: 0, seed: 'tapra2-large-qa-v1'}],
     projections: [{id: 'projection-module-counts', kind: 'module-counts', rebuiltAt: SEED_TIME, version: 1, data: {moduleCount: ERP_WORKFLOWS.length, recordCount: Object.values(operationalStores).reduce((sum, records) => sum + records.length, 0)}}],
     ...operationalStores,

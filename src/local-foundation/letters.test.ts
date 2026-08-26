@@ -1,5 +1,5 @@
 import {describe,expect,it} from 'vitest';
-import type {FoundationSession,FoundationStoreName,OperationalRecordHistory,SnapshotManifest} from './model';
+import type {FoundationSession,FoundationStoreName,MetaRecord,OperationalRecord,OperationalRecordHistory,SnapshotManifest} from './model';
 import {FOUNDATION_STORES} from './model';
 import {createSeedData} from './seed';
 import {LocalFoundationService} from './service';
@@ -15,6 +15,35 @@ class MemoryStorage implements StorageAdapter{
 async function sessionAs(storage:MemoryStorage,userId:string,actingAdminUserId?:string){const session=await storage.get<FoundationSession>('sessions','active-session');await storage.put('sessions',{...session!,activeUserId:userId,actingAdminUserId,signedOutAt:undefined});}
 
 describe('specialized formal correspondence',()=>{
+  it('seeds persistent incoming, outgoing, draft and review examples with realistic history',()=>{
+    const seed=createSeedData();const letters=seed.letters as OperationalRecord[];const history=seed.workflow_history as OperationalRecordHistory[];
+    expect(letters.map((record)=>record.id)).toEqual([
+      'letter-sample-incoming-bank','letter-sample-outgoing-support','letter-sample-internal-performance',
+      'letter-sample-draft-archive','letter-sample-review-tax','letter-sample-approved-supplier',
+    ]);
+    expect(letters.map((record)=>record.status)).toEqual(['sent','sent','sent','draft','in_review','approved_for_send']);
+    expect(letters.map((record)=>record.payload.direction)).toEqual(['incoming','outgoing','internal','internal','outgoing','outgoing']);
+    expect(history.filter((item)=>item.recordId==='letter-sample-outgoing-support').map((item)=>item.toState)).toEqual(['draft','in_review','approved_for_send','sent']);
+    expect(history.filter((item)=>item.recordId==='letter-sample-review-tax')).toHaveLength(2);
+    expect(history.filter((item)=>item.recordId==='letter-sample-approved-supplier').at(-1)?.actorId).toBe('actor-system-admin');
+  });
+
+  it('adds the deterministic examples on upgrade without replacing local letters and stays idempotent',async()=>{
+    const storage=new MemoryStorage();const previous=createSeedData() as Record<FoundationStoreName,unknown[]>;
+    const custom:OperationalRecord={...(previous.letters as OperationalRecord[])[0],id:'letter-local-user-created',trackingCode:'LTR-LOCAL-001',title:'نامه ثبت‌شده توسط کاربر'};
+    previous.letters=[custom];
+    previous.workflow_history=(previous.workflow_history as OperationalRecordHistory[]).filter((item)=>item.moduleId!=='letter');
+    previous.meta=(previous.meta as MetaRecord[]).map((item)=>item.id==='seedVersion'?{...item,value:'complete-local-erp-v1.30-access-safety'}:item);
+    await storage.replaceAll(previous);const service=new LocalFoundationService(storage);await service.initialize();
+    let stored=await storage.getAll<OperationalRecord>('letters');
+    expect(stored.some((record)=>record.id===custom.id&&record.title===custom.title)).toBe(true);
+    expect(stored.filter((record)=>record.id.startsWith('letter-sample-'))).toHaveLength(6);
+    expect((await storage.getAll<OperationalRecordHistory>('workflow_history')).filter((item)=>item.moduleId==='letter')).toHaveLength(15);
+    await service.initialize();stored=await storage.getAll<OperationalRecord>('letters');
+    expect(new Set(stored.map((record)=>record.id)).size).toBe(stored.length);
+    expect(stored.filter((record)=>record.id.startsWith('letter-sample-'))).toHaveLength(6);
+  });
+
   it('keeps a draft private, enforces independent review and delivers only after final send',async()=>{
     const storage=new MemoryStorage();await storage.replaceAll(createSeedData());const service=new LocalFoundationService(storage);
     await sessionAs(storage,'persona-seller');let state=await service.createLetter({direction:'internal',subject:'برنامه جلسه فروش',body:'زمان‌بندی جلسه فروش برای بررسی ارسال می‌شود.',recipientUserIds:['persona-user-manager']});let letter=state.operationalRecords.find((record)=>record.moduleId==='letter')!;expect(letter.status).toBe('draft');

@@ -1,6 +1,6 @@
 export const FOUNDATION_SCHEMA_VERSION = 11;
 export const FOUNDATION_DB_NAME = 'tapra2_local';
-export const FOUNDATION_SEED_VERSION = 'complete-local-erp-v1.30-access-safety';
+export const FOUNDATION_SEED_VERSION = 'complete-local-erp-v1.31-letter-samples';
 
 export type ScopeType = 'COMPANY' | 'UNIT' | 'TEAM' | 'SELF' | 'RECORD';
 /** Permission codes are registry-driven and always use domain.resource.action. */
