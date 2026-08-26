@@ -16,6 +16,7 @@ import {personnelDisplayLabel, userDisplayLabel} from './personIdentity';
 import {PRIMARY_ADMIN_USER_ID, PROTECTED_PERMISSION_CODES, PROTECTED_ROLE_IDS} from './accessPolicy';
 import {activeActingManager, effectiveUnitManagerUserId, flattenOrganizationUnits, organizationPeopleForUnit, organizationStructureHealth, type OrganizationPerson} from './organizationStructure';
 import {positionUsage} from './positionUsage';
+import {permissionDomainLabel, roleAttentionLabel, roleInsight} from './roleInsights';
 
 export type FoundationExecutor = (label: string, work: () => Promise<FoundationState>, success: string) => Promise<boolean>;
 
@@ -225,6 +226,7 @@ function LegacyPositionsPage({state, service, execute}: PageProps) {
 
 export function RolesPage({state, service, execute}: PageProps) {
   const [query, setQuery] = useState('');
+  const [filter, setFilter] = useState<'all' | 'assigned' | 'unused' | 'protected' | 'attention'>('all');
   const [editing, setEditing] = useState<SecurityRole | 'new' | null>(null);
   const [viewing, setViewing] = useState<SecurityRole | null>(null);
   const [assigning, setAssigning] = useState<SecurityRole | null>(null);
@@ -233,6 +235,15 @@ export function RolesPage({state, service, execute}: PageProps) {
   const mayManage = can(state.activeUser, 'organization.roles.manage');
   const mayAssign = can(state.activeUser, 'organization.roles.assign');
   const actorIsPrimaryAdmin = state.activeUser.id === PRIMARY_ADMIN_USER_ID;
+  const roleInsights = useMemo(() => state.roles.map((role) => roleInsight(role, state.users, PERMISSION_CATALOG)), [state.roles, state.users]);
+  const insightByRoleId = useMemo(() => new Map(roleInsights.map((insight) => [insight.role.id, insight])), [roleInsights]);
+  const roleCounts = useMemo(() => ({
+    all: roleInsights.length,
+    assigned: roleInsights.filter((insight) => insight.users.length > 0).length,
+    unused: roleInsights.filter((insight) => insight.attention.includes('unused')).length,
+    protected: roleInsights.filter((insight) => insight.protectedAccess).length,
+    attention: roleInsights.filter((insight) => insight.attention.length > 0).length,
+  }), [roleInsights]);
   const roleSortColumns = useMemo<SortColumn<SecurityRole>[]>(() => [
     {key: 'role', kind: 'text', value: (item) => item.name},
     {key: 'description', kind: 'text', value: (item) => item.description},
@@ -242,27 +253,46 @@ export function RolesPage({state, service, execute}: PageProps) {
   ], [state.users]);
   const filteredRoles = useMemo(() => {
     const search = query.trim().toLocaleLowerCase('fa-IR');
-    if (!search) return state.roles;
     return state.roles.filter((role) => {
+      const insight = insightByRoleId.get(role.id)!;
+      if (filter === 'assigned' && !insight.users.length) return false;
+      if (filter === 'unused' && !insight.attention.includes('unused')) return false;
+      if (filter === 'protected' && !insight.protectedAccess) return false;
+      if (filter === 'attention' && !insight.attention.length) return false;
+      if (!search) return true;
       const permissionText = role.permissions.map(permissionLabel).join(' ');
-      return `${role.name} ${role.description} ${scopeLabel(role.scope)} ${role.status === 'active' ? 'فعال' : 'غیرفعال'} ${permissionText} ${role.permissions.join(' ')}`.toLocaleLowerCase('fa-IR').includes(search);
+      const domainText = insight.domains.map((domain) => domain.label).join(' ');
+      const userText = insight.users.map((user) => userDisplayLabel(user, state)).join(' ');
+      return `${role.name} ${role.description} ${scopeLabel(role.scope)} ${role.status === 'active' ? 'فعال' : 'غیرفعال'} ${permissionText} ${role.permissions.join(' ')} ${domainText} ${userText}`.toLocaleLowerCase('fa-IR').includes(search);
     });
-  }, [query, state.roles]);
+  }, [filter, insightByRoleId, query, state]);
   const {sortedRows: sortedRoles, sort: roleSort, requestSort: requestRoleSort} = useSortableRows(filteredRoles, roleSortColumns, 'role', 'asc');
   return <div className="page-stack">
     <OrgIntro icon={KeyRound} eyebrow="سازمان / نقش‌ها و دسترسی‌ها" title="نقش‌ها و دسترسی‌ها" description="نام نقش به‌تنهایی هیچ اختیاری نمی‌دهد؛ مجوز، محدوده، سیاست رکورد و گارد گردش‌کار با هم دسترسی مؤثر را می‌سازند." action={mayManage && actorIsPrimaryAdmin ? <button className="org-primary-action" onClick={() => setEditing('new')}><Plus size={18} /> نقش جدید</button> : undefined} />
     <section className="access-formula"><span>نقش</span><ChevronLeft size={17} /><span>مجوز</span><ChevronLeft size={17} /><span>محدوده</span><ChevronLeft size={17} /><span>سیاست رکورد</span><ChevronLeft size={17} /><span>گارد گردش‌کار</span></section>
+    <section className="role-health-metrics" aria-label="خلاصه سلامت نقش‌ها">
+      <article><KeyRound size={18}/><span><strong>{roleCounts.all.toLocaleString('en-US')}</strong><small>کل نقش‌ها</small></span></article>
+      <article><UsersRound size={18}/><span><strong>{roleCounts.assigned.toLocaleString('en-US')}</strong><small>دارای کاربر</small></span></article>
+      <article><ShieldCheck size={18}/><span><strong>{roleCounts.protected.toLocaleString('en-US')}</strong><small>دسترسی حساس</small></span></article>
+      <article className={roleCounts.attention ? 'has-issue' : ''}><CircleAlert size={18}/><span><strong>{roleCounts.attention.toLocaleString('en-US')}</strong><small>نیازمند بررسی</small></span></article>
+    </section>
     <section className="role-list-panel">
+      <div className="role-filter-bar" role="group" aria-label="فیلتر نقش‌ها">
+        {([
+          ['all', 'همه'], ['assigned', 'دارای کاربر'], ['unused', 'بدون استفاده'], ['protected', 'حساس'], ['attention', 'نیازمند بررسی'],
+        ] as const).map(([id, label]) => <button key={id} className={filter === id ? 'active' : ''} aria-pressed={filter === id} onClick={() => setFilter(id)}><span>{label}</span><b>{roleCounts[id].toLocaleString('en-US')}</b></button>)}
+      </div>
       <ListSearchToolbar value={query} onChange={setQuery} placeholder="جست‌وجوی نام نقش، شرح، محدوده، وضعیت یا مجوز" count={filteredRoles.length} unit="نقش"/>
       <div className="role-list-head"><span><SortHeader columnKey="role" label="نقش" sort={roleSort} onSort={requestRoleSort}/></span><span><SortHeader columnKey="description" label="شرح نقش" sort={roleSort} onSort={requestRoleSort}/></span><span><SortHeader columnKey="status" label="وضعیت" sort={roleSort} onSort={requestRoleSort}/></span><span><SortHeader columnKey="access" label="محدوده و مجوز" sort={roleSort} onSort={requestRoleSort}/></span><span><SortHeader columnKey="users" label="کاربران" sort={roleSort} onSort={requestRoleSort}/></span><span>عملیات</span></div>
       <div className="role-list">{sortedRoles.map((role) => {
-      const users = state.users.filter((user) => user.roleIds.includes(role.id));
-      const protectedRole = PROTECTED_ROLE_IDS.has(role.id) || role.permissions.some((permission)=>PROTECTED_PERMISSION_CODES.has(permission));
+      const insight = insightByRoleId.get(role.id)!;
+      const users = insight.users;
+      const protectedRole = insight.protectedAccess;
       const mayMutateRole = mayManage && (actorIsPrimaryAdmin || (!protectedRole && role.permissions.length === 0));
       const mayToggleAssignments = mayAssign && (actorIsPrimaryAdmin || !protectedRole);
       return <article className="role-row" key={role.id}>
         <button className="role-row-identity" onClick={() => setViewing(role)} aria-label={`مشاهده نقش ${role.name}`}><span className="role-row-icon"><KeyRound size={15} /></span><span><strong>{role.name}</strong>{role.protected && <small>پایه محافظت‌شده</small>}</span></button>
-        <p className="role-row-description">{role.description || 'شرحی برای این نقش ثبت نشده است.'}</p>
+        <div className="role-row-description"><p>{role.description || 'شرحی برای این نقش ثبت نشده است.'}</p><span className="role-row-signals">{insight.domains.slice(0, 2).map((domain) => <i key={domain.id}>{domain.label}</i>)}{insight.attention.slice(0, 1).map((code) => <em key={code}><CircleAlert size={11}/>{roleAttentionLabel(code)}</em>)}</span></div>
         <span><i className={`status-badge status-badge--${role.status}`}>{role.status === 'active' ? 'فعال' : 'غیرفعال'}</i></span>
         <span className="role-row-access"><strong>{scopeLabel(role.scope)}</strong><small>{role.permissions.length.toLocaleString('en-US')} مجوز</small></span>
         <button className="role-row-users" onClick={() => setAssigning(role)} aria-label={`کاربران نقش ${role.name}`}><UsersRound size={15}/><strong>{users.length.toLocaleString('en-US')}</strong><small>کاربر</small></button>
@@ -356,8 +386,9 @@ function RoleDialog({role, onClose, onSubmit}: {role?: SecurityRole; onClose: ()
 }
 
 function RoleDetailsDialog({role,state,onClose,onEdit}:{role:SecurityRole;state:FoundationState;onClose:()=>void;onEdit?:()=>void}) {
-  const users=state.users.filter((user)=>user.roleIds.includes(role.id));
-  return <OrgModal onClose={onClose} wide><DialogHeading eyebrow="مشاهده نقش" title={role.name} text={role.description||'شرحی برای این نقش ثبت نشده است.'} onClose={onClose}/><div className="role-detail-summary"><span><small>وضعیت</small><i className={`status-badge status-badge--${role.status}`}>{role.status==='active'?'فعال':'غیرفعال'}</i></span><span><small>محدوده</small><strong>{scopeLabel(role.scope)}</strong></span><span><small>کاربران جاری</small><strong>{users.length.toLocaleString('en-US')} کاربر</strong></span><span><small>نسخه</small><strong>{(role.version??1).toLocaleString('en-US')}</strong></span></div><section className="role-detail-permissions"><div><strong>مجوزهای نقش</strong><span>{role.permissions.length.toLocaleString('en-US')} مجوز مؤثر</span></div><div>{role.permissions.map((permission)=><span key={permission}>{permissionLabel(permission)}</span>)}</div></section><div className="dialog-actions"><button className="button button--secondary" onClick={onClose}>بستن</button>{onEdit&&<button className="button button--primary" onClick={onEdit}><Pencil size={17}/> ویرایش نقش</button>}</div></OrgModal>;
+  const insight=roleInsight(role,state.users,PERMISSION_CATALOG);
+  const permissionsByDomain=insight.domains.map((domain)=>({domain,permissions:role.permissions.filter((permission)=>PERMISSION_CATALOG.find((item)=>item.code===permission)?.domain===domain.id)}));
+  return <OrgModal onClose={onClose} wide><DialogHeading eyebrow="مشاهده نقش" title={role.name} text={role.description||'شرحی برای این نقش ثبت نشده است.'} onClose={onClose}/>{insight.attention.length>0&&<section className="role-detail-alerts" aria-label="موارد نیازمند بررسی"><CircleAlert size={18}/><div><strong>این نقش نیازمند بررسی است</strong>{insight.attention.map((code)=><span key={code}>{roleAttentionLabel(code)}</span>)}</div></section>}<div className="role-detail-summary"><span><small>وضعیت</small><i className={`status-badge status-badge--${role.status}`}>{role.status==='active'?'فعال':'غیرفعال'}</i></span><span><small>محدوده</small><strong>{scopeLabel(role.scope)}</strong></span><span><small>کاربران جاری</small><strong>{insight.activeUsers.length.toLocaleString('en-US')} فعال · {insight.inactiveUsers.length.toLocaleString('en-US')} غیرفعال</strong></span><span><small>نوع دسترسی</small><strong>{insight.protectedAccess?'حساس و محافظت‌شده':'عملیاتی عادی'}</strong></span></div><section className="role-detail-permissions"><div><strong>مجوزها به تفکیک حوزه</strong><span>{role.permissions.length.toLocaleString('en-US')} مجوز مؤثر</span></div><div className="role-domain-groups">{permissionsByDomain.map(({domain,permissions})=><section key={domain.id}><header><strong>{permissionDomainLabel(domain.id)}</strong><b>{permissions.length.toLocaleString('en-US')}</b></header><div>{permissions.map((permission)=><span key={permission}>{permissionLabel(permission)}</span>)}</div></section>)}{insight.unknownPermissions.length>0&&<section className="has-issue"><header><strong>مجوزهای ناشناخته</strong><b>{insight.unknownPermissions.length.toLocaleString('en-US')}</b></header><div>{insight.unknownPermissions.map((permission)=><code key={permission}>{permission}</code>)}</div></section>}{!role.permissions.length&&<p>هیچ مجوزی برای این نقش ثبت نشده است.</p>}</div></section><section className="role-detail-users"><header><div><strong>کاربران دارای این نقش</strong><span>اثر واقعی نقش روی حساب‌های جاری</span></div><b>{insight.users.length.toLocaleString('en-US')}</b></header><div>{insight.users.slice(0,10).map((user)=><span key={user.id}><span className="persona-avatar" style={{background:user.accent}}>{user.initials}</span><span><strong>{userDisplayLabel(user,state)}</strong><small>{user.status==='active'?'حساب فعال':'حساب غیرفعال'}</small></span></span>)}{!insight.users.length&&<p>این نقش اکنون به هیچ کاربری تخصیص ندارد.</p>}</div></section><div className="dialog-actions"><button className="button button--secondary" onClick={onClose}>بستن</button>{onEdit&&<button className="button button--primary" onClick={onEdit}><Pencil size={17}/> ویرایش نقش</button>}</div></OrgModal>;
 }
 
 function RoleDeleteDialog({role,assignedUsers,state,onClose,onConfirm}:{role:SecurityRole;assignedUsers:LocalUser[];state:FoundationState;onClose:()=>void;onConfirm:()=>void}) {

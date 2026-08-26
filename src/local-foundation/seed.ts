@@ -254,6 +254,16 @@ export function applyRole(userRecord: LocalUser, roleId: string): LocalUser {
 }
 
 export const PERMISSION_CATALOG: PermissionCatalogItem[] = [
+  {code: 'foundation.dashboard.view', label: 'مشاهده نمای امروز', description: 'ورود به داشبورد و میان‌برهای مجاز', domain: 'management', available: true},
+  {code: 'foundation.preferences.manage', label: 'تنظیمات ظاهری شخصی', description: 'تنظیم پوسته، رنگ و خوانایی رابط کاربری', domain: 'management', available: true},
+  {code: 'foundation.policy.inspect', label: 'مشاهده خط‌مشی دسترسی', description: 'مشاهده قواعد محدوده و کنترل‌های دسترسی بدون امکان تغییر', domain: 'management', available: true},
+  {code: 'foundation.qa.view', label: 'مشاهده راهنمای آزمون', description: 'مشاهده وضعیت و راهنمای داده‌های آزمایشی', domain: 'management', available: true},
+  {code: 'foundation.users.qa_login', label: 'مشاهده آزمایشی دسترسی کاربر', description: 'ورود فقط‌خواندنی برای بررسی دسترسی مؤثر یک حساب', domain: 'management', available: true},
+  {code: 'foundation.data.manage', label: 'مدیریت داده محلی', description: 'بازیابی یا بازنشانی کنترل‌شده داده محلی سامانه', domain: 'management', available: true},
+  {code: 'business.request.create', label: 'ایجاد درخواست مالی قدیمی', description: 'مجوز سازگاری برای مسیر قدیمی ثبت درخواست', domain: 'finance', available: true},
+  {code: 'business.request.approve', label: 'تأیید درخواست مالی قدیمی', description: 'مجوز سازگاری برای مسیر قدیمی تأیید درخواست', domain: 'finance', available: true},
+  {code: 'business.inventory.adjust', label: 'ثبت تعدیل موجودی قدیمی', description: 'مجوز سازگاری برای مسیر قدیمی تعدیل موجودی', domain: 'warehouse', available: true},
+  {code: 'business.inventory.approve', label: 'تأیید تعدیل موجودی قدیمی', description: 'مجوز سازگاری برای مسیر قدیمی تأیید تعدیل موجودی', domain: 'warehouse', available: true},
   {code: 'organization.overview.view', label: 'مشاهده نمای سازمان', description: 'مشاهده ساختار و شاخص‌های سازمان', domain: 'organization', available: true},
   {code: 'organization.units.view', label: 'مشاهده واحدها', description: 'مشاهده سلسله‌مراتب واحدهای سازمانی', domain: 'organization', available: true},
   {code: 'organization.units.manage', label: 'مدیریت واحدها', description: 'ایجاد، ویرایش و تغییر وضعیت واحدها', domain: 'organization', available: true},
