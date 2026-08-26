@@ -63,6 +63,26 @@ test('گفت‌وگوی شخصی با هویت متمایز، متن، فایل 
 
   await page.reload();
   await expect(page.locator('.chat-message--mine')).toHaveCount(3);
+
+  await page.getByRole('button',{name:'جست‌وجو در پیام‌ها و فایل‌ها'}).click();
+  const messageSearch=page.getByRole('textbox',{name:'جست‌وجو در پیام‌ها و نام فایل‌ها'});
+  await messageSearch.fill('plan.txt');
+  await expect(page.locator('.chat-message--search-current')).toContainText('plan.txt');
+  await messageSearch.fill('فایل برنامه');
+  await expect(page.locator('.chat-message--search-current')).toContainText('فایل برنامه');
+  await page.getByRole('button',{name:'بستن جست‌وجوی گفتگو'}).click();
+
+  await page.getByRole('button',{name:/فایل‌های به‌اشتراک‌گذاشته‌شده؛/}).click();
+  const sharedPanel=page.getByRole('complementary',{name:'فایل‌های به‌اشتراک‌گذاشته‌شده'});
+  await expect(sharedPanel).toContainText('plan.txt');
+  await expect(sharedPanel.locator('audio')).toHaveCount(1);
+  await sharedPanel.getByRole('textbox',{name:'جست‌وجو در فایل‌های به‌اشتراک‌گذاشته‌شده'}).fill('plan');
+  await expect(sharedPanel.locator('.chat-shared-item')).toHaveCount(1);
+  await sharedPanel.getByRole('button',{name:'پاک‌کردن جست‌وجوی فایل‌ها'}).click();
+  await sharedPanel.getByRole('button',{name:'ویس‌ها'}).click();
+  await expect(sharedPanel.locator('.chat-shared-item')).toHaveCount(1);
+  await sharedPanel.getByRole('button',{name:'بستن فایل‌های به‌اشتراک‌گذاشته‌شده'}).click();
+
   await page.setViewportSize({width:390,height:844});
   expect(await page.locator('body').evaluate((element)=>element.scrollWidth>element.clientWidth+1)).toBe(false);
   const results=await new AxeBuilder({page}).withTags(['wcag2a','wcag2aa','wcag21a','wcag21aa']).analyze();
