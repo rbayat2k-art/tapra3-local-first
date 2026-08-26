@@ -7,17 +7,33 @@ import {digitsOnly, normalizeBankCard, normalizeIranianMobile} from '../utils/op
 import {FormValidationSummary, OptionalLabel, RequiredLabel} from './FormValidation';
 import {REGISTRATION_ASSIGNABLE_ROLE_IDS} from './accessPolicy';
 import {RecordDialog} from './RecordDialog';
+import {registrationQueueInsight, registrationQueueLaneLabel, type RegistrationQueueLane} from './registrationQueue';
 
 interface ReviewProps {state: FoundationState; service: LocalFoundationService; execute: (label: string, work: () => Promise<FoundationState>, success: string) => Promise<boolean>}
 
 export function RegistrationPage({state, service, execute}: ReviewProps) {
   const [query, setQuery] = useState('');
+  const [filter, setFilter] = useState<'all' | RegistrationQueueLane | 'stale'>('all');
   const [selected, setSelected] = useState<RegistrationRequest | null>(null);
   const normalized = query.trim().toLocaleLowerCase('fa-IR');
-  const rows = state.registrationRequests.filter((item) => `${item.fullName} ${item.mobile} ${item.nationalId} ${item.requestedUsername} ${item.trackingCode}`.toLocaleLowerCase('fa-IR').includes(normalized));
+  const queueInsights = useMemo(() => state.registrationRequests.map((item) => registrationQueueInsight(item)), [state.registrationRequests]);
+  const counts = useMemo(() => ({
+    all: queueInsights.length,
+    hr: queueInsights.filter((item) => item.lane === 'hr').length,
+    applicant: queueInsights.filter((item) => item.lane === 'applicant').length,
+    activation: queueInsights.filter((item) => item.lane === 'activation').length,
+    closed: queueInsights.filter((item) => item.lane === 'closed').length,
+    stale: queueInsights.filter((item) => item.stale).length,
+  }), [queueInsights]);
+  const rows = queueInsights.filter((insight) => {
+    if (filter === 'stale' ? !insight.stale : filter !== 'all' && insight.lane !== filter) return false;
+    const item = insight.request;
+    return `${item.fullName} ${item.mobile} ${item.nationalId} ${item.requestedUsername} ${item.trackingCode} ${insight.nextAction} ${registrationQueueLaneLabel(insight.lane)}`.toLocaleLowerCase('fa-IR').includes(normalized);
+  });
   return <div className="page-stack">
     <section className="page-intro"><div className="page-intro__icon"><ClipboardCheck size={24}/></div><div><span className="eyebrow">گردش ثبت‌نام</span><h2>درخواست‌های ثبت‌نام</h2><p>هویت، کد ملی، موبایل و نام کاربری پیش از ثبت و دوباره هنگام فعال‌سازی کنترل می‌شوند.</p></div></section>
-    <section className="panel"><div className="operational-toolbar"><div><span className="eyebrow">صف بررسی</span><h3>{rows.length.toLocaleString('en-US')} درخواست</h3></div><label className="search-field"><Search size={17}/><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="نام، موبایل، کد ملی، نام کاربری یا کد پیگیری…"/></label></div><div className="registration-list">{rows.map((item) => <button key={item.id} onClick={() => setSelected(item)}><span className={`state-badge state-badge--${item.status === 'rejected' ? 'danger' : item.status === 'activated' ? 'good' : 'progress'}`}>{registrationLabel(item.status)}</span><div><strong>{item.fullName}</strong><small>{item.trackingCode} · {item.mobile} · @{item.requestedUsername}</small><time>ثبت در {formatPersianDateTime(item.createdAt)}</time></div><ArrowLeft size={17}/></button>)}{!rows.length && <div className="empty-state"><UserPlus size={28}/><strong>درخواستی مطابق جست‌وجو پیدا نشد.</strong></div>}</div></section>
+    <section className="registration-queue-metrics" aria-label="خلاصه صف ثبت‌نام"><article><UserRound size={18}/><span><strong>{counts.hr.toLocaleString('en-US')}</strong><small>اقدام منابع انسانی</small></span></article><article><CircleAlert size={18}/><span><strong>{counts.applicant.toLocaleString('en-US')}</strong><small>منتظر متقاضی</small></span></article><article><ShieldCheck size={18}/><span><strong>{counts.activation.toLocaleString('en-US')}</strong><small>فعال‌سازی مدیر سامانه</small></span></article><article className={counts.stale?'has-issue':''}><ClipboardCheck size={18}/><span><strong>{counts.stale.toLocaleString('en-US')}</strong><small>بیش از سه روز بدون تغییر</small></span></article></section>
+    <section className="panel registration-queue-panel"><div className="registration-queue-filters" role="group" aria-label="فیلتر صف ثبت‌نام">{([['all','همه'],['hr','منابع انسانی'],['applicant','متقاضی'],['activation','فعال‌سازی'],['closed','بسته‌شده'],['stale','معطل‌مانده']] as const).map(([id,label])=><button key={id} aria-pressed={filter===id} className={filter===id?'active':''} onClick={()=>setFilter(id)}><span>{label}</span><b>{counts[id].toLocaleString('en-US')}</b></button>)}</div><div className="operational-toolbar"><div><span className="eyebrow">صف اقدام</span><h3>{rows.length.toLocaleString('en-US')} درخواست</h3></div><label className="search-field"><Search size={17}/><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="نام، موبایل، کد ملی، نام کاربری یا کد پیگیری…"/></label></div><div className="registration-list">{rows.map(({request:item,lane,nextAction,ageDays,stale}) => <button key={item.id} onClick={() => setSelected(item)}><span className={`state-badge state-badge--${item.status === 'rejected' ? 'danger' : item.status === 'activated' ? 'good' : 'progress'}`}>{registrationLabel(item.status)}</span><div><strong>{item.fullName}</strong><small>{item.trackingCode} · {item.mobile} · @{item.requestedUsername}</small><span className={`registration-next-action ${stale?'registration-next-action--stale':''}`}><b>{registrationQueueLaneLabel(lane)}</b>{nextAction}{ageDays>0&&<em>{ageDays.toLocaleString('en-US')} روز بدون تغییر</em>}</span><time>ثبت در {formatPersianDateTime(item.createdAt)}</time></div><ArrowLeft size={17}/></button>)}{!rows.length && <div className="empty-state"><UserPlus size={28}/><strong>{filter==='all'&&!query?'هنوز درخواست ثبت‌نامی در این دستگاه وجود ندارد.':'درخواستی مطابق این فیلتر و جست‌وجو پیدا نشد.'}</strong></div>}</div></section>
     {selected && <ReviewDialog request={selected} state={state} onClose={() => setSelected(null)} onReview={(decision, reason, roleIds) => execute('registration-review', () => service.reviewRegistration(selected.id, selected.version, decision, reason, roleIds), 'تصمیم منابع انسانی ذخیره شد.').then((succeeded) => {if (succeeded) setSelected(null);})} onActivate={(password) => execute('registration-activate', () => service.activateRegistration(selected.id, selected.version, password), 'حساب ثبت‌نام فعال شد.').then((succeeded) => {if (succeeded) setSelected(null);})}/>}
   </div>;
 }
