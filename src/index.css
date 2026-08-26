@@ -771,6 +771,7 @@ body.has-open-window-bar .modal-scrim:has(> .dialog) { top: 54px; }
 
 /* User management — Phase A local identities */
 .user-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 13px; }
+.user-metrics--health { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .user-filter { padding: 2px 1px; }
 .users-panel { overflow: hidden; border: 1px solid var(--border); border-radius: 22px; background: var(--surface); box-shadow: var(--shadow-soft); }
 .users-head, .user-row { display: grid; grid-template-columns: minmax(210px, 1.2fr) minmax(150px, .85fr) 100px 120px minmax(230px, 1.1fr); align-items: center; gap: 15px; }
@@ -779,6 +780,12 @@ body.has-open-window-bar .modal-scrim:has(> .dialog) { top: 54px; }
 .user-identity { display: flex; min-width: 0; align-items: center; gap: 11px; }.user-identity > span:last-child { display: flex; min-width: 0; flex-direction: column; }.user-identity strong { overflow: hidden; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }.user-identity small { margin-top: 4px; color: var(--muted); font-size: 11px; }
 .user-name-button { width: fit-content; max-width: 100%; padding: 4px; border: 0; border-radius: 13px; color: inherit; background: transparent; text-align: right; cursor: pointer; transition: .16s ease; }.user-name-button:hover { color: var(--primary); background: var(--primary-soft); }.user-name-button:focus-visible { outline: 3px solid color-mix(in srgb, var(--primary) 28%, transparent); }
 .role-chips { display: flex; flex-wrap: wrap; gap: 5px; }.role-chips span { padding: 6px 9px; border-radius: 999px; color: var(--primary); background: var(--primary-soft); font-size: 11px; font-weight: 800; }
+.account-health-badge { display:inline-flex;align-items:center;gap:4px;padding:5px 7px;border:1px solid color-mix(in srgb,var(--success) 28%,var(--border));border-radius:999px;color:var(--success);background:color-mix(in srgb,var(--success) 7%,var(--surface));font-size:9px;font-style:normal;font-weight:800 }
+.account-health-badge--attention { border-color:color-mix(in srgb,var(--warning) 32%,var(--border));color:var(--warning);background:color-mix(in srgb,var(--warning) 7%,var(--surface)) }
+.user-row--attention { background:color-mix(in srgb,var(--warning) 3%,var(--surface)) }
+.user-placement-summary { display:none }
+.user-health-alert { display:flex;align-items:flex-start;gap:10px;margin:12px 20px 0;padding:12px 14px;border:1px solid color-mix(in srgb,var(--warning) 35%,var(--border));border-radius:13px;color:var(--warning);background:color-mix(in srgb,var(--warning) 7%,var(--surface)) }
+.user-health-alert>div { display:flex;flex-direction:column;gap:4px }.user-health-alert strong { font-size:11px }.user-health-alert span { font-size:9.5px }
 .status-badge { display: inline-flex; width: fit-content; align-items: center; gap: 5px; padding: 6px 9px; border-radius: 999px; font-size: 11px; font-weight: 900; }.status-badge--active { color: #08794f; background: #e5f8f0; }.status-badge--inactive { color: #a44856; background: #fff0f2; }.status-badge--prospect { color: #9a6508; background: #fff5dc; }:root[data-theme="dark"] .status-badge { background: var(--surface-strong); }
 .user-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .icon-action { position: relative; display: inline-grid; width: 38px; height: 38px; flex: 0 0 38px; place-items: center; border: 1px solid var(--border); border-radius: 11px; color: var(--muted); background: var(--surface); cursor: pointer; transition: border-color .16s ease, color .16s ease, background .16s ease, transform .16s ease; }
@@ -1753,11 +1760,19 @@ th .sort-header { padding: 8px 4px; }
   .position-list-panel { overflow-x: auto; }
   .position-list-head,
   .position-row { min-width: 920px; }
+  .user-row { grid-template-columns:minmax(210px,1fr) minmax(150px,.8fr) 90px }
   .user-unit,
   .user-position { display: none; }
+  .user-placement-summary { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;grid-column:1/-1;padding:9px 10px;border-radius:11px;background:var(--surface-soft) }
+  .user-placement-summary>span { display:flex;min-width:0;flex-direction:column;gap:3px }
+  .user-placement-summary small { color:var(--muted);font-size:8px }
+  .user-placement-summary b { overflow:hidden;font-size:10px;text-overflow:ellipsis;white-space:nowrap }
 }
 
 @media (max-width: 680px) {
+  .user-row { grid-template-columns:38px 1fr auto;padding:13px }
+  .user-row .user-identity { grid-column:2/-1 }
+  .user-row .role-chips,.user-row .user-actions,.user-placement-summary { grid-column:2/-1 }
   .position-list-head { display: none; }
   .position-list-panel { overflow: visible; border: 0; background: transparent; box-shadow: none; }
   .position-list { display: grid; gap: 10px; }

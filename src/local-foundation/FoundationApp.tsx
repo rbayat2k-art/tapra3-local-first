@@ -43,6 +43,7 @@ import {WorkflowAdminPage} from './WorkflowAdminPage';
 import {RecruitmentPage} from './RecruitmentPage';
 import {NavigationSearch, type NavigationSearchDestination} from './NavigationSearch';
 import {notifyWorkspaceTabActivated, requestWorkspaceTabClose} from './windowWorkspaceGuard';
+import {userOrganizationHealth, userOrganizationIssueLabel} from './userOrganizationHealth';
 import {
   frequentNavigationDestinations,
   incrementNavigationUsage,
@@ -1160,23 +1161,31 @@ function QaGuide({state, navigate}: {state: FoundationState; navigate: (page: Pa
 }
 
 function UsersPage({state, onEdit, onLogin, onStatus}: {state: FoundationState; onEdit: (user: LocalUser) => void; onLogin: (user: LocalUser) => void; onStatus: (user: LocalUser, status: UserStatus) => void}) {
-  const [filter, setFilter] = useState<'all' | UserStatus>('all');
+  const [filter, setFilter] = useState<'all' | UserStatus | 'attention' | 'protected'>('all');
   const [query, setQuery] = useState('');
   const [deactivateTarget, setDeactivateTarget] = useState<LocalUser | null>(null);
+  const healthInsights = useMemo(() => state.users.map((user) => userOrganizationHealth(user, state)), [state]);
+  const healthByUserId = useMemo(() => new Map(healthInsights.map((insight) => [insight.user.id, insight])), [healthInsights]);
   const users = useMemo(() => {
     const search = query.trim().toLocaleLowerCase('fa-IR');
     return state.users.filter((user) => {
-      if (filter !== 'all' && user.status !== filter) return false;
+      const health = healthByUserId.get(user.id)!;
+      if ((filter === 'active' || filter === 'inactive') && user.status !== filter) return false;
+      if (filter === 'attention' && !health.issues.length) return false;
+      if (filter === 'protected' && !health.protectedAccess) return false;
       if (!search) return true;
       const unit = state.units.find((item) => item.id === user.unitId)?.name ?? '';
       const position = state.positions.find((item) => item.id === user.positionId)?.title ?? '';
       return `${user.name} ${user.username} ${user.roles.join(' ')} ${unit} ${position} ${user.status === 'active' ? 'فعال' : 'غیرفعال'}`.toLocaleLowerCase('fa-IR').includes(search);
     });
-  }, [filter, query, state.positions, state.units, state.users]);
+  }, [filter, healthByUserId, query, state.positions, state.units, state.users]);
   const mayEdit = can(state.activeUser, 'foundation.users.edit');
   const mayManageStatus = can(state.activeUser, 'foundation.users.status.manage');
   const mayQaLogin = can(state.activeUser, 'foundation.users.qa_login');
   const activeCount = state.users.filter((user) => user.status === 'active').length;
+  const linkedCount = healthInsights.filter((insight) => insight.linked).length;
+  const attentionCount = healthInsights.filter((insight) => insight.issues.length).length;
+  const protectedCount = healthInsights.filter((insight) => insight.protectedAccess).length;
   const userSortColumns = useMemo<SortColumn<LocalUser>[]>(() => [
     {key: 'user', kind: 'text', value: (item) => item.name},
     {key: 'roles', kind: 'text', value: (item) => item.roles.join('، ')},
@@ -1188,24 +1197,26 @@ function UsersPage({state, onEdit, onLogin, onStatus}: {state: FoundationState; 
   return <><div className="page-stack">
     <PageIntro icon={UsersRound} eyebrow="سازمان / کاربران" title="کاربران سازمان" description="این فهرست فقط حساب‌های ورود را نشان می‌دهد. ایجاد حساب تازه از پرونده پرسنلی انجام می‌شود تا اطلاعات هویتی تکرار نشود." />
     <div className="org-toolbar"><div><strong>حساب کاربری از پرسنل مستقل است</strong><span>غیرفعال‌سازی حساب، پرونده پرسنلی یا سابقه همکاری را حذف نمی‌کند.</span></div></div>
-    <section className="user-metrics">
+    <section className="user-metrics user-metrics--health">
       <Metric icon={UsersRound} tone="violet" value={state.users.length.toLocaleString('en-US')} label="همه کاربران" detail="Seed قطعی محلی" />
       <Metric icon={UserCheck} tone="green" value={activeCount.toLocaleString('en-US')} label="کاربر فعال" detail="قابل ورود و مشاهده دسترسی" />
-      <Metric icon={UserX} tone="amber" value={(state.users.length - activeCount).toLocaleString('en-US')} label="کاربر غیرفعال" detail="داده حفظ می‌شود" />
+      <Metric icon={ContactRound} tone="blue" value={linkedCount.toLocaleString('en-US')} label="متصل به پرسنل" detail="پیوند هویتی دوطرفه" />
+      <Metric icon={CircleAlert} tone="amber" value={attentionCount.toLocaleString('en-US')} label="نیازمند بررسی" detail={`${protectedCount.toLocaleString('en-US')} حساب سطح‌بالا`} />
     </section>
     <div className="filter-row user-filter">
-      {([['all', 'همه کاربران'], ['active', 'کاربران فعال'], ['inactive', 'کاربران غیرفعال']] as const).map(([id, title]) => <button key={id} className={filter === id ? 'active' : ''} onClick={() => setFilter(id)}>{title}</button>)}
+      {([['all', 'همه کاربران'], ['active', 'فعال'], ['inactive', 'غیرفعال'], ['attention', 'نیازمند بررسی'], ['protected', 'سطح‌بالا']] as const).map(([id, title]) => <button key={id} className={filter === id ? 'active' : ''} aria-pressed={filter === id} onClick={() => setFilter(id)}>{title}</button>)}
       <span>{users.length.toLocaleString('en-US')} کاربر</span>
     </div>
     <DataSearchToolbar value={query} onChange={setQuery} placeholder="جست‌وجوی نام، نام کاربری، نقش، واحد یا سمت" count={users.length} unit="کاربر"/>
     <section className="users-panel">
       <div className="users-head"><span><SortHeader columnKey="user" label="کاربر" sort={userSort} onSort={requestUserSort}/></span><span><SortHeader columnKey="roles" label="نقش‌های دسترسی" sort={userSort} onSort={requestUserSort}/></span><span><SortHeader columnKey="status" label="وضعیت" sort={userSort} onSort={requestUserSort}/></span><span><SortHeader columnKey="unit" label="واحد سازمانی" sort={userSort} onSort={requestUserSort}/></span><span><SortHeader columnKey="position" label="سمت سازمانی" sort={userSort} onSort={requestUserSort}/></span><span>اقدام‌ها</span></div>
-      {sortedUsers.map((target) => <article className="user-row" key={target.id}>
+      {sortedUsers.map((target) => {const health=healthByUserId.get(target.id)!;return <article className={`user-row ${health.issues.length?'user-row--attention':''}`} key={target.id}>
         <button className="user-identity user-name-button" onClick={() => onEdit(target)} aria-label={`بازکردن پرونده ${userDisplayLabel(target,state)}`}><span className="persona-avatar" style={{background: target.accent}}>{target.initials}</span><span><strong>{target.name}</strong><small dir="ltr">@{target.username}</small>{sameNameUsers(target,state.users).length>0&&<em className="identity-name-warning">نام مشابه؛ شناسه را بررسی کنید</em>}</span></button>
-        <div className="role-chips">{target.roles.map((role) => <span key={role}>{role}</span>)}</div>
+        <div className="role-chips">{target.roles.map((role) => <span key={role}>{role}</span>)}{health.issues.length>0?<em className="account-health-badge account-health-badge--attention"><CircleAlert size={11}/>{health.issues.length.toLocaleString('en-US')} مورد بررسی</em>:<em className="account-health-badge"><BadgeCheck size={11}/>هماهنگ</em>}</div>
         <span className={`status-badge status-badge--${target.status}`}>{target.status === 'active' ? 'فعال' : 'غیرفعال'}</span>
         <span className="user-unit"><b>{state.units.find((unit) => unit.id === target.unitId)?.name ?? 'بدون واحد'}</b></span>
         <span className="user-position"><b>{state.positions.find((position) => position.id === target.positionId)?.title ?? 'بدون سمت'}</b></span>
+        <div className="user-placement-summary"><span><small>واحد</small><b>{state.units.find((unit) => unit.id === target.unitId)?.name ?? 'بدون واحد'}</b></span><span><small>سمت</small><b>{state.positions.find((position) => position.id === target.positionId)?.title ?? 'بدون سمت'}</b></span></div>
         <div className="user-actions">
           {(mayEdit || mayQaLogin) && <IconAction label="مشاهده و ویرایش کاربر" tone="primary" onClick={() => onEdit(target)}><Pencil size={17} /></IconAction>}
           {mayQaLogin && target.id !== state.activeUser.id && <IconAction label={target.status === 'active' ? 'ورود به دسترسی کاربر' : 'کاربر غیرفعال است'} tone="qa" disabled={target.status !== 'active'} onClick={() => onLogin(target)}><LogIn size={17} /></IconAction>}
@@ -1213,7 +1224,7 @@ function UsersPage({state, onEdit, onLogin, onStatus}: {state: FoundationState; 
           {mayManageStatus && target.id !== state.activeUser.id && target.status === 'inactive' && <IconAction label="فعال‌سازی کاربر" tone="success" onClick={() => onStatus(target, 'active')}><UserCheck size={17} /></IconAction>}
           {!mayEdit && !mayQaLogin && <span className="read-only-label">فقط مشاهده</span>}
         </div>
-      </article>)}
+      </article>})}
       {!sortedUsers.length && <DataSearchEmpty text="کاربری با این جست‌وجو پیدا نشد."/>}
     </section>
   </div>{deactivateTarget && <StatusConfirmDialog user={deactivateTarget} state={state} onClose={() => setDeactivateTarget(null)} onConfirm={() => { onStatus(deactivateTarget, 'inactive'); setDeactivateTarget(null); }} />}</>;
@@ -1241,9 +1252,10 @@ function UserDialog({user, state, onClose, onSave, onPassword, onLogin}: {user?:
   const permissions = user?.isAdmin ? user.permissions : [...new Set(basePermissions.filter((permission) => !permissionDenials.includes(permission)))];
   const recent = user ? state.audits.filter((audit) => audit.effectiveUserId === user.id || audit.actorId === user.actorId).slice(0, 6) : [];
   const submit=()=>{const next=validateRequired([{label:'نام و نام خانوادگی',value:name,valid:(value)=>String(value).trim().length>=3,message:'فیلد «نام و نام خانوادگی» الزامی است و باید حداقل ۳ نویسه داشته باشد.'},{label:'نام کاربری',value:username,valid:(value)=>/^[a-zA-Z0-9._-]{3,32}$/.test(String(value).trim()),message:'فیلد «نام کاربری» الزامی است و باید ۳ تا ۳۲ نویسه انگلیسی معتبر داشته باشد.'},{label:'واحد سازمانی',value:unitId},{label:'سمت سازمانی',value:positionId},{label:'نقش‌های دسترسی',value:roleIds},...(creating?[{label:'رمز عبور اولیه',value:password,valid:(value:unknown)=>String(value).length>=8,message:'فیلد «رمز عبور اولیه» الزامی است و باید حداقل ۸ نویسه داشته باشد.'}]:[])]);setErrors(next);if(next.length){setTab(!name.trim()||!username.trim()||!unitId||!positionId||creating&&password.length<8?'profile':'access');return;}onSave({name,username,unitId,positionId,managerUserId:managerUserId||undefined,roleIds,password:creating?password:undefined,permissionGrants:[],permissionDenials:permissionDenials.filter((permission)=>basePermissions.includes(permission))});};
+  const organizationHealth=user?userOrganizationHealth(user,state):undefined;
   return <Modal onClose={onClose} wide>
     <div className="modal-heading"><div><span>سازمان / پرونده کاربر</span><h2>{creating ? 'ایجاد کاربر جدید' : userDisplayLabel(user,state)}</h2><p>{creating ? 'حساب، جایگاه سازمانی و دسترسی اولیه را در یک جریان کنترل‌شده بسازید.' : 'اطلاعات سازمانی، نقش‌های دسترسی و فعالیت اخیر کاربر را بررسی کنید.'}</p></div><button className="icon-button" aria-label="بستن پنجره" onClick={onClose}><X size={20} /></button></div>
-    <FormValidationSummary errors={errors}/>{!creating && <div className="user-dialog-profile"><span className="persona-avatar persona-avatar--large" style={{background: user.accent}}>{user.initials}</span><div><strong>{user.name}</strong><span>@{user.username} · {user.roleTitle}</span><span className={`status-badge status-badge--${user.status}`}>{user.status === 'active' ? 'فعال' : 'غیرفعال'}</span></div></div>}
+    <FormValidationSummary errors={errors}/>{!creating && <div className="user-dialog-profile"><span className="persona-avatar persona-avatar--large" style={{background: user.accent}}>{user.initials}</span><div><strong>{user.name}</strong><span>@{user.username} · {user.roleTitle}</span><span className={`status-badge status-badge--${user.status}`}>{user.status === 'active' ? 'فعال' : 'غیرفعال'}</span></div></div>}{organizationHealth&&organizationHealth.issues.length>0&&<section className="user-health-alert" aria-label="موارد نیازمند بررسی حساب"><CircleAlert size={19}/><div><strong>جایگاه و دسترسی این حساب نیازمند بررسی است</strong>{organizationHealth.issues.map((issue)=><span key={issue}>{userOrganizationIssueLabel(issue)}</span>)}</div></section>}
     <div className="record-tabs"><button className={tab === 'profile' ? 'active' : ''} onClick={() => setTab('profile')}>مشخصات و جایگاه</button><button className={tab === 'access' ? 'active' : ''} onClick={() => setTab('access')}>نقش و دسترسی مؤثر</button>{!creating && <button className={tab === 'activity' ? 'active' : ''} onClick={() => setTab('activity')}>فعالیت اخیر</button>}</div>
     {tab === 'profile' && <><div className="form-grid user-profile-form">
       <label className="field-label"><RequiredLabel>نام و نام خانوادگی</RequiredLabel><input aria-required="true" autoFocus value={name} disabled={!mayEdit || Boolean(linkedPersonnel)} onChange={(event) => setName(event.target.value)} /></label>
