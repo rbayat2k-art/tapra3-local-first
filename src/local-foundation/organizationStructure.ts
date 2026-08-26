@@ -1,4 +1,5 @@
 import type {FoundationState, LocalUser, OrganizationalUnit, PersonnelRecord} from './model';
+import {todayIsoDate} from './PersianDate';
 
 export interface OrganizationPerson {
   id: string;
@@ -10,6 +11,15 @@ export interface OrganizationPerson {
 }
 
 type OrganizationState = Pick<FoundationState, 'personnel' | 'positions' | 'units' | 'users'>;
+
+export function activeActingManager(unit: OrganizationalUnit, today = todayIsoDate()) {
+  const assignment = unit.actingManager;
+  return assignment && assignment.startsOn <= today && assignment.endsOn >= today ? assignment : undefined;
+}
+
+export function effectiveUnitManagerUserId(unit: OrganizationalUnit, today = todayIsoDate()) {
+  return activeActingManager(unit, today)?.userId ?? unit.managerUserId;
+}
 
 /**
  * One canonical row per real person. A linked account is attached to its personnel
@@ -44,7 +54,10 @@ export function organizationStructureHealth(state: OrganizationState) {
     if (!person.positionId || !person.unitId) return true;
     return !state.positions.some((position) => position.id === person.positionId && position.status === 'active' && position.unitIds.includes(person.unitId!));
   }).length;
-  const unitsWithoutActiveManager = units.filter((unit) => unit.status === 'active' && (!unit.managerUserId || !state.users.some((user) => user.id === unit.managerUserId && user.status === 'active'))).length;
+  const unitsWithoutActiveManager = units.filter((unit) => {
+    const managerUserId = effectiveUnitManagerUserId(unit);
+    return unit.status === 'active' && (!managerUserId || !state.users.some((user) => user.id === managerUserId && user.status === 'active'));
+  }).length;
   const invalidParents = units.filter((unit) => unit.parentId && !units.some((parent) => parent.id === unit.parentId && parent.status === 'active')).length;
   return {people, missingUnit, missingPosition, unitsWithoutActiveManager, invalidParents};
 }

@@ -373,7 +373,49 @@ describe('per-user permission overrides', () => {
     const unit = ORGANIZATIONAL_UNITS.find((item) => item.type !== 'شعبه')!;
 
     await expect(service.createUnit({name: 'واحد آزمایشی', type: 'اداره', parentId: 'missing-unit', description: ''})).rejects.toThrow('واحد بالادست');
-    await expect(service.createUnit({name: 'واحد آزمایشی', type: 'اداره', managerUserId: inactive.id, description: ''})).rejects.toThrow('حساب کاربری فعال');
+    await expect(service.createUnit({name: 'شعبه آزمایشی', type: 'شعبه', parentId: 'unit-management', managerUserId: inactive.id, description: ''})).rejects.toThrow('حساب کاربری فعال');
     await expect(service.updateUnit(unit.id, 'stale-version', {name: unit.name, type: unit.type, parentId: unit.parentId, managerUserId: unit.managerUserId, description: unit.description})).rejects.toThrow('پنجره دیگری');
+  });
+
+  it('keeps permanent managers inside their unit and temporary managers inside the direct parent unit', async () => {
+    const storage = new MemoryStorage();
+    await storage.replaceAll(createSeedData());
+    const admin = LOCAL_USERS.find((user) => user.isAdmin)!;
+    const session = await storage.get<FoundationSession>('sessions', 'active-session');
+    await storage.put('sessions', {...session!, activeUserId: admin.id, actingAdminUserId: undefined});
+    const service = new LocalFoundationService(storage);
+    const sales = ORGANIZATIONAL_UNITS.find((unit) => unit.id === 'unit-sales')!;
+
+    await expect(service.updateUnit(sales.id, sales.updatedAt, {...sales, managerUserId: admin.id})).rejects.toThrow('همین واحد');
+    await expect(service.updateUnit(sales.id, sales.updatedAt, {...sales, actingManagerUserId: 'persona-seller', actingManagerReason: 'جانشینی آزمون', actingManagerStartsOn: '2026-08-26', actingManagerEndsOn: '2099-01-01'})).rejects.toThrow('واحد بالادست مستقیم');
+
+    const updated = await service.updateUnit(sales.id, sales.updatedAt, {...sales, managerUserId: 'persona-seller', actingManagerUserId: admin.id, actingManagerReason: 'مأموریت مدیر فروش', actingManagerStartsOn: '2026-08-26', actingManagerEndsOn: '2099-01-01'});
+    const saved = updated.units.find((unit) => unit.id === sales.id)!;
+    expect(saved.managerUserId).toBe('persona-seller');
+    expect(saved.actingManager).toMatchObject({userId: admin.id, reason: 'مأموریت مدیر فروش', endsOn: '2099-01-01'});
+    expect(updated.audits.some((audit) => audit.action === 'organization.unit.updated' && audit.metadata?.actingManagerUserId === admin.id)).toBe(true);
+  });
+
+  it('rolls back organization changes when their audit cannot be stored', async () => {
+    const storage = new MemoryStorage();
+    await storage.replaceAll(createSeedData());
+    const admin = LOCAL_USERS.find((user) => user.isAdmin)!;
+    const session = await storage.get<FoundationSession>('sessions', 'active-session');
+    await storage.put('sessions', {...session!, activeUserId: admin.id, actingAdminUserId: undefined});
+    const service = new LocalFoundationService(storage);
+    const unit = ORGANIZATIONAL_UNITS.find((item) => item.id === 'unit-sales')!;
+    storage.failNextPut('audit_events');
+    await expect(service.updateUnit(unit.id, unit.updatedAt, {...unit, description: 'این تغییر نباید باقی بماند'})).rejects.toThrow('injected failure');
+    expect((await storage.get<typeof unit>('organizational_units', unit.id))?.description).toBe(unit.description);
+  });
+
+  it('expires a temporary unit manager automatically during initialization', async () => {
+    const storage = new MemoryStorage();
+    await storage.replaceAll(createSeedData());
+    const unit = ORGANIZATIONAL_UNITS.find((item) => item.id === 'unit-sales')!;
+    await storage.put('organizational_units', {...unit, actingManager: {userId: 'persona-product-owner', reason: 'مأموریت پایان‌یافته', startsOn: '2025-01-01', endsOn: '2025-01-31', assignedAt: '2025-01-01T08:00:00.000Z', assignedByActorId: 'actor-product-owner'}});
+    const state = await new LocalFoundationService(storage).initialize();
+    expect(state.units.find((item) => item.id === unit.id)?.actingManager).toBeUndefined();
+    expect(state.audits.some((audit) => audit.action === 'organization.unit.acting_manager_expired' && audit.metadata?.unitId === unit.id)).toBe(true);
   });
 });

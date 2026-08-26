@@ -1,6 +1,6 @@
 import {describe, expect, it} from 'vitest';
 import {createSeedData} from './seed';
-import {flattenOrganizationUnits, organizationPeople, organizationPeopleForUnit, organizationStructureHealth} from './organizationStructure';
+import {activeActingManager, effectiveUnitManagerUserId, flattenOrganizationUnits, organizationPeople, organizationPeopleForUnit, organizationStructureHealth} from './organizationStructure';
 
 function organizationState() {
   const seed = createSeedData();
@@ -38,5 +38,14 @@ describe('organization structure projection', () => {
     const flattened = flattenOrganizationUnits(units);
     expect(flattened.map((item) => item.unit.id).sort()).toEqual(units.map((unit) => unit.id).sort());
     expect(new Set(flattened.map((item) => item.unit.id)).size).toBe(units.length);
+  });
+
+  it('uses an in-range temporary manager without overwriting the permanent manager', () => {
+    const state = organizationState();
+    const unit = state.units.find((item) => item.id === 'unit-sales')!;
+    const withActing = {...unit, actingManager: {userId: 'persona-product-owner', reason: 'مأموریت', startsOn: '2026-08-01', endsOn: '2026-08-31', assignedAt: '2026-08-01T08:00:00.000Z', assignedByActorId: 'actor-product-owner'}};
+    expect(activeActingManager(withActing, '2026-08-26')?.userId).toBe('persona-product-owner');
+    expect(effectiveUnitManagerUserId(withActing, '2026-08-26')).toBe('persona-product-owner');
+    expect(effectiveUnitManagerUserId(withActing, '2026-09-01')).toBe(unit.managerUserId);
   });
 });

@@ -12,7 +12,7 @@ import {
   COMPANY_ID, createSeedData, CUSTOMER_RECORDS, LOCAL_USERS, ORGANIZATIONAL_POSITIONS, ORGANIZATIONAL_UNITS,
   PERMISSION_CATALOG, PERSONNEL_RECORDS, resolveUserAccess, ROLE_TEMPLATES, SALES_STRUCTURES, SECURITY_ROLES,
 } from './seed';
-import {decryptSnapshot, encryptSnapshot, IndexedDBAdapter, type StorageAdapter, validateSnapshotShape} from './storage';
+import {decryptSnapshot, encryptSnapshot, IndexedDBAdapter, type StorageAdapter, type StorageTransaction, validateSnapshotShape} from './storage';
 import {ERP_MODULES, ERP_OPERATIONAL_STORES, permissionFor, stateLabel} from './erpCatalog';
 import {normalizeCardNumber, validateRequiredProfile, type ProfileCompletionInput} from './profileCompletion';
 import {salesStructureHasAssignmentHistory, salesStructureSupervisorName} from './salesStructureIdentity';
@@ -36,7 +36,17 @@ import {
   REGISTRATION_ASSIGNABLE_ROLE_IDS,
 } from './accessPolicy';
 
-export interface UnitInput {name: string; type: string; parentId?: string; managerUserId?: string; description: string;}
+export interface UnitInput {
+  name: string;
+  type: string;
+  parentId?: string;
+  managerUserId?: string;
+  actingManagerUserId?: string;
+  actingManagerReason?: string;
+  actingManagerStartsOn?: string;
+  actingManagerEndsOn?: string;
+  description: string;
+}
 export interface PositionInput {title: string; description: string; unitIds?: string[];}
 export interface UserInput {name: string; username: string; unitId: string; positionId: string; branchUnitId?: string; managerUserId?: string; roleIds: string[]; password?: string; personnelId?: string; permissionGrants?: PermissionCode[]; permissionDenials?: PermissionCode[];}
 export interface SelfCredentialChangeInput {currentPassword: string; username: string; newPassword?: string;}
@@ -161,7 +171,35 @@ export class LocalFoundationService {
       }
     }
     await this.applyDuePersonnelLifecycleChanges();
+    await this.expireActingUnitManagers();
     return this.loadState();
+  }
+
+  private async expireActingUnitManagers(): Promise<void> {
+    const today = currentLocalDate();
+    await this.storage.transaction(['organizational_units', 'users', 'sessions', 'audit_events', 'domain_events', 'meta'], 'readwrite', async (tx) => {
+      const [units, users, session] = await Promise.all([
+        tx.getAll<OrganizationalUnit>('organizational_units'),
+        tx.getAll<LocalUser>('users'),
+        tx.get<FoundationSession>('sessions', 'active-session'),
+      ]);
+      const expired = units.filter((unit) => unit.actingManager && unit.actingManager.endsOn < today);
+      if (!expired.length) return;
+      const actor = users.find((user) => user.id === PRIMARY_ADMIN_USER_ID) ?? users.find((user) => user.id === session?.activeUserId) ?? users[0];
+      if (!actor) return;
+      for (const unit of expired) {
+        await tx.put('organizational_units', {...unit, actingManager: undefined, updatedAt: new Date().toISOString()});
+        await appendOrganizationMutation(tx, {
+          actor,
+          action: 'organization.unit.acting_manager_expired',
+          summary: `جانشینی موقت واحد «${unit.name}» در پایان تاریخ مصوب خاتمه یافت.`,
+          aggregateType: 'organizational-unit',
+          aggregateId: unit.id,
+          eventType: 'UnitActingManagerExpired',
+          metadata: {unitId: unit.id, actingManagerUserId: unit.actingManager?.userId ?? '', endedOn: unit.actingManager?.endsOn ?? ''},
+        });
+      }
+    });
   }
 
   private async applyDuePersonnelLifecycleChanges(): Promise<void> {
@@ -582,12 +620,20 @@ export class LocalFoundationService {
   async createUnit(input: UnitInput): Promise<FoundationState> {
     const state = await this.loadState(); const actor = state.activeUser;
     requirePermission(actor, 'organization.units.manage', 'مجوز ایجاد واحد سازمانی را ندارید.');
-    validateUnitInput(input, state.units, state.users);
-    const now = new Date().toISOString();
-    const siblings = state.units.filter((unit) => unit.parentId === input.parentId);
-    const unit: OrganizationalUnit = {id: newId('unit'), name: input.name.trim(), type: input.type.trim(), parentId: input.parentId || undefined, managerUserId: input.managerUserId || undefined, status: 'active', order: Math.max(0, ...siblings.map((item) => item.order)) + 1, description: input.description.trim(), createdAt: now, updatedAt: now};
-    await this.storage.put('organizational_units', unit);
-    await this.appendAudit({actor, effectiveUser: actor, category: 'system', action: 'organization.unit.created', summary: `واحد سازمانی «${unit.name}» ایجاد شد.`, outcome: 'success', metadata: {unitId: unit.id, unitType: unit.type}});
+    requireOrganizationScope(actor, 'organization.units.manage', input.parentId, 'create', 'مجوز ایجاد واحد سازمانی را ندارید.');
+    validateUnitInput(input, state);
+    const unitId = newId('unit');
+    await this.storage.transaction(['organizational_units','users','personnel','audit_events','domain_events','meta'], 'readwrite', async (tx) => {
+      const [units, users, personnel] = await Promise.all([tx.getAll<OrganizationalUnit>('organizational_units'), tx.getAll<LocalUser>('users'), tx.getAll<PersonnelRecord>('personnel')]);
+      const currentState = {...state, units, users, personnel};
+      validateUnitInput(input, currentState);
+      requireOrganizationScope(actor, 'organization.units.manage', input.parentId, 'create', 'مجوز ایجاد واحد سازمانی را ندارید.');
+      const now = new Date().toISOString();
+      const siblings = units.filter((unit) => unit.parentId === input.parentId);
+      const unit: OrganizationalUnit = {id: unitId, name: input.name.trim(), type: input.type.trim(), parentId: input.parentId || undefined, managerUserId: input.managerUserId || undefined, status: 'active', order: Math.max(0, ...siblings.map((item) => item.order)) + 1, description: input.description.trim(), createdAt: now, updatedAt: now};
+      await tx.put('organizational_units', unit);
+      await appendOrganizationMutation(tx, {actor, action: 'organization.unit.created', summary: `واحد سازمانی «${unit.name}» ایجاد شد.`, aggregateType: 'organizational-unit', aggregateId: unit.id, eventType: 'OrganizationalUnitCreated', metadata: {unitId: unit.id, unitType: unit.type}});
+    });
     return this.loadState();
   }
 
@@ -596,11 +642,24 @@ export class LocalFoundationService {
     requirePermission(actor, 'organization.units.manage', 'مجوز ویرایش واحد سازمانی را ندارید.');
     const existing = state.units.find((unit) => unit.id === unitId); if (!existing) throw new Error('واحد سازمانی پیدا نشد.');
     if (existing.updatedAt !== expectedUpdatedAt) throw new Error('این واحد در پنجره دیگری تغییر کرده است. صفحه را تازه کنید و دوباره تلاش کنید.');
-    validateUnitInput(input, state.units, state.users, unitId);
+    requireOrganizationScope(actor, 'organization.units.manage', unitId, 'edit', 'مجوز ویرایش واحد سازمانی را ندارید.');
+    if (input.parentId) requireOrganizationScope(actor, 'organization.units.manage', input.parentId, 'edit', 'مجوز انتقال واحد به این بالادست را ندارید.');
+    validateUnitInput(input, state, unitId);
     if (input.parentId && wouldCreateCycle(unitId, input.parentId, state.units)) throw new Error('انتخاب این والد یک چرخه نامعتبر در ساختار سازمان ایجاد می‌کند.');
-    const updated: OrganizationalUnit = {...existing, name: input.name.trim(), type: input.type.trim(), parentId: input.parentId || undefined, managerUserId: input.managerUserId || undefined, description: input.description.trim(), updatedAt: new Date().toISOString()};
-    await this.storage.put('organizational_units', updated);
-    await this.appendAudit({actor, effectiveUser: actor, category: 'system', action: 'organization.unit.updated', summary: `واحد سازمانی «${updated.name}» ویرایش شد.`, outcome: 'success', metadata: {unitId}});
+    await this.storage.transaction(['organizational_units','users','personnel','audit_events','domain_events','meta'], 'readwrite', async (tx) => {
+      const [current, units, users, personnel] = await Promise.all([tx.get<OrganizationalUnit>('organizational_units', unitId), tx.getAll<OrganizationalUnit>('organizational_units'), tx.getAll<LocalUser>('users'), tx.getAll<PersonnelRecord>('personnel')]);
+      if (!current || current.updatedAt !== expectedUpdatedAt) throw new Error('این واحد در پنجره دیگری تغییر کرده است. صفحه را تازه کنید و دوباره تلاش کنید.');
+      const currentState = {...state, units, users, personnel};
+      validateUnitInput(input, currentState, unitId);
+      if (input.parentId && wouldCreateCycle(unitId, input.parentId, units)) throw new Error('انتخاب این والد یک چرخه نامعتبر در ساختار سازمان ایجاد می‌کند.');
+      requireOrganizationScope(actor, 'organization.units.manage', unitId, 'edit', 'مجوز ویرایش واحد سازمانی را ندارید.');
+      if (input.parentId) requireOrganizationScope(actor, 'organization.units.manage', input.parentId, 'edit', 'مجوز انتقال واحد به این بالادست را ندارید.');
+      const now = new Date().toISOString();
+      const actingManager = input.actingManagerUserId ? {userId: input.actingManagerUserId, reason: input.actingManagerReason!.trim(), startsOn: input.actingManagerStartsOn!, endsOn: input.actingManagerEndsOn!, assignedAt: current.actingManager?.userId === input.actingManagerUserId && current.actingManager.startsOn === input.actingManagerStartsOn && current.actingManager.endsOn === input.actingManagerEndsOn ? current.actingManager.assignedAt : now, assignedByActorId: current.actingManager?.userId === input.actingManagerUserId && current.actingManager.startsOn === input.actingManagerStartsOn && current.actingManager.endsOn === input.actingManagerEndsOn ? current.actingManager.assignedByActorId : actor.actorId} : undefined;
+      const updated: OrganizationalUnit = {...current, name: input.name.trim(), type: input.type.trim(), parentId: input.parentId || undefined, managerUserId: input.managerUserId || undefined, actingManager, description: input.description.trim(), updatedAt: now};
+      await tx.put('organizational_units', updated);
+      await appendOrganizationMutation(tx, {actor, action: 'organization.unit.updated', summary: `واحد سازمانی «${updated.name}» ویرایش شد.`, aggregateType: 'organizational-unit', aggregateId: unitId, eventType: 'OrganizationalUnitUpdated', metadata: {unitId, managerUserId: updated.managerUserId ?? '', actingManagerUserId: updated.actingManager?.userId ?? '', actingManagerEndsOn: updated.actingManager?.endsOn ?? ''}});
+    });
     return this.loadState();
   }
 
@@ -609,35 +668,63 @@ export class LocalFoundationService {
     requirePermission(actor, 'organization.units.manage', 'مجوز تغییر وضعیت واحد را ندارید.');
     const unit = state.units.find((item) => item.id === unitId); if (!unit) throw new Error('واحد سازمانی پیدا نشد.');
     if (unit.updatedAt !== expectedUpdatedAt) throw new Error('وضعیت این واحد در پنجره دیگری تغییر کرده است. صفحه را تازه کنید.');
+    requireOrganizationScope(actor, 'organization.units.manage', unitId, 'edit', 'مجوز تغییر وضعیت واحد را ندارید.');
     const hasActiveAssignments = unit.type === 'شعبه'
       ? state.personnel.some((person) => person.branchUnitId === unitId && person.employmentStatus === 'active') || state.users.some((user) => !user.personnelId && user.branchUnitId === unitId && user.status === 'active')
       : state.personnel.some((person) => person.unitId === unitId && person.employmentStatus === 'active') || state.users.some((user) => user.unitId === unitId && user.status === 'active');
     if (status === 'inactive' && hasActiveAssignments) throw new Error(unit.type === 'شعبه' ? 'ابتدا انتقال پرسنل مستقر در این شعبه را ثبت کنید.' : 'ابتدا تغییر واحد پرسنل فعال این واحد را ثبت کنید.');
     if (status === 'inactive' && state.units.some((item) => item.parentId === unitId && item.status === 'active')) throw new Error('ابتدا وضعیت واحدهای زیرمجموعه را تعیین کنید.');
     if (status === 'active' && unit.parentId && !state.units.some((item) => item.id === unit.parentId && item.status === 'active')) throw new Error('برای فعال‌سازی این واحد، ابتدا واحد بالادست را فعال کنید.');
-    const updated = {...unit, status, updatedAt: new Date().toISOString()}; await this.storage.put('organizational_units', updated);
-    await this.appendAudit({actor, effectiveUser: actor, category: 'system', action: 'organization.unit.status_changed', summary: `واحد «${unit.name}» ${status === 'active' ? 'فعال' : 'غیرفعال'} شد.`, outcome: 'success', metadata: {unitId, status}});
+    await this.storage.transaction(['organizational_units','users','personnel','audit_events','domain_events','meta'], 'readwrite', async (tx) => {
+      const [current, units, users, personnel] = await Promise.all([tx.get<OrganizationalUnit>('organizational_units', unitId), tx.getAll<OrganizationalUnit>('organizational_units'), tx.getAll<LocalUser>('users'), tx.getAll<PersonnelRecord>('personnel')]);
+      if (!current || current.updatedAt !== expectedUpdatedAt) throw new Error('وضعیت این واحد در پنجره دیگری تغییر کرده است. صفحه را تازه کنید.');
+      const activeAssignments = current.type === 'شعبه' ? personnel.some((person) => person.branchUnitId === unitId && person.employmentStatus === 'active') || users.some((user) => !user.personnelId && user.branchUnitId === unitId && user.status === 'active') : personnel.some((person) => person.unitId === unitId && person.employmentStatus === 'active') || users.some((user) => user.unitId === unitId && user.status === 'active');
+      if (status === 'inactive' && activeAssignments) throw new Error(current.type === 'شعبه' ? 'ابتدا انتقال پرسنل مستقر در این شعبه را ثبت کنید.' : 'ابتدا تغییر واحد پرسنل فعال این واحد را ثبت کنید.');
+      if (status === 'inactive' && units.some((item) => item.parentId === unitId && item.status === 'active')) throw new Error('ابتدا وضعیت واحدهای زیرمجموعه را تعیین کنید.');
+      if (status === 'active' && current.parentId && !units.some((item) => item.id === current.parentId && item.status === 'active')) throw new Error('برای فعال‌سازی این واحد، ابتدا واحد بالادست را فعال کنید.');
+      const updated = {...current, status, actingManager: status === 'inactive' ? undefined : current.actingManager, updatedAt: new Date().toISOString()};
+      await tx.put('organizational_units', updated);
+      await appendOrganizationMutation(tx, {actor, action: 'organization.unit.status_changed', summary: `واحد «${current.name}» ${status === 'active' ? 'فعال' : 'غیرفعال'} شد.`, aggregateType: 'organizational-unit', aggregateId: unitId, eventType: 'OrganizationalUnitStatusChanged', metadata: {unitId, status}});
+    });
     return this.loadState();
   }
 
   async createPosition(input: PositionInput): Promise<FoundationState> {
     const state = await this.loadState(); const actor = state.activeUser; requirePermission(actor, 'organization.positions.manage', 'مجوز ایجاد سمت را ندارید.'); validatePositionInput(input, state);
-    const now = new Date().toISOString(); const position: OrganizationalPosition = {id: newId('position'), title: input.title.trim(), description: input.description.trim(), unitIds: normalizePositionUnitIds(input.unitIds ?? []), status: 'active', createdAt: now, updatedAt: now}; await this.storage.put('organizational_positions', position);
-    await this.appendAudit({actor, effectiveUser: actor, category: 'system', action: 'organization.position.created', summary: `سمت سازمانی «${position.title}» برای ${position.unitIds.length.toLocaleString('en-US')} واحد ایجاد شد.`, outcome: 'success', metadata: {positionId: position.id, unitIds: position.unitIds.join(',')}}); return this.loadState();
+    const unitIds = normalizePositionUnitIds(input.unitIds ?? []); unitIds.forEach((unitId) => requireOrganizationScope(actor, 'organization.positions.manage', unitId, 'create', 'مجوز ایجاد سمت را ندارید.'));
+    await this.storage.transaction(['organizational_positions','organizational_units','users','personnel','audit_events','domain_events','meta'], 'readwrite', async (tx) => {
+      const [positions, units] = await Promise.all([tx.getAll<OrganizationalPosition>('organizational_positions'), tx.getAll<OrganizationalUnit>('organizational_units')]);
+      validatePositionInput(input, {...state, positions, units});
+      unitIds.forEach((unitId) => requireOrganizationScope(actor, 'organization.positions.manage', unitId, 'create', 'مجوز ایجاد سمت را ندارید.'));
+      const now = new Date().toISOString(); const position: OrganizationalPosition = {id: newId('position'), title: input.title.trim(), description: input.description.trim(), unitIds, status: 'active', createdAt: now, updatedAt: now};
+      await tx.put('organizational_positions', position);
+      await appendOrganizationMutation(tx, {actor, action: 'organization.position.created', summary: `سمت سازمانی «${position.title}» برای ${position.unitIds.length.toLocaleString('en-US')} واحد ایجاد شد.`, aggregateType: 'organizational-position', aggregateId: position.id, eventType: 'OrganizationalPositionCreated', metadata: {positionId: position.id, unitIds: position.unitIds.join(',')}});
+    }); return this.loadState();
   }
 
   async updatePosition(positionId: string, expectedUpdatedAt: string, input: PositionInput): Promise<FoundationState> {
     const state = await this.loadState(); const actor = state.activeUser; requirePermission(actor, 'organization.positions.manage', 'مجوز ویرایش سمت را ندارید.'); const existing = state.positions.find((item) => item.id === positionId); if (!existing) throw new Error('سمت سازمانی پیدا نشد.'); if (existing.updatedAt !== expectedUpdatedAt) throw new Error('این سمت در پنجره دیگری تغییر کرده است. صفحه را تازه کنید و دوباره تلاش کنید.'); validatePositionInput(input, state, positionId);
     const nextUnitIds = normalizePositionUnitIds(input.unitIds ?? []);
+    [...new Set([...existing.unitIds, ...nextUnitIds])].forEach((unitId) => requireOrganizationScope(actor, 'organization.positions.manage', unitId, 'edit', 'مجوز ویرایش سمت را ندارید.'));
     const removedUnitIds = existing.unitIds.filter((unitId) => !nextUnitIds.includes(unitId));
     const assignedInRemovedUnit = state.personnel.some((person) => person.positionId === positionId && person.employmentStatus === 'active' && removedUnitIds.includes(person.unitId)) || state.users.some((user) => user.positionId === positionId && user.status === 'active' && !user.personnelId && Boolean(user.unitId && removedUnitIds.includes(user.unitId)));
     if (assignedInRemovedUnit) throw new Error('این سمت در یکی از واحدهای حذف‌شده به فرد فعال تخصیص دارد؛ ابتدا جایگاه افراد آن واحد را تغییر دهید.');
-    const updated = {...existing, title: input.title.trim(), description: input.description.trim(), unitIds: nextUnitIds, updatedAt: new Date().toISOString()}; await this.storage.put('organizational_positions', updated); await this.appendAudit({actor, effectiveUser: actor, category: 'system', action: 'organization.position.updated', summary: `سمت سازمانی «${updated.title}» ویرایش شد.`, outcome: 'success', metadata: {positionId, unitIds: updated.unitIds.join(',')}}); return this.loadState();
+    await this.storage.transaction(['organizational_positions','organizational_units','users','personnel','audit_events','domain_events','meta'], 'readwrite', async (tx) => {
+      const [current, positions, units, users, personnel] = await Promise.all([tx.get<OrganizationalPosition>('organizational_positions', positionId), tx.getAll<OrganizationalPosition>('organizational_positions'), tx.getAll<OrganizationalUnit>('organizational_units'), tx.getAll<LocalUser>('users'), tx.getAll<PersonnelRecord>('personnel')]);
+      if (!current || current.updatedAt !== expectedUpdatedAt) throw new Error('این سمت در پنجره دیگری تغییر کرده است. صفحه را تازه کنید و دوباره تلاش کنید.');
+      const currentState = {...state, positions, units, users, personnel}; validatePositionInput(input, currentState, positionId);
+      const currentNextUnitIds = normalizePositionUnitIds(input.unitIds ?? []); [...new Set([...current.unitIds, ...currentNextUnitIds])].forEach((unitId) => requireOrganizationScope(actor, 'organization.positions.manage', unitId, 'edit', 'مجوز ویرایش سمت را ندارید.'));
+      const removed = current.unitIds.filter((unitId) => !currentNextUnitIds.includes(unitId));
+      if (personnel.some((person) => person.positionId === positionId && person.employmentStatus === 'active' && removed.includes(person.unitId)) || users.some((user) => user.positionId === positionId && user.status === 'active' && !user.personnelId && Boolean(user.unitId && removed.includes(user.unitId)))) throw new Error('این سمت در یکی از واحدهای حذف‌شده به فرد فعال تخصیص دارد؛ ابتدا جایگاه افراد آن واحد را تغییر دهید.');
+      const updated = {...current, title: input.title.trim(), description: input.description.trim(), unitIds: currentNextUnitIds, updatedAt: new Date().toISOString()}; await tx.put('organizational_positions', updated);
+      await appendOrganizationMutation(tx, {actor, action: 'organization.position.updated', summary: `سمت سازمانی «${updated.title}» ویرایش شد.`, aggregateType: 'organizational-position', aggregateId: positionId, eventType: 'OrganizationalPositionUpdated', metadata: {positionId, unitIds: updated.unitIds.join(',')}});
+    }); return this.loadState();
   }
 
   async setPositionStatus(positionId: string, expectedUpdatedAt: string, status: UserStatus): Promise<FoundationState> {
     const state = await this.loadState(); const actor = state.activeUser; requirePermission(actor, 'organization.positions.manage', 'مجوز تغییر وضعیت سمت را ندارید.'); const position = state.positions.find((item) => item.id === positionId); if (!position) throw new Error('سمت سازمانی پیدا نشد.'); if (position.updatedAt !== expectedUpdatedAt) throw new Error('وضعیت این سمت در پنجره دیگری تغییر کرده است. صفحه را تازه کنید.'); if (status === 'inactive' && (state.users.some((user) => user.positionId === positionId && user.status === 'active') || state.personnel.some((person) => person.positionId === positionId && person.employmentStatus === 'active'))) throw new Error('این سمت به فرد فعال اختصاص دارد. ابتدا انتساب را تغییر دهید.');
-    await this.storage.put('organizational_positions', {...position, status, updatedAt: new Date().toISOString()}); await this.appendAudit({actor, effectiveUser: actor, category: 'system', action: 'organization.position.status_changed', summary: `سمت «${position.title}» ${status === 'active' ? 'فعال' : 'غیرفعال'} شد.`, outcome: 'success', metadata: {positionId, status}}); return this.loadState();
+    position.unitIds.forEach((unitId) => requireOrganizationScope(actor, 'organization.positions.manage', unitId, 'edit', 'مجوز تغییر وضعیت سمت را ندارید.'));
+    await this.storage.transaction(['organizational_positions','organizational_units','users','personnel','audit_events','domain_events','meta'], 'readwrite', async (tx) => {const [current, users, personnel] = await Promise.all([tx.get<OrganizationalPosition>('organizational_positions', positionId), tx.getAll<LocalUser>('users'), tx.getAll<PersonnelRecord>('personnel')]); if (!current || current.updatedAt !== expectedUpdatedAt) throw new Error('وضعیت این سمت در پنجره دیگری تغییر کرده است. صفحه را تازه کنید.'); current.unitIds.forEach((unitId) => requireOrganizationScope(actor, 'organization.positions.manage', unitId, 'edit', 'مجوز تغییر وضعیت سمت را ندارید.')); if (status === 'inactive' && (users.some((user) => user.positionId === positionId && user.status === 'active') || personnel.some((person) => person.positionId === positionId && person.employmentStatus === 'active'))) throw new Error('این سمت به فرد فعال اختصاص دارد. ابتدا انتساب را تغییر دهید.'); const updated = {...current, status, updatedAt: new Date().toISOString()}; await tx.put('organizational_positions', updated); await appendOrganizationMutation(tx, {actor, action: 'organization.position.status_changed', summary: `سمت «${current.title}» ${status === 'active' ? 'فعال' : 'غیرفعال'} شد.`, aggregateType: 'organizational-position', aggregateId: positionId, eventType: 'OrganizationalPositionStatusChanged', metadata: {positionId, status}});}); return this.loadState();
   }
 
   async deletePosition(positionId: string, expectedUpdatedAt: string): Promise<FoundationState> {
@@ -651,17 +738,8 @@ export class LocalFoundationService {
     const assignedStandaloneUsers = state.users.filter((user) => user.positionId === positionId && !user.personnelId);
     const assignmentCount = assignedPersonnel.length + assignedStandaloneUsers.length;
     if (assignmentCount) throw new Error(`سمت «${position.title}» به ${assignmentCount.toLocaleString('en-US')} نفر تخصیص دارد؛ ابتدا سمت فعلی آن‌ها را تغییر دهید.`);
-    await this.storage.delete('organizational_positions', positionId);
-    await this.appendAudit({
-      actor,
-      effectiveUser: actor,
-      category: 'system',
-      action: 'organization.position.deleted',
-      summary: `سمت سازمانی «${position.title}» حذف شد؛ سابقه آن برای گزارش‌گیری و ممیزی حفظ شد.`,
-      reason: 'حذف سمت بدون تخصیص جاری',
-      outcome: 'success',
-      metadata: {positionId, positionTitle: position.title, description: position.description, assignmentCount: 0},
-    });
+    position.unitIds.forEach((unitId) => requireOrganizationScope(actor, 'organization.positions.manage', unitId, 'edit', 'مجوز حذف سمت را ندارید.'));
+    await this.storage.transaction(['organizational_positions','organizational_units','users','personnel','audit_events','domain_events','meta'], 'readwrite', async (tx) => {const [current, currentUsers, currentPersonnel] = await Promise.all([tx.get<OrganizationalPosition>('organizational_positions', positionId), tx.getAll<LocalUser>('users'), tx.getAll<PersonnelRecord>('personnel')]); if (!current || current.updatedAt !== expectedUpdatedAt) throw new Error('این سمت در پنجره دیگری تغییر کرده است. صفحه را تازه کنید.'); current.unitIds.forEach((unitId) => requireOrganizationScope(actor, 'organization.positions.manage', unitId, 'edit', 'مجوز حذف سمت را ندارید.')); const count = currentPersonnel.filter((person) => person.positionId === positionId).length + currentUsers.filter((user) => user.positionId === positionId && !user.personnelId).length; if (count) throw new Error(`سمت «${current.title}» به ${count.toLocaleString('en-US')} نفر تخصیص دارد؛ ابتدا سمت فعلی آن‌ها را تغییر دهید.`); await tx.delete('organizational_positions', positionId); await appendOrganizationMutation(tx, {actor, action: 'organization.position.deleted', summary: `سمت سازمانی «${current.title}» حذف شد؛ سابقه آن برای گزارش‌گیری و ممیزی حفظ شد.`, reason: 'حذف سمت بدون تخصیص جاری', aggregateType: 'organizational-position', aggregateId: positionId, eventType: 'OrganizationalPositionDeleted', metadata: {positionId, positionTitle: current.title, description: current.description, assignmentCount: 0}});});
     return this.loadState();
   }
 
@@ -2813,7 +2891,36 @@ function normalizeCustomerInput(input: CustomerInput): CustomerInput { return {.
 function validateCustomerInput(input: CustomerInput) { const name = customerDisplayName(input); if (name.length < 2) throw new Error(input.type === 'legal' ? 'نام حقوقی مشتری را وارد کنید.' : 'نام و نام خانوادگی مشتری را وارد کنید.'); if (!input.source.trim()) throw new Error('منبع آشنایی مشتری را مشخص کنید.'); if (input.nationalId && !isValidIranianNationalId(input.nationalId)) throw new Error('کد ملی مشتری معتبر نیست.'); for (const phone of input.phones) {const number = normalizePhone(phone.number); if (!isValidIranianMobile(number) && !isValidIranianLandline(number)) throw new Error('شماره تماس باید همراه ۱۱ رقمی یا تلفن ثابت همراه پیش‌شماره باشد.');} for (const address of input.addresses) {if (address.postalCode && !isValidPostalCode(address.postalCode)) throw new Error('کد پستی مشتری باید دقیقاً ۱۰ رقم باشد.');} if (input.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input.email)) throw new Error('ایمیل مشتری معتبر نیست.'); }
 export function findDuplicateCustomers(customers: CustomerRecord[], target: CustomerInput | CustomerRecord, excludeId?: string) { const phones = new Set(target.phones.map((item) => normalizePhone(item.number)).filter(Boolean)); const nationalId = normalizeNationalId(target.nationalId); const businessId = normalizeNationalId(target.businessId); return customers.filter((item) => item.id !== excludeId && !item.mergedIntoCustomerId && ((nationalId && normalizeNationalId(item.nationalId) === nationalId) || (businessId && normalizeNationalId(item.businessId) === businessId) || item.phones.some((phone) => phones.has(normalizePhone(phone.number))))); }
 function customerStatusLabel(status: CustomerRecord['status']) { return status === 'active' ? 'فعال' : status === 'inactive' ? 'غیرفعال' : 'بالقوه'; }
-function validateUnitInput(input: UnitInput, units: OrganizationalUnit[], users: LocalUser[], excludeId?: string) { if (input.name.trim().length < 2) throw new Error('نام واحد باید حداقل ۲ نویسه باشد.'); if (input.type.trim().length < 2) throw new Error('نوع واحد را مشخص کنید.'); if (units.some((unit) => unit.id !== excludeId && normalizeText(unit.name) === normalizeText(input.name))) throw new Error('واحدی با این نام وجود دارد.'); if (excludeId && input.parentId === excludeId) throw new Error('یک واحد نمی‌تواند والد خودش باشد.'); if (input.parentId && !units.some((unit) => unit.id === input.parentId && unit.status === 'active' && unit.type !== 'شعبه')) throw new Error('واحد بالادست باید یک واحد سازمانی فعال و معتبر باشد.'); if (input.managerUserId && !users.some((user) => user.id === input.managerUserId && user.status === 'active')) throw new Error('مسئول واحد باید یک حساب کاربری فعال باشد.'); }
+function validateUnitInput(input: UnitInput, state: Pick<FoundationState, 'units'|'users'|'personnel'>, excludeId?: string) {
+  const {units, users, personnel} = state;
+  if (input.name.trim().length < 2) throw new Error('نام واحد باید حداقل ۲ نویسه باشد.');
+  if (input.type.trim().length < 2) throw new Error('نوع واحد را مشخص کنید.');
+  if (units.some((unit) => unit.id !== excludeId && normalizeText(unit.name) === normalizeText(input.name))) throw new Error('واحدی با این نام وجود دارد.');
+  if (excludeId && input.parentId === excludeId) throw new Error('یک واحد نمی‌تواند والد خودش باشد.');
+  if (input.parentId && !units.some((unit) => unit.id === input.parentId && unit.status === 'active' && unit.type !== 'شعبه')) throw new Error('واحد بالادست باید یک واحد سازمانی فعال و معتبر باشد.');
+  if (input.type.trim() === 'شعبه') {
+    if (input.managerUserId && !users.some((user) => user.id === input.managerUserId && user.status === 'active')) throw new Error('مسئول شعبه باید یک حساب کاربری فعال باشد.');
+    return;
+  }
+  if (!excludeId && input.managerUserId) throw new Error('ابتدا واحد را ایجاد و پرسنل را به آن منتقل کنید؛ سپس مدیر دائم همان واحد را تعیین کنید.');
+  if (input.managerUserId) {
+    const manager = users.find((user) => user.id === input.managerUserId && user.status === 'active');
+    const linkedPersonnel = manager && personnel.find((person) => person.id === manager.personnelId || person.linkedUserId === manager.id);
+    if (!manager || !linkedPersonnel || linkedPersonnel.employmentStatus !== 'active' || linkedPersonnel.unitId !== excludeId) throw new Error('مدیر دائم باید حساب فعال و پرونده پرسنلی فعال در همین واحد داشته باشد.');
+  }
+  const actingValues = [input.actingManagerUserId, input.actingManagerReason, input.actingManagerStartsOn, input.actingManagerEndsOn];
+  const hasActing = actingValues.some(Boolean);
+  if (!hasActing) return;
+  if (!excludeId) throw new Error('جانشین موقت پس از ایجاد واحد قابل ثبت است.');
+  if (!input.parentId) throw new Error('برای واحد سطح اصلی نمی‌توان جانشین موقت از واحد بالادست تعیین کرد.');
+  if (!actingValues.every(Boolean)) throw new Error('فرد جانشین، دلیل، تاریخ شروع و تاریخ پایان جانشینی موقت را کامل کنید.');
+  if (input.actingManagerReason!.trim().length < 5) throw new Error('دلیل جانشینی موقت باید حداقل ۵ نویسه داشته باشد.');
+  if (input.actingManagerStartsOn! > input.actingManagerEndsOn!) throw new Error('تاریخ پایان جانشینی باید بعد از تاریخ شروع باشد.');
+  if (input.actingManagerEndsOn! < currentLocalDate()) throw new Error('تاریخ پایان جانشینی نمی‌تواند در گذشته باشد.');
+  const actingUser = users.find((user) => user.id === input.actingManagerUserId && user.status === 'active');
+  const actingPersonnel = actingUser && personnel.find((person) => person.id === actingUser.personnelId || person.linkedUserId === actingUser.id);
+  if (!actingUser || !actingPersonnel || actingPersonnel.employmentStatus !== 'active' || actingPersonnel.unitId !== input.parentId) throw new Error('جانشین موقت باید فرد فعالِ واحد بالادست مستقیم باشد.');
+}
 function validatePositionInput(input: PositionInput, state: FoundationState, excludeId?: string) { if (input.title.trim().length < 2) throw new Error('عنوان سمت باید حداقل ۲ نویسه باشد.'); if (state.positions.some((position) => position.id !== excludeId && position.title.trim().toLocaleLowerCase('fa') === input.title.trim().toLocaleLowerCase('fa'))) throw new Error('سمتی با این عنوان وجود دارد؛ همان سمت را ویرایش و واحد مجاز را به آن اضافه کنید.'); const unitIds = normalizePositionUnitIds(input.unitIds ?? []); if (!unitIds.length) throw new Error('حداقل یک واحد سازمانی مجاز برای سمت انتخاب کنید.'); if (unitIds.some((id) => !state.units.some((unit) => unit.id === id && unit.status === 'active' && unit.type !== 'شعبه'))) throw new Error('یکی از واحدهای مجاز سمت، غیرفعال یا نامعتبر است.'); }
 function validateUserInput(input: UserInput, state: FoundationState, excludeId?: string) { if (input.name.trim().length < 3) throw new Error('نام کاربر باید حداقل ۳ نویسه باشد.'); if (!/^[a-zA-Z0-9._-]{3,32}$/.test(input.username.trim())) throw new Error('نام کاربری باید ۳ تا ۳۲ نویسه لاتین، عدد، نقطه، خط تیره یا زیرخط باشد.'); if (state.users.some((user) => user.id !== excludeId && user.username.toLowerCase() === input.username.trim().toLowerCase()) || state.registrationRequests.some((request) => request.linkedUserId !== excludeId && request.requestedUsername.toLowerCase() === input.username.trim().toLowerCase())) throw new Error('این نام کاربری قبلاً استفاده شده یا برای یک درخواست ثبت‌نام رزرو شده است.'); if (!state.units.some((unit) => unit.id === input.unitId && unit.status === 'active' && unit.type !== 'شعبه')) throw new Error('واحد سازمانی فعال انتخاب کنید؛ شعبه در فیلد مستقلی نگهداری می‌شود.'); if (input.branchUnitId && !state.units.some((unit) => unit.id === input.branchUnitId && unit.status === 'active' && unit.type === 'شعبه')) throw new Error('شعبه محل استقرار معتبر انتخاب کنید.'); const selectedPosition = state.positions.find((position) => position.id === input.positionId && position.status === 'active'); if (!selectedPosition) throw new Error('سمت سازمانی فعال انتخاب کنید.'); if (!positionSupportsUnit(selectedPosition, input.unitId)) throw new Error('سمت انتخاب‌شده برای این واحد سازمانی مجاز نیست.'); if (!input.roleIds.length || input.roleIds.some((id) => !state.roles.some((role) => role.id === id && role.status === 'active'))) throw new Error('حداقل یک نقش دسترسی فعال انتخاب کنید.'); if (input.managerUserId && input.managerUserId === excludeId) throw new Error('کاربر نمی‌تواند مدیر مستقیم خودش باشد.'); const validPermissions = new Set([...PERMISSION_CATALOG.filter((item) => item.available).map((item) => item.code), ...state.roles.flatMap((role) => role.permissions)]); const grants = input.permissionGrants ?? []; const denials = input.permissionDenials ?? []; if ([...grants, ...denials].some((code) => !validPermissions.has(code))) throw new Error('یکی از مجوزهای انتخاب‌شده در کاتالوگ فعال دسترسی وجود ندارد.'); if (grants.some((code) => denials.includes(code))) throw new Error('یک مجوز نمی‌تواند هم‌زمان برای کاربر افزوده و مستثنا شود.'); }
 function normalizeUserPermissionOverrides(input: Pick<UserInput, 'roleIds'|'permissionGrants'|'permissionDenials'>, state: FoundationState) { const available = new Set([...PERMISSION_CATALOG.filter((item) => item.available).map((item) => item.code), ...state.roles.flatMap((role) => role.permissions)]); const base = new Set(state.roles.filter((role) => input.roleIds.includes(role.id) && role.status === 'active').flatMap((role) => role.permissions)); const grants = [...new Set(input.permissionGrants ?? [])].filter((permission) => available.has(permission) && !base.has(permission)); const denials = [...new Set(input.permissionDenials ?? [])].filter((permission) => available.has(permission) && base.has(permission)); return {grants, denials}; }
@@ -2822,6 +2929,34 @@ function wouldCreateCycle(unitId: string, parentId: string, units: Organizationa
 function sameStrings(a: string[], b: string[]) { return a.length === b.length && [...a].sort().every((value, index) => value === [...b].sort()[index]); }
 export function userConcurrencyToken(user: LocalUser) {
   return JSON.stringify({name:user.name,username:user.username,status:user.status,passwordHash:user.passwordHash,passwordUpdatedAt:user.passwordUpdatedAt,unitId:user.unitId,positionId:user.positionId,branchUnitId:user.branchUnitId,managerUserId:user.managerUserId,personnelId:user.personnelId,roleId:user.roleId,roleIds:[...user.roleIds].sort(),permissionGrants:[...(user.permissionGrants??[])].sort(),permissionDenials:[...(user.permissionDenials??[])].sort()});
+}
+
+function requireOrganizationScope(actor: LocalUser, permission: PermissionCode, unitId: string | undefined, action: 'create' | 'edit', message: string): void {
+  const decision = authorize({
+    persona: actor,
+    permission,
+    action,
+    resource: {id: unitId ?? 'organization-root', companyId: actor.companyId, unitId, createdBy: 'system', state: 'active'},
+  });
+  if (!decision.allowed) throw new Error(decision.code === 'scope.denied' ? 'این واحد خارج از محدوده دسترسی سازمانی شماست.' : message);
+}
+
+async function appendOrganizationMutation(tx: StorageTransaction, input: {
+  actor: LocalUser;
+  action: string;
+  summary: string;
+  aggregateType: 'organizational-unit' | 'organizational-position';
+  aggregateId: string;
+  eventType: string;
+  metadata?: AuditEvent['metadata'];
+  reason?: string;
+}) {
+  const now = new Date().toISOString();
+  const correlationId = newId('correlation');
+  const audits = await tx.getAll<AuditEvent>('audit_events');
+  await tx.put('audit_events', {id: newId('audit'), sequence: nextSequence(audits), companyId: input.actor.companyId, category: 'system', action: input.action, actorId: input.actor.actorId, actorName: input.actor.name, effectiveUserId: input.actor.id, occurredAt: now, summary: input.summary, reason: input.reason, outcome: 'success', correlationId, metadata: input.metadata} satisfies AuditEvent);
+  await tx.put('domain_events', {id: newId('event'), aggregateType: input.aggregateType, aggregateId: input.aggregateId, eventType: input.eventType, actorId: input.actor.actorId, occurredAt: now, correlationId, payload: input.metadata ?? {}} satisfies DomainEvent);
+  await tx.put('meta', {id: 'lastPersistedAt', value: now});
 }
 const userMutationFingerprint = userConcurrencyToken;
 async function hashPassword(password: string) {

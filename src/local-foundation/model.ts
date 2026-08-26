@@ -279,12 +279,22 @@ export interface CustomerImportJob {
 
 export type OrganizationRecordStatus = 'active' | 'inactive';
 
+export interface ActingUnitManagerAssignment {
+  userId: string;
+  reason: string;
+  startsOn: string;
+  endsOn: string;
+  assignedAt: string;
+  assignedByActorId: string;
+}
+
 export interface OrganizationalUnit {
   id: string;
   name: string;
   type: string;
   parentId?: string;
   managerUserId?: string;
+  actingManager?: ActingUnitManagerAssignment;
   status: OrganizationRecordStatus;
   order: number;
   description: string;
