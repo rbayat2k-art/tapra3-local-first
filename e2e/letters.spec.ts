@@ -15,6 +15,14 @@ test('نمونه‌های وارده، ارسالی، پیش‌نویس و در 
   await page.reload();await page.getByRole('button',{name:/صف بازبینی/}).click();await expect(page.locator('.letter-row').filter({hasText:'پاسخ پیشنهادی به استعلام اداره مالیات'})).toBeVisible();
 });
 
+test('متن کامل نامه و گردش طولانی در یک پنجره قابل پیمایش هستند',async({page})=>{
+  await page.setViewportSize({width:1132,height:865});await enterAsAdmin(page);const row=page.locator('.letter-row').filter({hasText:'اعلام تقویم ارزیابی عملکرد نیم‌سال'});await expect(row).toBeVisible();await row.click();
+  const detail=page.getByRole('dialog',{name:/نامه LTR-1405-0003/});const scrollArea=detail.locator('.drawer-body.letter-detail');await expect(detail.locator('.letter-history > div')).toHaveCount(4);
+  const layout=await scrollArea.evaluate((element)=>{const sheet=element.querySelector('.letter-print-sheet')!,body=element.querySelector('.official-letter-body')!,signatures=element.querySelector('.official-letter-signatures')!;const sheetRect=sheet.getBoundingClientRect(),bodyRect=body.getBoundingClientRect(),signatureRect=signatures.getBoundingClientRect();return{canScroll:element.scrollHeight>element.clientHeight,sheetBottom:sheetRect.bottom,bodyBottom:bodyRect.bottom,signatureBottom:signatureRect.bottom};});
+  expect(layout.canScroll).toBe(true);expect(layout.sheetBottom).toBeGreaterThanOrEqual(layout.bodyBottom-.5);expect(layout.sheetBottom).toBeGreaterThanOrEqual(layout.signatureBottom-.5);
+  await scrollArea.evaluate((element)=>{element.scrollTop=element.scrollHeight;});expect(await scrollArea.evaluate((element)=>element.scrollTop)).toBeGreaterThan(0);const lastHistory=detail.locator('.letter-history > div').last();const visibleAtEnd=await lastHistory.evaluate((element)=>{const scroll=element.closest('.drawer-body')!,itemRect=element.getBoundingClientRect(),scrollRect=scroll.getBoundingClientRect();return itemRect.top>=scrollRect.top-1&&itemRect.bottom<=scrollRect.bottom+1;});expect(visibleAtEnd).toBe(true);
+});
+
 test('فهرست گیرندگان فقط پرسنل واحدهای مقصد انتخاب‌شده را نشان می‌دهد',async({page})=>{
   await enterAsAdmin(page);await page.getByRole('button',{name:'نامه جدید'}).click();const dialog=page.getByRole('dialog',{name:'ثبت نامه جدید'});const people=dialog.getByRole('group',{name:'گیرندگان مشخص از واحدهای انتخاب‌شده (اختیاری)'});
   await expect(people).toContainText('ابتدا یک یا چند واحد مقصد را انتخاب کنید');await expect(people).not.toContainText('مهدی رضایی');
