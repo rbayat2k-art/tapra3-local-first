@@ -20,8 +20,12 @@ export interface RoleTemplate {
   permissions: PermissionCode[];
 }
 
+const communicationsSelfService: PermissionCode[] = [
+  permissionFor('chat','view'), permissionFor('chat','create'), permissionFor('chat','edit'),
+  permissionFor('message','view'), permissionFor('message','create'), permissionFor('message','edit'),
+];
 const shellBase: PermissionCode[] = [
-  'foundation.dashboard.view', 'foundation.preferences.manage', 'organization.overview.view',
+  'foundation.dashboard.view', 'foundation.preferences.manage', 'organization.overview.view', ...communicationsSelfService,
 ];
 const employeeSelfService: PermissionCode[] = [
   ...shellBase,
@@ -57,6 +61,7 @@ export const ROLE_TEMPLATES: RoleTemplate[] = [
     ...role,
     permissions: [...new Set([
       ...role.permissions,
+      ...communicationsSelfService,
       ...(ORGANIZATION_ROLE_GRANTS[role.id] ?? []),
       ...(['role-sales-vice', 'role-sales-manager', 'role-senior-sales-supervisor', 'role-sales-supervisor', 'role-sales-seller', 'role-purchase-requester', 'role-purchase-approver', 'role-treasury-executor-v1'].includes(role.id) ? employeeSelfService : []),
     ])],

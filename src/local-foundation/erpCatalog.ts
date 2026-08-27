@@ -57,6 +57,22 @@ const treasuryExecutionWorkflow: WorkflowDefinition = {
   createdAt: SEED_TIME, updatedAt: SEED_TIME,
 };
 
+const projectWorkflow: WorkflowDefinition = {
+  id: 'workflow-project', moduleId: 'project', title: 'گردش‌کار پروژه‌های همکاری', version: 1,
+  status: 'published', initialState: 'draft',
+  stateLabels: Object.fromEntries(['draft','active','paused','completed','archived'].map((state) => [state, STATE_LABELS[state] ?? state])),
+  transitions: [
+    transition('project','project','draft','active','شروع پروژه'),
+    transition('project','project','active','paused','توقف موقت پروژه',{reasonRequired:true}),
+    transition('project','project','paused','active','ازسرگیری پروژه',{reasonRequired:true}),
+    transition('project','project',['active','paused'],'completed','تکمیل پروژه',{reasonRequired:true}),
+    transition('project','project','completed','archived','بایگانی پروژه',{reasonRequired:true}),
+  ],
+  queueStrategy: 'owner',
+  assignmentPolicy: 'پروژه فقط برای اعضای فعال و صریح همان شرکت قابل مشاهده و تغییر است.',
+  createdAt: SEED_TIME, updatedAt: SEED_TIME,
+};
+
 const employeeAdvanceWorkflow: WorkflowDefinition = {
   id: 'workflow-employee-advance', moduleId: 'employee-advance', title: 'گردش‌کار مساعده پرسنلی', version: 2,
   status: 'published', initialState: 'draft',
@@ -180,6 +196,7 @@ export const ERP_MODULES: ErpModuleDefinition[] = [
   mod({id:'fixed-asset',domain:'asset',group:'دارایی‌های ثابت',title:'دارایی‌ها',singular:'دارایی ثابت',description:'Registry، Custodian، Transfer، Maintenance و Disposal',store:'fixed_assets',prefix:'AST',fields:['amount','owner','unit','related'],states:['registered_asset','active','maintenance','transferred','disposed'],actions:['فعال‌سازی','ارسال تعمیر','انتقال','واگذاری'],approvalAt:4,reasonFrom:2,productDecisionRequired:'روش استهلاک و Posting حسابداری دارایی تصویب نشده است.'}),
   mod({id:'asset-transfer',domain:'asset',group:'دارایی‌های ثابت',title:'انتقال دارایی',singular:'انتقال دارایی',description:'تحویل از متولی قبلی به متولی جدید',store:'asset_transfers',prefix:'ATR',fields:['owner','assignee','unit','related'],states:['draft','submitted','approved','completed'],actions:['ارسال','تأیید انتقال','تحویل'],approvalAt:2}),
   mod({id:'asset-maintenance',domain:'asset',group:'دارایی‌های ثابت',title:'نگهداری دارایی',singular:'درخواست تعمیر',description:'Maintenance foundation، هزینه و نتیجه',store:'asset_maintenance',prefix:'AMT',fields:['amount','owner','due','related'],states:['draft','submitted','in_progress','completed'],actions:['ارسال','شروع تعمیر','تکمیل']}),
+  {id:'project',domain:'project',group:'همکاری',title:'پروژه‌ها',singular:'پروژه',description:'اعضا، گفت‌وگوی اختیاری، وظایف مرتبط و چرخه عمر پروژه',store:'projects',prefix:'PRJ',fields:['owner','due','unit'],workflow:projectWorkflow},
   mod({id:'task',domain:'task',group:'کارتابل و وظایف',title:'وظایف',singular:'وظیفه',description:'Due/Priority/Owner/Handoff/Block/Reopen',store:'tasks',prefix:'TSK',fields:['owner','assignee','due','related'],states:['todo','in_progress','done'],actions:['شروع','انجام']}),
   mod({id:'chat',domain:'communications',group:'Chat / ارتباطات',title:'گفت‌وگوها',singular:'گفت‌وگو',description:'Member، Message Version و Correction؛ حذف فیزیکی ممنوع',store:'chats',prefix:'CHT',fields:['owner','assignee','related'],states:['active','archived'],actions:['بایگانی']}),
   mod({id:'message',domain:'communications',group:'Chat / ارتباطات',title:'پیام‌ها',singular:'پیام',description:'Sent/Delivered/Read و Correction Message',store:'messages',prefix:'MSG',fields:['related'],states:['sent','delivered_message','read'],actions:['ثبت تحویل','ثبت خواندن']}),
@@ -242,7 +259,7 @@ export const ERP_ROLE_TEMPLATES: RoleTemplateInput[] = [
   role('role-logistics-manager','مدیر لجستیک','Shipment/Delivery و صف مأموران','COMPANY',logistics,['view','create','edit','transition','approve']), role('role-dispatch-operator','اپراتور اعزام','Dispatch و Custody handoff','UNIT',logistics,['view','create','edit','transition']), role('role-delivery-coordinator','هماهنگ‌کننده تحویل','Assignment/Reschedule','UNIT',['delivery'],['view','create','edit','transition']), role('role-delivery-representative','نماینده تحویل کالا','فقط مأموریت تخصیص‌یافته','SELF',['delivery'],['view','edit','transition']), role('role-driver','راننده / پیک','مسیر و Attempt تخصیص‌یافته','SELF',['delivery'],['view','transition']),
   role('role-service-ops-manager','مدیر عملیات خدمات','Service queue و escalation','COMPANY',service,['view','create','edit','transition','approve']), role('role-service-activation-manager','مدیر فعال‌سازی','Assignment و Review','UNIT',service,['view','create','edit','transition','approve']), role('role-service-officer','کارشناس فعال‌سازی','Coordination/Execution/Evidence','SELF',service,['view','create','edit','transition']), role('role-service-reviewer','بازبین خدمت','Review غیرخودی evidence','UNIT',service,['view','approve']),
   role('role-support-agent-v1','کارشناس پشتیبانی','Caseهای تخصیص‌یافته','SELF',support,['view','create','edit','transition']), role('role-support-manager-v1','مدیر پشتیبانی','صف، SLA و Closure','COMPANY',support,['view','create','edit','transition','approve']), role('role-support-financial','تأییدکننده مالی پشتیبانی','Approval ردیف مالی غیرخودی','COMPANY',['support-transaction'],['view','approve']),
-  role('role-contract-manager','مدیر قراردادها','Contract/Version/Obligation','COMPANY',['contract'],['view','create','edit','transition','approve']), role('role-asset-manager','مسئول دارایی‌ها و اموال','ثبت دارایی، تحویل و عودت دوطرفه، انتقال، نگهداری و تسویه اموال خروج','COMPANY',['fixed-asset','asset-transfer','asset-maintenance','offboarding'],['view','create','edit','transition','approve']), role('role-document-manager','مدیر اسناد و آرشیو','Document metadata/quota/history','COMPANY',['document','personnel-document'],['view','create','edit','transition','manage']), role('role-letter-reviewer','بازبین نامه','Review و مجوز ارسال','COMPANY',['letter'],['view','transition','approve']), role('role-task-manager','مدیر وظایف','Task/Handoff/Reopen','COMPANY',['task'],['view','create','edit','transition','manage']), role('role-communications-operator','اپراتور ارتباطات','Chat/Message/Letter','COMPANY',['chat','message','letter'],['view','create','edit','transition']), role('role-executive-mis','مدیر ارشد / مشاهده اطلاعات مدیریتی','مشاهده شاخص‌های عملکرد و سلامت صف‌ها','COMPANY',ERP_MODULES.map((item)=>item.id),['view']), role('role-audit-reviewer','بازبین رویدادها','بازبینی رویدادها و کنترل داخلی فقط‌خواندنی','COMPANY',ERP_MODULES.map((item)=>item.id),['view']), role('role-workflow-admin','مدیر گردش‌کار','مدیریت محدود صف، ترتیب مراحل، تخصیص و سیاست تأیید','COMPANY',[],[]),
+  role('role-contract-manager','مدیر قراردادها','Contract/Version/Obligation','COMPANY',['contract'],['view','create','edit','transition','approve']), role('role-asset-manager','مسئول دارایی‌ها و اموال','ثبت دارایی، تحویل و عودت دوطرفه، انتقال، نگهداری و تسویه اموال خروج','COMPANY',['fixed-asset','asset-transfer','asset-maintenance','offboarding'],['view','create','edit','transition','approve']), role('role-document-manager','مدیر اسناد و آرشیو','Document metadata/quota/history','COMPANY',['document','personnel-document'],['view','create','edit','transition','manage']), role('role-letter-reviewer','بازبین نامه','Review و مجوز ارسال','COMPANY',['letter'],['view','transition','approve']), {id:'role-project-member',title:'عضو پروژه',description:'مشاهده پروژه‌های عضو، گفت‌وگوی پروژه و انجام وظایف تخصیص‌یافته بدون اختیار تغییر چرخه پروژه',scope:'COMPANY',permissions:[...new Set([...perms(['project'],['view']),...perms(['task'],['view','edit','transition']),...perms(['chat'],['view']),...perms(['message'],['view','create','edit'])])]}, role('role-project-manager','مدیر پروژه','ساخت و مدیریت پروژه، اعضا، گفت‌وگو و وظایف مرتبط','COMPANY',['project','task','chat','message'],['view','create','edit','transition','manage']), role('role-task-manager','مدیر وظایف','Task/Handoff/Reopen','COMPANY',['task'],['view','create','edit','transition','manage']), role('role-communications-operator','اپراتور ارتباطات','Chat/Message/Letter','COMPANY',['chat','message','letter'],['view','create','edit','transition']), role('role-executive-mis','مدیر ارشد / مشاهده اطلاعات مدیریتی','مشاهده شاخص‌های عملکرد و سلامت صف‌ها','COMPANY',ERP_MODULES.map((item)=>item.id),['view']), role('role-audit-reviewer','بازبین رویدادها','بازبینی رویدادها و کنترل داخلی فقط‌خواندنی','COMPANY',ERP_MODULES.map((item)=>item.id),['view']), role('role-workflow-admin','مدیر گردش‌کار','مدیریت محدود صف، ترتیب مراحل، تخصیص و سیاست تأیید','COMPANY',[],[]),
 ];
 
 export function seedOperationalRecords(): Record<string, OperationalRecord[]> {
@@ -273,6 +290,10 @@ export function seedOperationalRecords(): Record<string, OperationalRecord[]> {
         ],
       }:isTreasuryExecution?{demo:true,source:'NORMAL_DEMO',initialRequesterUserId:'persona-purchase-requester',initialRequesterName:'پریسا جوادی',productDecisionRequired:module.productDecisionRequired??null}:{demo:true,source:'NORMAL_DEMO',productDecisionRequired:module.productDecisionRequired??null},createdAt:SEED_TIME,updatedAt:SEED_TIME,
     };
+    if (module.id === 'project') {
+      record.title = 'پروژه نمونه همکاری شاهراه';
+      record.payload = {demo:true, source:'NORMAL_DEMO', memberUserIds:['persona-product-owner','persona-system-admin'], chatId:null};
+    }
     (result[module.store]??=[]).push(record);
   });
   result.letters = [

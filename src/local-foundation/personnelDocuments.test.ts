@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import type {FoundationSession, FoundationStoreName, LocalUser, OperationalRecord, OperationalRecordHistory, PersonnelDocumentFile, SnapshotManifest} from './model';
+import type {AuditEvent, FoundationSession, FoundationStoreName, LocalUser, OperationalRecord, OperationalRecordHistory, PersonnelDocumentFile, SnapshotManifest} from './model';
 import {FOUNDATION_STORES} from './model';
 import {createSeedData} from './seed';
 import {LocalFoundationService} from './service';
@@ -130,7 +130,8 @@ describe('personnel document service',()=>{
     const state=await service.deferOwnPersonnelProfileCompletion();
     expect(new Date(state.session.profileCompletionDeferredUntil!).getTime()).toBeGreaterThan(Date.now()+6*24*60*60*1000);
     expect(state.activeUser.permissions).toEqual(before.activeUser.permissions);
-    expect(state.audits.some((item)=>item.action==='organization.personnel.profile_completion_deferred')).toBe(true);
+    expect(state.audits.some((item)=>item.action==='organization.personnel.profile_completion_deferred')).toBe(false);
+    expect((await storage.getAll<AuditEvent>('audit_events')).some((item)=>item.action==='organization.personnel.profile_completion_deferred')).toBe(true);
   },20_000);
 
   it('rolls back metadata, content, history and audit when the atomic upload transaction fails',async()=>{

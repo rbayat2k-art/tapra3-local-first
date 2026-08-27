@@ -1,4 +1,4 @@
-import {useMemo,useState,type ChangeEvent,type CSSProperties} from 'react';
+import {useEffect,useMemo,useRef,useState,type ChangeEvent,type CSSProperties} from 'react';
 import {Archive,ArchiveRestore,CheckCheck,Download,FileText,Fingerprint,Inbox,LockKeyhole,Mail,Paperclip,Pencil,Printer,Search,Send,ShieldCheck,X} from 'lucide-react';
 import type {FoundationState,OperationalRecord} from './model';
 import type {LocalFoundationService} from './service';
@@ -15,21 +15,24 @@ import {
   MAX_LETTER_FILE_SIZE,type LetterAction,type LetterAttachmentInput,type LetterClassification,type LetterDirection,type LetterInput,
 } from './letters';
 
-interface Props{state:FoundationState;service:LocalFoundationService;execute:(label:string,work:()=>Promise<FoundationState>,success:string)=>Promise<boolean>}
+interface Props{state:FoundationState;service:LocalFoundationService;execute:(label:string,work:()=>Promise<FoundationState>,success:string)=>Promise<boolean>;initialRecordId?:string;initialRecordRequestKey?:string}
 type Box='inbox'|'outbox'|'drafts'|'review'|'archive';
 type AuthorizationRequest={record:OperationalRecord;action:'approve'|'send'};
 const dateTime=new Intl.DateTimeFormat('fa-IR',{year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
 
-export function LettersPage({state,service,execute}:Props){
+export function LettersPage({state,service,execute,initialRecordId,initialRecordRequestKey}:Props){
+  const initialRecord=state.operationalRecords.find((record)=>record.moduleId==='letter'&&record.id===initialRecordId);
+  const handledInitialRecordRequest=useRef(initialRecordId?`${initialRecordId}:${initialRecordRequestKey??''}`:'');
   const [box,setBox]=useState<Box>('inbox');
   const [compose,setCompose]=useState<true|OperationalRecord>();
   const [correctionSource,setCorrectionSource]=useState<OperationalRecord>();
   const [composePin,setComposePin]=useState('');
-  const [selected,setSelected]=useState<OperationalRecord>();
+  const [selected,setSelected]=useState<OperationalRecord|undefined>(()=>initialRecord&&!letterIsLocked(initialRecord)?initialRecord:undefined);
   const [unlockedPin,setUnlockedPin]=useState('');
-  const [unlocking,setUnlocking]=useState<OperationalRecord>();
+  const [unlocking,setUnlocking]=useState<OperationalRecord|undefined>(()=>initialRecord&&letterIsLocked(initialRecord)?initialRecord:undefined);
   const [authorization,setAuthorization]=useState<AuthorizationRequest>();
   const [query,setQuery]=useState('');
+  useEffect(()=>{const request=initialRecordId?`${initialRecordId}:${initialRecordRequestKey??''}`:'';if(!initialRecordId||handledInitialRecordRequest.current===request)return;const record=state.operationalRecords.find((item)=>item.moduleId==='letter'&&item.id===initialRecordId);if(!record)return;handledInitialRecordRequest.current=request;if(letterIsLocked(record)){setSelected(undefined);setUnlocking(record);}else{setUnlocking(undefined);setSelected(record);}},[initialRecordId,initialRecordRequestKey,state.operationalRecords]);
   const letters=useMemo(()=>state.operationalRecords.filter((record)=>record.moduleId==='letter'),[state.operationalRecords]);
   const mine=(record:OperationalRecord)=>record.createdByUserId===state.activeUser.id;
   // A registered incoming letter belongs in the inbox even when the current

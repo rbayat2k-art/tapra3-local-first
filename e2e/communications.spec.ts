@@ -97,7 +97,7 @@ test('گفت‌وگوی شخصی با هویت متمایز، متن، فایل 
   await sharedPanel.getByRole('textbox',{name:'جست‌وجو در فایل‌های به‌اشتراک‌گذاشته‌شده'}).fill('plan');
   await expect(sharedPanel.locator('.chat-shared-item')).toHaveCount(1);
   await sharedPanel.getByRole('button',{name:'پاک‌کردن جست‌وجوی فایل‌ها'}).click();
-  await sharedPanel.getByRole('button',{name:'ویس‌ها'}).click();
+  await sharedPanel.getByRole('button',{name:'صوت'}).click();
   await expect(sharedPanel.locator('.chat-shared-item')).toHaveCount(1);
   await sharedPanel.getByRole('button',{name:'بستن فایل‌های به‌اشتراک‌گذاشته‌شده'}).click();
 
@@ -121,6 +121,11 @@ test('مالک گروه اعضا و مدیران را با جست‌وجوی ه�
   const createDialog=page.getByRole('dialog',{name:'ساخت گفت‌وگوی جدید'});
   await createDialog.getByRole('radio',{name:'گروهی'}).click();
   await createDialog.getByLabel('نام گروه').fill('گروه ممیزی محلی');
+  await page.keyboard.press('Escape');
+  await expect(createDialog).toBeHidden();
+  const openWindows=page.getByRole('region',{name:'پنجره‌های باز'});
+  await openWindows.getByRole('button',{name:/ساخت گفت‌وگوی جدید/}).first().click();
+  await expect(createDialog.getByLabel('نام گروه')).toHaveValue('گروه ممیزی محلی');
   const memberSearch=createDialog.getByRole('textbox',{name:'جست‌وجوی شخص یا عضو'});
   await memberSearch.fill('s.moradi');
   await createDialog.locator('.chat-member-picker label').filter({hasText:'@s.moradi'}).filter({hasNotText:'@s.moradi.sales'}).locator('input').check();
@@ -136,6 +141,10 @@ test('مالک گروه اعضا و مدیران را با جست‌وجوی ه�
   await currentMember.getByText('مدیر گروه').locator('..').locator('input').check();
   await groupSearch.fill('p.javadi');
   await manageDialog.locator('.chat-group-member').filter({hasText:'@p.javadi'}).locator('input').first().check();
+  await page.keyboard.press('Escape');
+  await expect(manageDialog).toBeHidden();
+  await openWindows.getByRole('button',{name:/مدیریت اعضا و مدیران گروه/}).first().click();
+  await expect(manageDialog.locator('.chat-group-member').filter({hasText:'@p.javadi'}).locator('input').first()).toBeChecked();
   await manageDialog.getByRole('button',{name:'ذخیره تغییرات گروه'}).click();
   await expect(page.locator('.chat-thread-header')).toContainText('۳ عضو');
   await page.reload();

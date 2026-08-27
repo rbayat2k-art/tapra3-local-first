@@ -166,7 +166,10 @@ export class IndexedDBAdapter implements StorageAdapter {
     const {checksum, ...payload} = snapshot;
     const actualChecksum = await sha256(JSON.stringify(payload));
     if (checksum !== actualChecksum) throw new Error('صحت فایل پشتیبان تأیید نشد؛ فایل ممکن است تغییر کرده باشد.');
-    await this.replaceAll(snapshot.stores);
+    const stores = Object.fromEntries(FOUNDATION_STORES.map((store) => [store, snapshot.stores[store] ?? []])) as Record<FoundationStoreName, unknown[]>;
+    const meta = (stores.meta as Array<{id?: unknown; value?: unknown}>).filter((item) => item.id !== 'schemaVersion');
+    stores.meta = [...meta, {id: 'schemaVersion', value: FOUNDATION_SCHEMA_VERSION}];
+    await this.replaceAll(stores);
   }
 }
 
@@ -174,9 +177,10 @@ export function validateSnapshotShape(value: unknown): asserts value is Snapshot
   if (!value || typeof value !== 'object') throw new Error('ساختار فایل پشتیبان معتبر نیست.');
   const snapshot = value as Partial<SnapshotManifest>;
   if (snapshot.format !== 'tapra2-local-snapshot') throw new Error('این فایل، پشتیبان معتبر شاهراه نیست.');
-  if (snapshot.schemaVersion !== FOUNDATION_SCHEMA_VERSION) throw new Error('نسخه این پشتیبان با نسخه فعلی سازگار نیست.');
+  if (snapshot.schemaVersion !== FOUNDATION_SCHEMA_VERSION && snapshot.schemaVersion !== 11) throw new Error('نسخه این پشتیبان با نسخه فعلی سازگار نیست.');
   if (!snapshot.stores || typeof snapshot.stores !== 'object') throw new Error('داده‌های فایل پشتیبان ناقص است.');
   for (const store of FOUNDATION_STORES) {
+    if (snapshot.schemaVersion === 11 && (store === 'projects' || store === 'chat_preferences')) continue;
     if (!Array.isArray(snapshot.stores[store])) throw new Error(`بخش ${store} در فایل پشتیبان وجود ندارد.`);
   }
   if (typeof snapshot.checksum !== 'string') throw new Error('کد صحت فایل پشتیبان وجود ندارد.');

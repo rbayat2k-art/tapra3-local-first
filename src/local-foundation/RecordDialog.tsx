@@ -56,6 +56,13 @@ export function RecordDialog({ariaLabel, className = '', children, onClose}: Pro
           closeOverlay();
           return;
         }
+        const windowRoot = dialog.closest<HTMLElement>('.drawer-scrim, .modal-layer, .modal-scrim');
+        if (windowRoot?.dataset.workspaceDirty === 'true') {
+          event.stopPropagation();
+          const closeButton = dialog.querySelector<HTMLButtonElement>('button[data-window-close], header button[aria-label*="بستن"]');
+          closeButton?.click();
+          return;
+        }
         onCloseRef.current();
         return;
       }

@@ -1,6 +1,6 @@
-export const FOUNDATION_SCHEMA_VERSION = 11;
+export const FOUNDATION_SCHEMA_VERSION = 12;
 export const FOUNDATION_DB_NAME = 'tapra2_local';
-export const FOUNDATION_SEED_VERSION = 'complete-local-erp-v1.34-organization-workflow-rebuild';
+export const FOUNDATION_SEED_VERSION = 'complete-local-erp-v1.35-collaboration-domain';
 
 export type ScopeType = 'COMPANY' | 'UNIT' | 'TEAM' | 'SELF' | 'RECORD';
 /** Permission codes are registry-driven and always use domain.resource.action. */
@@ -422,7 +422,7 @@ export interface PolicyDefinition {
   enabled: boolean;
 }
 
-export type OperationalDomain = 'hr' | 'crm' | 'sales' | 'marketing' | 'catalog' | 'procurement' | 'supplier' | 'finance' | 'treasury' | 'accounting' | 'warehouse' | 'logistics' | 'service' | 'support' | 'contract' | 'asset' | 'task' | 'communications' | 'letter' | 'document' | 'workflow' | 'report';
+export type OperationalDomain = 'hr' | 'crm' | 'sales' | 'marketing' | 'catalog' | 'procurement' | 'supplier' | 'finance' | 'treasury' | 'accounting' | 'warehouse' | 'logistics' | 'service' | 'support' | 'contract' | 'asset' | 'project' | 'task' | 'communications' | 'letter' | 'document' | 'workflow' | 'report';
 export type RecordPriority = 'low' | 'normal' | 'high' | 'critical';
 export type OperationalPayloadValue = string | number | boolean | null | OperationalPayloadValue[] | {[key: string]: OperationalPayloadValue};
 
@@ -549,6 +549,19 @@ export interface OperationalRecordHistory {
   reason?: string;
   snapshot: Record<string, unknown>;
   occurredAt: string;
+}
+
+/** Per-user conversation state. The composite id is `${chatId}:${userId}`. */
+export interface ChatPreference {
+  id: string;
+  chatId: string;
+  userId: string;
+  companyId: string;
+  pinned: boolean;
+  muted: boolean;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
 }
 
 /** Raw identity-document content. It is intentionally excluded from FoundationState. */
@@ -741,8 +754,10 @@ export const FOUNDATION_STORES = [
   'fixed_assets',
   'asset_transfers',
   'asset_maintenance',
+  'projects',
   'tasks',
   'chats',
+  'chat_preferences',
   'messages',
   'letters',
   'documents',
@@ -785,6 +800,8 @@ export interface FoundationState {
   workflowVersions: WorkflowDefinition[];
   operationalRecords: OperationalRecord[];
   operationalHistory: OperationalRecordHistory[];
+  /** Added in schema 12; optional only for in-memory fixtures built against schema 11. */
+  chatPreferences?: ChatPreference[];
   notifications: UserNotification[];
   registrationRequests: RegistrationRequest[];
   qaDataset: QaDatasetManifest;

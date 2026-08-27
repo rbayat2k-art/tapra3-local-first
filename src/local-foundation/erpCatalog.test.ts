@@ -5,7 +5,7 @@ import {FOUNDATION_STORES} from './model';
 describe('complete local ERP catalog', () => {
   it('covers every approved product domain with a real workflow and store', () => {
     expect(ERP_MODULES.length).toBeGreaterThanOrEqual(65);
-    expect(new Set(ERP_MODULES.map((item) => item.domain))).toEqual(new Set(['hr','crm','sales','marketing','catalog','procurement','supplier','finance','treasury','accounting','warehouse','logistics','service','support','contract','asset','task','communications','letter','document']));
+    expect(new Set(ERP_MODULES.map((item) => item.domain))).toEqual(new Set(['hr','crm','sales','marketing','catalog','procurement','supplier','finance','treasury','accounting','warehouse','logistics','service','support','contract','asset','task','project','communications','letter','document']));
     for (const module of ERP_MODULES) {
       expect(FOUNDATION_STORES).toContain(module.store);
       expect(module.workflow.initialState).toBeTruthy();

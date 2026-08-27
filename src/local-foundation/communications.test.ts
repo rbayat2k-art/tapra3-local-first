@@ -52,6 +52,16 @@ describe('specialized organizational conversations',()=>{
     await expect(service.createChatConversation({kind:'unit',unitId:'unit-finance'})).rejects.toThrow('فقط گفت‌وگوی واحد سازمانی خودش');
   });
 
+  it('keeps muted chat messages unread without creating a notification for that member',async()=>{
+    const storage=new MemoryStorage();await storage.replaceAll(createSeedData());const service=new LocalFoundationService(storage);
+    await sessionAs(storage,'persona-seller');let state=await service.createChatConversation({kind:'direct',memberUserIds:['persona-user-manager']});const chat=state.operationalRecords.find((record)=>record.moduleId==='chat')!;
+    await sessionAs(storage,'persona-user-manager');await service.updateChatPreference(chat.id,{pinned:false,muted:true},0);
+    await sessionAs(storage,'persona-seller');await service.sendChatMessage({conversationId:chat.id,body:'پیامی که باید بی‌صدا بماند'});
+    await sessionAs(storage,'persona-user-manager');state=await service.loadState();
+    expect(chatUnreadCount(state,chat.id,'persona-user-manager')).toBe(1);
+    expect(state.notifications.some((notification)=>notification.kind==='chat_message'&&notification.relatedRecordId===chat.id)).toBe(false);
+  });
+
   it('fails closed for QA viewing and malformed attachments',async()=>{
     const storage=new MemoryStorage();await storage.replaceAll(createSeedData());const service=new LocalFoundationService(storage);
     await sessionAs(storage,'persona-seller');const state=await service.createChatConversation({kind:'direct',memberUserIds:['persona-user-manager']});const chat=state.operationalRecords.find((record)=>record.moduleId==='chat')!;

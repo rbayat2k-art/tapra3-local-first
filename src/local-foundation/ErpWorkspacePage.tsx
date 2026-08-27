@@ -1,4 +1,4 @@
-import {useEffect, useMemo, useState} from 'react';
+import {useEffect, useMemo, useRef, useState} from 'react';
 import {ArrowLeft, CalendarClock, CheckCircle2, CircleAlert, Eye, FileClock, Filter, Pencil, Plus, Search, ShieldCheck, UserRound, UserRoundCheck, X} from 'lucide-react';
 import {authorize, can, operationalRecordResource} from './authorization';
 import {ERP_MODULES, permissionFor, stateLabel, type ErpModuleDefinition} from './erpCatalog';
@@ -29,23 +29,44 @@ interface Props {
   onRouteChange?: (url: string) => void;
   onOpenModule?: (moduleId: string) => void;
   onNavigateModule?: (moduleId: string) => void;
+  initialRecordId?: string;
 }
 
 const fa = (value: number) => value.toLocaleString('en-US');
 
-export function ErpWorkspacePage({state, moduleIds, service, execute, routeUrl = window.location.href, onRouteChange, onOpenModule, onNavigateModule}: Props) {
+// Exported for direct-navigation security regression tests; it remains the one visibility path used by this page.
+// eslint-disable-next-line react-refresh/only-export-components
+export function isWorkspaceRecordVisible(record: OperationalRecord, state: FoundationState, visibleModuleIds: readonly string[]) {
+  if (!visibleModuleIds.includes(record.moduleId)) return false;
+  if (record.moduleId === 'treasury-execution' && !isTreasuryRecordVisibleToUser(record, state)) return false;
+  if (record.moduleId === 'employee-advance' && !isEmployeeAdvanceVisible(record, state)) return false;
+  return authorize({
+    persona: state.activeUser,
+    permission: permissionFor(record.moduleId, 'view'),
+    action: 'view',
+    resource: operationalRecordResource(state.activeUser, record),
+  }).allowed;
+}
+
+export function ErpWorkspacePage({state, moduleIds, service, execute, routeUrl = window.location.href, onRouteChange, onOpenModule, onNavigateModule, initialRecordId}: Props) {
   const modules = ERP_MODULES.filter((item) => moduleIds.includes(item.id)).map((item) => workflowWithActivePolicy(state, item));
   const visible = modules.filter((item) => can(state.activeUser, permissionFor(item.id, 'view')));
+  const visibleModuleIds=visible.map((module)=>module.id);
   const requestedModule = workspaceParam(routeUrl, 'module');
-  const [activeId, setActiveId] = useState(visible.some((item) => item.id === requestedModule) ? requestedModule : visible[0]?.id ?? modules[0]?.id ?? '');
+  const initialRecord=state.operationalRecords.find((record)=>record.id===initialRecordId&&isWorkspaceRecordVisible(record,state,visibleModuleIds))??null;
+  const [activeId, setActiveId] = useState(initialRecord?.moduleId??(visible.some((item) => item.id === requestedModule) ? requestedModule : visible[0]?.id ?? modules[0]?.id ?? ''));
   const active = visible.find((item) => item.id === activeId) ?? visible[0];
   const resolvedActiveModuleId = active?.id;
   const [query, setQuery] = useState(() => workspaceParam(routeUrl, 'q'));
   const [status, setStatus] = useState(() => workspaceParam(routeUrl, 'status') || 'all');
   const [cartableId, setCartableId] = useState(() => workspaceParam(routeUrl, 'cartable'));
-  const [selected, setSelected] = useState<OperationalRecord | null>(null);
+  const [selected, setSelected] = useState<OperationalRecord | null>(initialRecord);
+  const recordOpenKey=new URL(routeUrl,window.location.origin).searchParams.get('recordOpen')??'';
+  const handledRecordRequest=useRef(initialRecordId?`${initialRecordId}:${recordOpenKey}`:'');
   const [editing, setEditing] = useState<OperationalRecord | 'new' | null>(null);
   const [treasuryEditRequested, setTreasuryEditRequested] = useState(false);
+  const visibleModuleKey=visibleModuleIds.join('|');
+  useEffect(()=>{const request=initialRecordId?`${initialRecordId}:${recordOpenKey}`:'';if(!initialRecordId||handledRecordRequest.current===request)return;const visibleIds=visibleModuleKey?visibleModuleKey.split('|'):[];const record=state.operationalRecords.find((item)=>item.id===initialRecordId&&isWorkspaceRecordVisible(item,state,visibleIds));if(!record)return;handledRecordRequest.current=request;setActiveId(record.moduleId);setSelected(record);},[initialRecordId,recordOpenKey,state,visibleModuleKey]);
   useEffect(() => {
     if (!requestedModule || !resolvedActiveModuleId || requestedModule === resolvedActiveModuleId) return;
     const nextUrl = workspaceRouteUrl(routeUrl, {module: resolvedActiveModuleId, cartable: null, status: null, q: null});
@@ -53,21 +74,13 @@ export function ErpWorkspacePage({state, moduleIds, service, execute, routeUrl =
     else window.history.replaceState(window.history.state, '', nextUrl);
   }, [onRouteChange, requestedModule, resolvedActiveModuleId, routeUrl]);
   if (!active) return <EmptyAccess />;
-  const records = state.operationalRecords.filter((item) => item.moduleId === active.id && (active.id !== 'treasury-execution' || isTreasuryRecordVisibleToUser(item, state)) && (active.id !== 'employee-advance' || isEmployeeAdvanceVisible(item, state)) && authorize({
-    persona: state.activeUser,
-    permission: permissionFor(active.id, 'view'),
-    action: 'view',
-    resource: operationalRecordResource(state.activeUser, item),
-  }).allowed);
+  const records = state.operationalRecords.filter((item) => item.moduleId === active.id && isWorkspaceRecordVisible(item,state,visibleModuleIds));
   const cartables = roleCartableCategories(active.id, state.activeUser.roleIds, state.activeUser.id);
   const selectedCartable = cartables.find((item) => item.id === cartableId) ?? cartables[0];
   const cartableRecords = selectedCartable ? records.filter(selectedCartable.matches) : records;
   const filtered = cartableRecords.filter((item) => (status === 'all' || item.status === status) && `${item.title} ${item.trackingCode} ${item.description} ${active.id === 'treasury-execution' ? treasuryRequesterName(item, state) : ''} ${active.id === 'employee-advance' ? advanceBeneficiaryName(item) : ''}`.toLocaleLowerCase('fa').includes(query.trim().toLocaleLowerCase('fa')));
   const overdue = records.filter((item) => item.dueAt && new Date(item.dueAt) < new Date() && !['completed','closed','paid','delivered','cancelled'].includes(item.status)).length;
-  const visibleModuleRecordCount = (moduleId: string) => state.operationalRecords.filter((item) => item.moduleId === moduleId
-    && (moduleId !== 'treasury-execution' || isTreasuryRecordVisibleToUser(item, state))
-    && (moduleId !== 'employee-advance' || isEmployeeAdvanceVisible(item, state))
-    && authorize({persona: state.activeUser, permission: permissionFor(moduleId, 'view'), action: 'view', resource: operationalRecordResource(state.activeUser, item)}).allowed).length;
+  const visibleModuleRecordCount = (moduleId: string) => state.operationalRecords.filter((item) => item.moduleId === moduleId && isWorkspaceRecordVisible(item,state,visibleModuleIds)).length;
   const hasEligibleAdvanceBeneficiary = active.id !== 'employee-advance' || state.personnel.some((person) => person.employmentStatus === 'active' && personnelAdvanceEligibility(person).allowed && (person.id === state.activeUser.personnelId || canProxyAdvance(state.activeUser, person, state)));
   const updateWorkspaceUrl = (update: WorkspaceRouteUpdate) => {
     const nextUrl = workspaceRouteUrl(routeUrl, update);

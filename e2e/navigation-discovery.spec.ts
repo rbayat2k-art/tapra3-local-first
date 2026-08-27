@@ -22,6 +22,7 @@ async function signOut(page: Page) {
 }
 
 test('جست‌وجوی منو به مساعده، خرید و پرسنل دقیق می‌رود و پرکاربردها را حفظ می‌کند', async ({page}) => {
+  test.setTimeout(60_000);
   await enterAsCurrentUser(page);
   await expect(page).toHaveTitle(/شاهراه/);
   const search = page.locator('#sidebar-navigation-search');

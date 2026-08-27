@@ -76,7 +76,7 @@ describe('employee advance workflow', () => {
     legacy.meta = legacy.meta.map((record) => record.id === 'seedVersion'
       ? {...record, value: 'complete-local-erp-v1.32-formal-letters'}
       : record);
-    expect(legacy.security_roles).toHaveLength(89);
+    expect(legacy.security_roles.some((role) => role.id === 'role-employee-advance-requester')).toBe(false);
     await storage.replaceAll(legacy);
 
     const service = new LocalFoundationService(storage);

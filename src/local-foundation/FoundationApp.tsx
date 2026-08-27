@@ -4,7 +4,7 @@ import {
   BriefcaseBusiness, Database, Download, Eye, FileClock, FileJson, Fingerprint, FlaskConical, GitBranch, HardDrive, KeyRound, LayoutDashboard,
   LockKeyhole, LogIn, LogOut, Menu, MessageSquareText, Monitor, Moon, MoreVertical, Palette, Pencil, Phone, RotateCcw, ScrollText, Shield, ShieldCheck,
   SlidersHorizontal, Sparkles, Sun, Upload, UserCheck, UserCog, UserPlus, UserRound, UserX, UsersRound, Workflow, X, Network, ContactRound, EyeOff,
-  PanelRightClose, PanelRightOpen, Headphones, Search, Layers3,
+  PanelRightClose, PanelRightOpen, Headphones, Search, Layers3, FolderKanban,
   type LucideIcon,
 } from 'lucide-react';
 import {authorize, can} from './authorization';
@@ -43,6 +43,7 @@ import {WorkflowAdminPage} from './WorkflowAdminPage';
 import {RecruitmentPage} from './RecruitmentPage';
 import {CommunicationsPage} from './CommunicationsPage';
 import {LettersPage} from './LettersPage';
+import {CollaborationDashboardPanel, CollaborationHubPage} from './CollaborationHubPage';
 import {NavigationSearch, type NavigationSearchDestination} from './NavigationSearch';
 import {notifyWorkspaceTabActivated, requestWorkspaceTabClose} from './windowWorkspaceGuard';
 import {userOrganizationHealth, userOrganizationIssueLabel} from './userOrganizationHealth';
@@ -74,6 +75,7 @@ const DOMAIN_PAGE_MODULES: Record<string, string[]> = {
 const modulePermissions = (page: string) => (DOMAIN_PAGE_MODULES[page] ?? []).map((moduleId) => permissionFor(moduleId, 'view'));
 
 const PAGE_SEARCH_ALIASES: Record<string, string[]> = {
+  collaboration: ['همکاری', 'میز همکاری', 'پروژه', 'پروژه‌ها', 'کارهای من', 'وظایف تیم'],
   personnel: ['پرستل', 'کارکنان', 'پرونده پرسنلی'],
   hcm: ['منابع انسانی', 'امور کارکنان'],
   procurement: ['تدارکات', 'خرید'],
@@ -121,6 +123,7 @@ const NAVIGATION: NavigationItem[] = [
   {id: 'support', title: 'پشتیبانی', subtitle: 'Case، SLA و ردیف‌های مالی', icon: ShieldCheck, anyPermissions: modulePermissions('support'), group: 'خدمات و همکاری'},
   {id: 'contracts', title: 'قراردادها', subtitle: 'نسخه، تعهد و تمدید', icon: FileJson, anyPermissions: modulePermissions('contracts'), group: 'خدمات و همکاری'},
   {id: 'assets', title: 'دارایی‌های ثابت', subtitle: 'ثبت، انتقال و نگهداری', icon: Building2, anyPermissions: modulePermissions('assets'), group: 'خدمات و همکاری'},
+  {id: 'collaboration', title: 'میز همکاری', subtitle: 'پروژه‌ها، کارهای من و پیگیری تیم', icon: FolderKanban, anyPermissions: [permissionFor('project','view'), permissionFor('task','view'), permissionFor('chat','view'), permissionFor('letter','view')], group: 'همکاری'},
   {id: 'tasks', title: 'وظایف', subtitle: 'تخصیص، تحویل و بازگشایی', icon: CheckCircle2, anyPermissions: modulePermissions('tasks'), group: 'همکاری'},
   {id: 'communications', title: 'گفت‌وگوها', subtitle: 'پیام با تاریخچه اصلاح', icon: ContactRound, anyPermissions: modulePermissions('communications'), group: 'همکاری'},
   {id: 'letters', title: 'نامه‌ها', subtitle: 'ثبت، ارجاع و مجوز ارسال', icon: ScrollText, anyPermissions: modulePermissions('letters'), group: 'همکاری'},
@@ -261,7 +264,8 @@ export function LocalFoundationApp() {
 
   const visibleNavigation = useMemo(() => foundation
     ? NAVIGATION.filter((item) => {
-      if (item.id === 'communications' || item.id === 'letters') return foundation.activeUser.status === 'active' && !foundation.session.actingAdminUserId;
+      if (item.id === 'communications') return foundation.activeUser.status === 'active' && !foundation.session.actingAdminUserId && can(foundation.activeUser, permissionFor('chat','view'));
+      if (item.id === 'letters') return foundation.activeUser.status === 'active' && !foundation.session.actingAdminUserId && can(foundation.activeUser, permissionFor('letter','view'));
       if (item.id === 'my-account' || item.anyPermissions.some((permission) => can(foundation.activeUser, permission))) return true;
       if (item.id !== 'personnel' || !foundation.activeUser.personnelId) return false;
       return foundation.personnel.some((person) => person.employmentStatus === 'active' && (person.managerPersonnelId === foundation.activeUser.personnelId || person.salesSupervisorPersonnelId === foundation.activeUser.personnelId));
@@ -374,6 +378,41 @@ export function LocalFoundationApp() {
     if (destination) openNavigationDestination(destination);
     else setPage(nextPage);
   }, [navigationDestinations, openNavigationDestination, setPage]);
+
+  const navigateToConversation = useCallback((chatId: string) => {
+    const destination = navigationDestinations.find((item) => item.id === 'page:communications');
+    if (!destination) { navigateToPage('communications'); return; }
+    openNavigationDestination(destination);
+    const url = new URL(destinationRouteUrl(window.location.href, 'communications'), window.location.origin);
+    url.searchParams.set('chat', chatId);
+    const nextUrl = `${url.pathname}${url.search}${url.hash}`;
+    window.history.replaceState({page:'communications',chatId,workspaceTabId:destination.id},'',nextUrl);
+    setWorkspaceTabs((current)=>current.map((tab)=>tab.id===destination.id?{...tab,url:nextUrl}:tab));
+  }, [navigateToPage, navigationDestinations, openNavigationDestination]);
+
+  const navigateToOperationalRecord = useCallback((nextPage: PageId, recordId: string, moduleId?: string) => {
+    const destination = navigationDestinations.find((item) => item.id === `page:${nextPage}`);
+    if (!destination) return;
+    openNavigationDestination(destination);
+    const url = new URL(destinationRouteUrl(window.location.href, nextPage), window.location.origin);
+    url.searchParams.set('record', recordId);
+    url.searchParams.set('recordOpen', Date.now().toString(36));
+    if (moduleId) url.searchParams.set('module', moduleId);
+    const nextUrl = `${url.pathname}${url.search}${url.hash}`;
+    window.history.replaceState({page:nextPage,recordId,workspaceTabId:destination.id},'',nextUrl);
+    setWorkspaceTabs((current)=>current.map((tab)=>tab.id===destination.id?{...tab,url:nextUrl}:tab));
+  },[navigationDestinations,openNavigationDestination]);
+
+  const navigateToCollaborationQueue = useCallback((queue: 'project'|'today'|'overdue'|'delegated' = 'project') => {
+    const destination = navigationDestinations.find((item) => item.id === 'page:collaboration');
+    if (!destination) { navigateToPage('collaboration'); return; }
+    openNavigationDestination(destination);
+    const url = new URL(destinationRouteUrl(window.location.href, 'collaboration'), window.location.origin);
+    if(queue==='project')url.searchParams.delete('queue');else url.searchParams.set('queue',queue);
+    const nextUrl=`${url.pathname}${url.search}${url.hash}`;
+    window.history.replaceState({page:'collaboration',queue,workspaceTabId:destination.id},'',nextUrl);
+    setWorkspaceTabs((current)=>current.map((tab)=>tab.id===destination.id?{...tab,url:nextUrl}:tab));
+  },[navigateToPage,navigationDestinations,openNavigationDestination]);
 
   const activateWorkspaceTab = useCallback((tab: WorkspaceTab) => {
     if (tab.id === activeWorkspaceTabId) return;
@@ -712,7 +751,7 @@ export function LocalFoundationApp() {
 
   return (
     <div className={`app-shell ${sidebarCollapsed ? 'app-shell--sidebar-collapsed' : ''}`} dir="rtl">
-      <aside ref={sidebarRef} id="main-sidebar" role={mobileSidebarMode ? 'dialog' : undefined} aria-modal={mobileSidebarMode && mobileOpen ? true : undefined} aria-hidden={mobileSidebarMode && !mobileOpen ? true : undefined} aria-label={`منوی اصلی ${PRODUCT_NAME}`} className={`sidebar ${sidebarCollapsed ? 'sidebar--collapsed' : ''} ${mobileOpen ? 'sidebar--open' : ''}`}>
+      <aside ref={sidebarRef} id="main-sidebar" role={mobileSidebarMode && mobileOpen ? 'dialog' : undefined} aria-modal={mobileSidebarMode && mobileOpen ? true : undefined} aria-hidden={mobileSidebarMode && !mobileOpen ? true : undefined} inert={mobileSidebarMode && !mobileOpen ? true : undefined} aria-label={`منوی اصلی ${PRODUCT_NAME}`} className={`sidebar ${sidebarCollapsed ? 'sidebar--collapsed' : ''} ${mobileOpen ? 'sidebar--open' : ''}`}>
         <div className="brand-lockup">
           <BrandMark variant={sidebarCollapsed && !mobileSidebarMode ? 'mark' : 'lockup'} tone="inverse" />
           <button
@@ -820,7 +859,7 @@ export function LocalFoundationApp() {
             hidden={tab.id !== activeWorkspaceTabId}
             aria-hidden={tab.id !== activeWorkspaceTabId}
           >
-            {tab.page === 'dashboard' && <Dashboard state={foundation} navigate={navigateToPage} destinations={navigationDestinations} usage={navigationUsage} onDestination={openNavigationDestination} />}
+            {tab.page === 'dashboard' && <Dashboard state={foundation} navigate={navigateToPage} onOpenCollaborationQueue={navigateToCollaborationQueue} destinations={navigationDestinations} usage={navigationUsage} onDestination={openNavigationDestination} />}
             {tab.page === 'organization' && <OrganizationOverviewPage state={foundation} onNavigate={navigateToPage} />}
             {tab.page === 'units' && <UnitsPage state={foundation} service={service} execute={run} />}
             {tab.page === 'branches' && <BranchesPage state={foundation} service={service} execute={run} />}
@@ -832,14 +871,16 @@ export function LocalFoundationApp() {
             {tab.page === 'registrations' && <RegistrationPage state={foundation} service={service} execute={run} />}
             {tab.page === 'recruitment' && <RecruitmentPage state={foundation} service={service} execute={run} />}
             {tab.page === 'customers' && <CustomersPage state={foundation} service={service} execute={run} />}
-            {tab.page === 'communications' && <CommunicationsPage state={foundation} service={service} execute={run} />}
-            {tab.page === 'letters' && <LettersPage state={foundation} service={service} execute={run} />}
+            {tab.page === 'collaboration' && <CollaborationHubPage state={foundation} service={service} execute={run} initialQueue={(new URL(tab.url,window.location.origin).searchParams.get('queue') as 'project'|'today'|'overdue'|'delegated'|null)??'project'} onOpenConversations={() => navigateToPage('communications')} onOpenConversation={navigateToConversation} onOpenLetters={(recordId) => recordId?navigateToOperationalRecord('letters',recordId):navigateToPage('letters')} onOpenDocuments={(recordId) => recordId?navigateToOperationalRecord('documents',recordId,'document'):navigateToPage('documents')} />}
+            {tab.page === 'communications' && <CommunicationsPage state={foundation} service={service} execute={run} initialConversationId={new URL(absoluteRouteUrl(tab.url)).searchParams.get('chat') ?? undefined} />}
+            {tab.page === 'letters' && <LettersPage state={foundation} service={service} execute={run} initialRecordId={new URL(absoluteRouteUrl(tab.url)).searchParams.get('record')??undefined} initialRecordRequestKey={new URL(absoluteRouteUrl(tab.url)).searchParams.get('recordOpen')??undefined} />}
             {DOMAIN_PAGE_MODULES[tab.page] && tab.page !== 'communications' && tab.page !== 'letters' && <ErpWorkspacePage
               state={foundation}
               moduleIds={DOMAIN_PAGE_MODULES[tab.page]}
               service={service}
               execute={run}
               routeUrl={absoluteRouteUrl(tab.url)}
+              initialRecordId={new URL(absoluteRouteUrl(tab.url)).searchParams.get('record')??undefined}
               onRouteChange={(nextUrl) => updateWorkspaceTabUrl(tab.id, nextUrl)}
               onOpenModule={(moduleId) => {
                 const destination = navigationDestinations.find((item) => item.moduleId === moduleId);
@@ -922,9 +963,10 @@ function WorkspaceTabStrip({tabs, activeId, destinations, onActivate, onClose}: 
   </nav>;
 }
 
-function Dashboard({state, navigate, destinations, usage, onDestination}: {
+function Dashboard({state, navigate, onOpenCollaborationQueue, destinations, usage, onDestination}: {
   state: FoundationState;
   navigate: (page: PageId) => void;
+  onOpenCollaborationQueue: (queue?:'project'|'today'|'overdue'|'delegated') => void;
   destinations: NavigationSearchDestination[];
   usage: NavigationUsageEntry[];
   onDestination: (destination: NavigationSearchDestination) => void;
@@ -961,6 +1003,8 @@ function Dashboard({state, navigate, destinations, usage, onDestination}: {
         <Metric icon={Activity} tone="green" value={state.audits.length.toLocaleString('en-US')} label="رویداد ممیزی" detail="Append-only و ماندگار" />
         <Metric icon={LockKeyhole} tone="amber" value={scopeLabel(user.scope)} label="محدوده فعال" detail="Fail-closed در حالت ناشناخته" />
       </section>
+
+      {(can(user, permissionFor('project','view')) || can(user, permissionFor('task','view')) || can(user, permissionFor('chat','view')) || can(user, permissionFor('letter','view'))) && <CollaborationDashboardPanel state={state} onOpenHub={onOpenCollaborationQueue} onOpenConversations={() => navigate('communications')} onOpenLetters={() => navigate('letters')} />}
 
       <section className="panel frequent-navigation">
         <PanelHeading eyebrow="مسیرهای شخصی شما" title="منوهای پرکاربرد من" subtitle="این فهرست فقط از مسیرهایی ساخته می‌شود که خودتان باز کرده‌اید و همیشه دوباره با مجوزهای فعلی شما کنترل می‌شود." />

@@ -5,7 +5,7 @@ import type {
   OrganizationalUnit, PermissionCode, PersonnelMovement, PersonnelMovementKind, PersonnelProfileChangeField,
   PersonnelProfileChangeRequest, PersonnelProfileChangeValues, PersonnelRecord, SalesStructure, SecurityRole, SnapshotManifest, ScopeType, UserStatus,
   OperationalRecord, OperationalRecordHistory, RegistrationRequest, QaDatasetManifest, ProjectionRecord, WorkflowDefinition, WorkflowApprovalStageDefinition, WorkflowRouteVariantDefinition,
-  FoundationStoreName, OperationalPayloadValue, PersonnelDocumentFile, UserNotification,
+  ChatPreference, FoundationStoreName, OperationalPayloadValue, PersonnelDocumentFile, UserNotification,
 } from './model';
 import {FOUNDATION_SCHEMA_VERSION, FOUNDATION_SEED_VERSION, FOUNDATION_STORES} from './model';
 import {
@@ -49,6 +49,11 @@ import {
   isLetterParticipant, letterAttachment, letterClassification, letterCopyRecipientUserIds, letterDeliveredRecipientUserIds, letterDirection, letterExternalParty, letterIsProtected, letterRecipientUnitIds, letterRecipientUserIds, letterSignatureCanonicalText, redactLockedLetter, validateLetterAttachment,
   type LetterAction, type LetterDigitalSignature, type LetterInput,
 } from './letters';
+import {
+  chatPreferenceId, isProjectMember, normalizeTaskLabels, preferenceForChat, projectChatId, projectMemberUserIds, taskChecklist, taskProjectId,
+  type ChatPreferenceInput, type ProjectInput, type ProjectTaskBatchInput, type ProjectTaskInput, type ProjectTaskUpdateInput,
+  type ProjectUpdateInput, type TaskChecklistItem,
+} from './collaborationDomain';
 
 export interface UnitInput {
   name: string;
@@ -610,7 +615,7 @@ export class LocalFoundationService {
   }
 
   async loadState(): Promise<FoundationState> {
-    const [rawUsers, units, positions, roles, personnel, profileChangeRequests, salesStructures, customers, customerImports, session, audits, records, persistedAt, workflows, workflowVersions, history, registrations, qaManifests, projections, notifications, operationalParts] = await Promise.all([
+    const [rawUsers, units, positions, roles, personnel, profileChangeRequests, salesStructures, customers, customerImports, session, audits, records, persistedAt, workflows, workflowVersions, history, registrations, qaManifests, projections, notifications, chatPreferences, operationalParts] = await Promise.all([
       this.storage.getAll<LocalUser>('users'), this.storage.getAll<OrganizationalUnit>('organizational_units'),
       this.storage.getAll<OrganizationalPosition>('organizational_positions'), this.storage.getAll<SecurityRole>('security_roles'),
       this.storage.getAll<PersonnelRecord>('personnel'), this.storage.getAll<PersonnelProfileChangeRequest>('personnel_profile_change_requests'),
@@ -619,7 +624,7 @@ export class LocalFoundationService {
       this.storage.getAll('foundation_records'), this.storage.get<MetaRecord>('meta', 'lastPersistedAt'),
       this.storage.getAll<WorkflowDefinition>('workflow_definitions'), this.storage.getAll<WorkflowDefinition>('workflow_versions'), this.storage.getAll<OperationalRecordHistory>('workflow_history'),
       this.storage.getAll<RegistrationRequest>('registration_requests'), this.storage.getAll<QaDatasetManifest>('qa_dataset_manifests'),
-      this.storage.getAll<ProjectionRecord>('projections'), this.storage.getAll<UserNotification>('notifications'),
+      this.storage.getAll<ProjectionRecord>('projections'), this.storage.getAll<UserNotification>('notifications'), this.storage.getAll<ChatPreference>('chat_preferences'),
       Promise.all(ERP_OPERATIONAL_STORES.map((store) => this.storage.getAll<OperationalRecord>(store))),
     ]);
     const resolvedUsers = rawUsers.map((user) => resolveUserAccess(user, roles));
@@ -639,12 +644,23 @@ export class LocalFoundationService {
       : personnel;
     // Until the product owner approves an auditor-specific reporting contract,
     // expose no event rows. Audit summaries and actor fields often contain PII.
-    const projectedAudits = auditorView ? [] : normalizedAudits;
     const allOperationalRecords = operationalParts.flat();
+    const visibleProjectIds = new Set(
+      effectiveSession.actingAdminUserId
+        ? []
+        : allOperationalRecords.filter((record) => record.moduleId === 'project'
+          && isProjectMember(record, activeUser)
+          && authorize({persona:activeUser,permission:permissionFor('project','view'),action:'view',resource:operationalRecordResource(activeUser,record)}).allowed).map((record) => record.id),
+    );
     const visibleChatIds = new Set(
       effectiveSession.actingAdminUserId
         ? []
-        : allOperationalRecords.filter((record) => record.moduleId === 'chat' && isChatMember(record, activeUser) && !chatHiddenForUserIds(record).includes(activeUser.id)).map((record) => record.id),
+        : allOperationalRecords.filter((record) => {
+          if(record.moduleId!=='chat'||!isChatMember(record,activeUser)||chatHiddenForUserIds(record).includes(activeUser.id))return false;
+          if(!can(activeUser,permissionFor('chat','view')))return false;
+          const projectId=linkedProjectIdForChat(record,allOperationalRecords.filter((candidate)=>candidate.moduleId==='project'));
+          return !projectId||visibleProjectIds.has(projectId);
+        }).map((record) => record.id),
     );
     const visibleLetterIds = new Set(effectiveSession.actingAdminUserId ? [] : allOperationalRecords.filter((record) => {
       if (record.moduleId !== 'letter') return false;
@@ -661,8 +677,11 @@ export class LocalFoundationService {
       return canViewProtectedFinancialRecord(activeUser, source);
     };
     const operationalRecords = (auditorView ? [] : allOperationalRecords).filter((record) => {
+      if (record.moduleId === 'project') return visibleProjectIds.has(record.id);
+      if (record.moduleId === 'task' && taskProjectId(record)) return visibleProjectIds.has(taskProjectId(record)!)
+        && authorize({persona:activeUser,permission:permissionFor('task','view'),action:'view',resource:operationalRecordResource(activeUser,record)}).allowed;
       if (record.moduleId === 'chat') return visibleChatIds.has(record.id);
-      if (record.moduleId === 'message') return Boolean(record.relatedRecordId && visibleChatIds.has(record.relatedRecordId));
+      if (record.moduleId === 'message') return Boolean(record.relatedRecordId && visibleChatIds.has(record.relatedRecordId) && can(activeUser,permissionFor('message','view')));
       if (record.moduleId === 'letter') return visibleLetterIds.has(record.id);
       if (record.moduleId === 'employee-advance') return isEmployeeAdvanceVisible(record, financialProjectionState) && canViewProtectedFinancialRecord(activeUser, record);
       if (isProtectedFinancialRecord(record)) return canViewProtectedFinancialRecord(activeUser, record) || canViewLinkedFinancialProgress(record);
@@ -684,6 +703,8 @@ export class LocalFoundationService {
       if (['chat','message'].includes(item.moduleId)) return visibleChatIds.has(item.recordId) || operationalRecords.some((record) => record.id === item.recordId);
       if (item.moduleId === 'letter') return visibleLetterIds.has(item.recordId);
       const record = operationalRecordById.get(item.recordId);
+      if (record?.moduleId === 'project') return visibleProjectIds.has(record.id);
+      if (record?.moduleId === 'task' && taskProjectId(record)) return visibleOperationalRecordIds.has(record.id);
       if (record && isProtectedFinancialRecord(record)) return visibleOperationalRecordIds.has(record.id);
       return true;
     }).map((item) => {
@@ -692,7 +713,239 @@ export class LocalFoundationService {
       return {...item, snapshot: redactProtectedFinancialValue(item.snapshot) as OperationalRecordHistory['snapshot']};
     }).sort((a, b) => b.occurredAt.localeCompare(a.occurredAt));
     const projectedProjections = auditorView ? [] : can(activeUser, 'foundation.data.manage') ? projections : projections.map((projection) => ({...projection, data:{}}));
-    return {users: projectedUsers, activeUser: projectedActiveUser, session: effectiveSession, units: units.sort((a, b) => a.order - b.order || a.name.localeCompare(b.name, 'fa')), positions: positions.sort((a, b) => a.title.localeCompare(b.title, 'fa')), roles: roles.sort((a, b) => Number(b.protected) - Number(a.protected) || a.name.localeCompare(b.name, 'fa')), personnel: projectedPersonnel.sort((a, b) => a.personnelCode.localeCompare(b.personnelCode, 'fa')), personnelProfileChangeRequests: auditorView ? [] : profileChangeRequests.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), salesStructures: auditorView ? [] : salesStructures.sort((a, b) => salesStructureSupervisorName(a, personnel).localeCompare(salesStructureSupervisorName(b, personnel), 'fa')), customers: auditorView ? [] : customers.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), customerImports: auditorView ? [] : customerImports.sort((a, b) => b.createdAt.localeCompare(a.createdAt)), workflows, workflowVersions, operationalRecords, operationalHistory: projectedOperationalHistory, notifications: notifications.filter((item) => item.userId === activeUser.id).sort((a, b) => b.createdAt.localeCompare(a.createdAt)), registrationRequests: auditorView ? [] : registrations.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), qaDataset: qaManifests.find((item) => item.id === 'large-qa') ?? {id: 'large-qa', status: 'empty', roleCount: 0, userCount: 0, seed: 'tapra2-large-qa-v1'}, projections: projectedProjections, audits: projectedAudits.sort((a, b) => b.sequence - a.sequence), recordCount: auditorView ? projectedAudits.length : records.length + personnel.length + profileChangeRequests.length + salesStructures.length + customers.length + operationalRecords.length + notifications.length, lastPersistedAt: typeof persistedAt?.value === 'string' ? persistedAt.value : effectiveSession.switchedAt};
+    const projectedChatPreferences = auditorView ? [] : chatPreferences.filter((item) => item.userId === activeUser.id && visibleChatIds.has(item.chatId));
+    const projectedAudits = auditorView || !can(activeUser,'foundation.audit.view') ? [] : normalizedAudits.filter((event)=>{
+      if(event.companyId!==activeUser.companyId)return false;
+      const metadata=event.metadata??{};const projectId=typeof metadata.projectId==='string'?metadata.projectId:undefined;const previousProjectId=typeof metadata.previousProjectId==='string'?metadata.previousProjectId:undefined;const taskId=typeof metadata.taskId==='string'?metadata.taskId:undefined;
+      const recordId=typeof metadata.recordId==='string'?metadata.recordId:undefined;
+      const conversationId=typeof metadata.chatId==='string'?metadata.chatId:typeof metadata.conversationId==='string'?metadata.conversationId:undefined;
+      const messageId=typeof metadata.messageId==='string'?metadata.messageId:undefined;
+      const message=messageId?operationalRecordById.get(messageId):undefined;
+      const chatId=conversationId??(message?.moduleId==='message'?message.relatedRecordId:undefined);
+      if(projectId&&!visibleProjectIds.has(projectId))return false;
+      if(previousProjectId&&!visibleProjectIds.has(previousProjectId))return false;
+      if(taskId&&!visibleOperationalRecordIds.has(taskId))return false;
+      if(chatId&&!visibleChatIds.has(chatId))return false;
+      if(event.action.startsWith('communications.')&&!chatId&&event.action!=='communications.chat.preference_updated')return false;
+      if(event.action.startsWith('collaboration.record.')&&(!recordId||!visibleOperationalRecordIds.has(recordId)||(!projectId&&!previousProjectId)))return false;
+      return true;
+    });
+    return {users: projectedUsers, activeUser: projectedActiveUser, session: effectiveSession, units: units.sort((a, b) => a.order - b.order || a.name.localeCompare(b.name, 'fa')), positions: positions.sort((a, b) => a.title.localeCompare(b.title, 'fa')), roles: roles.sort((a, b) => Number(b.protected) - Number(a.protected) || a.name.localeCompare(b.name, 'fa')), personnel: projectedPersonnel.sort((a, b) => a.personnelCode.localeCompare(b.personnelCode, 'fa')), personnelProfileChangeRequests: auditorView ? [] : profileChangeRequests.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), salesStructures: auditorView ? [] : salesStructures.sort((a, b) => salesStructureSupervisorName(a, personnel).localeCompare(salesStructureSupervisorName(b, personnel), 'fa')), customers: auditorView ? [] : customers.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), customerImports: auditorView ? [] : customerImports.sort((a, b) => b.createdAt.localeCompare(a.createdAt)), workflows, workflowVersions, operationalRecords, operationalHistory: projectedOperationalHistory, chatPreferences: projectedChatPreferences, notifications: notifications.filter((item) => item.userId === activeUser.id).sort((a, b) => b.createdAt.localeCompare(a.createdAt)), registrationRequests: auditorView ? [] : registrations.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), qaDataset: qaManifests.find((item) => item.id === 'large-qa') ?? {id: 'large-qa', status: 'empty', roleCount: 0, userCount: 0, seed: 'tapra2-large-qa-v1'}, projections: projectedProjections, audits: projectedAudits.sort((a, b) => b.sequence - a.sequence), recordCount: auditorView ? projectedAudits.length : records.length + personnel.length + profileChangeRequests.length + salesStructures.length + customers.length + operationalRecords.length + projectedChatPreferences.length + notifications.length, lastPersistedAt: typeof persistedAt?.value === 'string' ? persistedAt.value : effectiveSession.switchedAt};
+  }
+
+  async createProject(input: ProjectInput): Promise<FoundationState> {
+    const state = await this.loadState(); const actor = state.activeUser;
+    if (state.session.actingAdminUserId) throw new Error('ساخت پروژه در حالت مشاهده آزمایشی مجاز نیست.');
+    const title = input.title.trim(); const description = input.description?.trim() ?? '';
+    if (title.length < 3) throw new Error('عنوان پروژه باید حداقل ۳ نویسه باشد.');
+    const requestedMembers = [...new Set([actor.id, ...input.memberUserIds.filter(Boolean)])];
+    const now = new Date().toISOString(); const projectId = newId('project'); const chatId = input.createChat ? newId('chat') : undefined; const correlationId = newId('correlation');
+    await this.storage.transaction(['users','security_roles','organizational_units','projects','chats','workflow_versions','workflow_history','notifications','audit_events','domain_events','meta'], 'readwrite', async (tx) => {
+      const [rawUsers, roles, units, projects, workflowVersions, histories, audits] = await Promise.all([
+        tx.getAll<LocalUser>('users'), tx.getAll<SecurityRole>('security_roles'), tx.getAll<OrganizationalUnit>('organizational_units'),
+        tx.getAll<OperationalRecord>('projects'), tx.getAll<WorkflowDefinition>('workflow_versions'), tx.getAll<OperationalRecordHistory>('workflow_history'), tx.getAll<AuditEvent>('audit_events'),
+      ]);
+      const currentActor = rawUsers.map((user) => resolveUserAccess(user, roles)).find((user) => user.id === actor.id && user.status === 'active' && user.companyId === actor.companyId);
+      if (!currentActor) throw new Error('حساب شما هم‌زمان تغییر کرده است؛ دوباره وارد شوید.');
+      requirePermission(currentActor, permissionFor('project','create'), 'مجوز ساخت پروژه را ندارید.');
+      if(chatId)requirePermission(currentActor,permissionFor('chat','create'),'مجوز ساخت گفت‌وگوی پروژه را ندارید.');
+      const members = requestedMembers.map((id) => rawUsers.find((user) => user.id === id && user.status === 'active' && user.companyId === currentActor.companyId));
+      if (members.some((member) => !member)) throw new Error('همه اعضای پروژه باید کاربر فعال همان شرکت باشند.');
+      const unitId = input.unitId?.trim() || currentActor.unitId;
+      if (unitId && !units.some((unit) => unit.id === unitId && unit.status === 'active')) throw new Error('واحد فعال پروژه پیدا نشد.');
+      const projectWorkflow=workflowVersions.filter((item)=>item.moduleId==='project'&&item.status==='published').sort((a,b)=>b.version-a.version)[0];if(!projectWorkflow)throw new Error('گردش‌کار منتشرشده پروژه پیدا نشد.');
+      const project: OperationalRecord = {
+        id:projectId,moduleId:'project',domain:'project',trackingCode:`PRJ-${new Date(now).getFullYear()}-${String(projects.length+1).padStart(4,'0')}`,
+        title,description,status:'draft',priority:'normal',companyId:currentActor.companyId,unitId,ownerPersonnelId:currentActor.personnelId,
+        assigneeUserId:currentActor.id,dueAt:input.dueAt,createdByActorId:currentActor.actorId,createdByUserId:currentActor.id,updatedByActorId:currentActor.actorId,
+        workflowVersion:projectWorkflow.version,version:1,payload:{memberUserIds:requestedMembers,chatId:chatId??null},createdAt:now,updatedAt:now,
+      };
+      await tx.put('projects', project);
+      await tx.put('workflow_history', {id:newId('history'),recordId:project.id,moduleId:'project',sequence:histories.filter((item)=>item.recordId===project.id).length+1,eventType:'created',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,snapshot:{memberCount:requestedMembers.length,chatCreated:Boolean(chatId)},occurredAt:now} satisfies OperationalRecordHistory);
+      if (chatId) {
+        const chat: OperationalRecord = {id:chatId,moduleId:'chat',domain:'communications',trackingCode:`CHT-PRJ-${project.trackingCode}`,title,description:'گفت‌وگوی پروژه',status:'active',priority:'normal',companyId:currentActor.companyId,unitId,ownerPersonnelId:currentActor.personnelId,assigneeUserId:currentActor.id,relatedRecordId:project.id,createdByActorId:currentActor.actorId,createdByUserId:currentActor.id,updatedByActorId:currentActor.actorId,workflowVersion:1,version:1,payload:{conversationKind:'group',memberUserIds:requestedMembers,ownerUserId:currentActor.id,adminUserIds:[currentActor.id],hiddenForUserIds:[],projectId:project.id},createdAt:now,updatedAt:now};
+        await tx.put('chats', chat);
+        await tx.put('workflow_history', {id:newId('history'),recordId:chat.id,moduleId:'chat',sequence:1,eventType:'created',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,snapshot:{kind:'project',projectId:project.id,memberCount:requestedMembers.length},occurredAt:now} satisfies OperationalRecordHistory);
+      }
+      for (const memberUserId of requestedMembers.filter((id) => id !== currentActor.id)) await tx.put('notifications', {id:newId('notification'),userId:memberUserId,kind:'workflow',title:`عضویت در پروژه ${title}`,message:'شما به یک پروژه همکاری در شاهراه افزوده شدید.',actorUserId:currentActor.id,relatedRecordId:project.id,relatedModuleId:'project',dedupeKey:`project:${project.id}:member:${memberUserId}`,createdAt:now} satisfies UserNotification);
+      await tx.put('audit_events', {id:newId('audit'),sequence:nextSequence(audits),companyId:currentActor.companyId,category:'system',action:'project.project.created',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:'یک پروژه همکاری ایجاد شد.',outcome:'success',correlationId,metadata:{projectId,memberCount:requestedMembers.length,chatCreated:Boolean(chatId)}} satisfies AuditEvent);
+      await tx.put('domain_events', {id:newId('event'),aggregateType:'project',aggregateId:projectId,eventType:'ProjectCreated',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{memberCount:requestedMembers.length,chatId:chatId??null}} satisfies DomainEvent);
+      await tx.put('meta',{id:'lastPersistedAt',value:now});
+    });
+    return this.loadState();
+  }
+
+  async updateProject(projectId: string, input: ProjectUpdateInput, expectedVersion: number): Promise<FoundationState> {
+    const state = await this.loadState(); const actor = state.activeUser; const title = input.title.trim(); const description = input.description?.trim() ?? '';
+    if (state.session.actingAdminUserId) throw new Error('ویرایش پروژه در حالت مشاهده آزمایشی مجاز نیست.');
+    if (title.length < 3) throw new Error('عنوان پروژه باید حداقل ۳ نویسه باشد.');
+    const requestedMembers = [...new Set(input.memberUserIds.filter(Boolean))]; const now = new Date().toISOString(); const correlationId = newId('correlation');
+    await this.storage.transaction(['users','security_roles','organizational_units','projects','tasks','chats','workflow_history','notifications','audit_events','domain_events','meta'], 'readwrite', async (tx) => {
+      const [rawUsers, roles, units, project, tasks, histories, audits] = await Promise.all([tx.getAll<LocalUser>('users'),tx.getAll<SecurityRole>('security_roles'),tx.getAll<OrganizationalUnit>('organizational_units'),tx.get<OperationalRecord>('projects',projectId),tx.getAll<OperationalRecord>('tasks'),tx.getAll<OperationalRecordHistory>('workflow_history'),tx.getAll<AuditEvent>('audit_events')]);
+      const currentActor=rawUsers.map((user)=>resolveUserAccess(user,roles)).find((user)=>user.id===actor.id&&user.status==='active'&&user.companyId===actor.companyId);
+      if(!currentActor||!project||project.version!==expectedVersion||!isProjectMember(project,currentActor))throw new Error('پروژه هم‌زمان تغییر کرده یا دیگر در دسترس شما نیست.');
+      requirePermission(currentActor,permissionFor('project','manage'),'مجوز مدیریت اعضای پروژه را ندارید.');
+      const decision=authorize({persona:currentActor,permission:permissionFor('project','manage'),action:'edit',resource:operationalRecordResource(currentActor,project)});if(!decision.allowed)throw new Error(decision.reasonFa);
+      const ownerUserId=project.assigneeUserId??project.createdByUserId;if(!requestedMembers.includes(ownerUserId))requestedMembers.unshift(ownerUserId);
+      if(requestedMembers.some((id)=>!rawUsers.some((user)=>user.id===id&&user.status==='active'&&user.companyId===currentActor.companyId)))throw new Error('همه اعضای پروژه باید کاربر فعال همان شرکت باشند.');
+      const unitId=input.unitId?.trim()||currentActor.unitId;if(unitId&&!units.some((unit)=>unit.id===unitId&&unit.status==='active'))throw new Error('واحد فعال پروژه پیدا نشد.');
+      const previousMembers=projectMemberUserIds(project);const removedUserIds=previousMembers.filter((id)=>!requestedMembers.includes(id));const existingChatId=projectChatId(project);const newChatId=!existingChatId&&input.createChat?newId('chat'):undefined;const updated:OperationalRecord={...project,title,description,unitId,dueAt:input.dueAt,updatedByActorId:currentActor.actorId,updatedAt:now,version:project.version+1,payload:{...project.payload,memberUserIds:requestedMembers,chatId:existingChatId??newChatId??null}};
+      if(newChatId)requirePermission(currentActor,permissionFor('chat','create'),'مجوز ساخت گفت‌وگوی پروژه را ندارید.');
+      await tx.put('projects',updated);
+      const linkedChatId=existingChatId;if(linkedChatId){const chat=await tx.get<OperationalRecord>('chats',linkedChatId);if(!chat||chat.companyId!==project.companyId||chat.relatedRecordId!==project.id)throw new Error('گفت‌وگوی متصل پروژه معتبر نیست.');const hiddenForUserIds=chatHiddenForUserIds(chat).filter((id)=>requestedMembers.includes(id));await tx.put('chats',{...chat,title,unitId,updatedByActorId:currentActor.actorId,updatedAt:now,version:chat.version+1,payload:{...chat.payload,memberUserIds:requestedMembers,hiddenForUserIds}});}else if(newChatId){await tx.put('chats',{id:newChatId,moduleId:'chat',domain:'communications',trackingCode:`CHT-PRJ-${project.trackingCode}`,title,description:'گفت‌وگوی پروژه',status:'active',priority:'normal',companyId:project.companyId,unitId,ownerPersonnelId:currentActor.personnelId,assigneeUserId:ownerUserId,relatedRecordId:project.id,createdByActorId:currentActor.actorId,createdByUserId:currentActor.id,updatedByActorId:currentActor.actorId,workflowVersion:1,version:1,payload:{conversationKind:'group',memberUserIds:requestedMembers,ownerUserId,adminUserIds:[ownerUserId],hiddenForUserIds:[],projectId:project.id},createdAt:now,updatedAt:now} satisfies OperationalRecord);}
+      for(const task of tasks.filter((item)=>taskProjectId(item)===project.id&&removedUserIds.includes(item.assigneeUserId??'')&&!['done','completed','cancelled','rejected','archived'].includes(item.status))){const reassignmentTask:OperationalRecord={...task,updatedByActorId:currentActor.actorId,updatedAt:now,version:task.version+1,payload:{...task.payload,needsReassignment:true,removedAssigneeUserId:task.assigneeUserId??null}};await tx.put('tasks',reassignmentTask);await tx.put('workflow_history',{id:newId('history'),recordId:task.id,moduleId:'task',sequence:histories.filter((item)=>item.recordId===task.id).length+1,eventType:'edited',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,reason:'مسئول کار از اعضای پروژه حذف شد.',snapshot:{action:'needs_reassignment',removedAssigneeUserId:task.assigneeUserId??null,projectId:project.id,version:reassignmentTask.version},occurredAt:now} satisfies OperationalRecordHistory);if(ownerUserId!==currentActor.id)await tx.put('notifications',{id:newId('notification'),userId:ownerUserId,kind:'workflow',title:`نیاز به تعیین مسئول: ${task.title}`,message:'مسئول قبلی از پروژه حذف شده است؛ برای این کار مسئول تازه انتخاب کنید.',actorUserId:currentActor.id,relatedRecordId:task.id,relatedModuleId:'task',dedupeKey:`task:${task.id}:needs-reassignment:${reassignmentTask.version}`,createdAt:now} satisfies UserNotification);}
+      for(const memberUserId of requestedMembers.filter((id)=>!previousMembers.includes(id)&&id!==currentActor.id))await tx.put('notifications',{id:newId('notification'),userId:memberUserId,kind:'workflow',title:`عضویت در پروژه ${title}`,message:'شما به یک پروژه همکاری در شاهراه افزوده شدید.',actorUserId:currentActor.id,relatedRecordId:project.id,relatedModuleId:'project',dedupeKey:`project:${project.id}:member:${memberUserId}:${updated.version}`,createdAt:now} satisfies UserNotification);
+      await tx.put('workflow_history',{id:newId('history'),recordId:project.id,moduleId:'project',sequence:histories.filter((item)=>item.recordId===project.id).length+1,eventType:'edited',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,snapshot:{addedUserIds:requestedMembers.filter((id)=>!previousMembers.includes(id)),removedUserIds,memberCount:requestedMembers.length,chatCreated:Boolean(newChatId)},occurredAt:now} satisfies OperationalRecordHistory);
+      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:currentActor.companyId,category:'system',action:'project.project.updated',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:'مشخصات یا اعضای یک پروژه همکاری به‌روزرسانی شد.',outcome:'success',correlationId,metadata:{projectId,memberCount:requestedMembers.length,version:updated.version}} satisfies AuditEvent);
+      await tx.put('domain_events',{id:newId('event'),aggregateType:'project',aggregateId:project.id,eventType:'ProjectUpdated',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{memberCount:requestedMembers.length,version:updated.version}} satisfies DomainEvent);await tx.put('meta',{id:'lastPersistedAt',value:now});
+    });return this.loadState();
+  }
+
+  async linkRecordToProject(recordId:string,projectId:string|undefined,expectedVersion:number):Promise<FoundationState>{
+    const state=await this.loadState();const actor=state.activeUser;
+    if(state.session.actingAdminUserId)throw new Error('اتصال نامه یا سند در حالت مشاهده آزمایشی مجاز نیست.');
+    const candidates=await Promise.all([
+      this.storage.get<OperationalRecord>('letters',recordId),
+      this.storage.get<OperationalRecord>('documents',recordId),
+    ]);
+    const existing=candidates.find(Boolean);
+    if(!existing||!['letter','document'].includes(existing.moduleId))throw new Error('نامه یا سند قابل اتصال پیدا نشد.');
+    const store:FoundationStoreName=existing.moduleId==='letter'?'letters':'documents';
+    const now=new Date().toISOString(),correlationId=newId('correlation');
+    await this.storage.transaction(['users','security_roles','projects',store,'workflow_history','audit_events','domain_events','meta'],'readwrite',async(tx)=>{
+      const [rawUsers,roles,project,current,histories,audits]=await Promise.all([
+        tx.getAll<LocalUser>('users'),tx.getAll<SecurityRole>('security_roles'),projectId?tx.get<OperationalRecord>('projects',projectId):Promise.resolve(undefined),
+        tx.get<OperationalRecord>(store,recordId),tx.getAll<OperationalRecordHistory>('workflow_history'),tx.getAll<AuditEvent>('audit_events'),
+      ]);
+      const currentActor=rawUsers.map((user)=>resolveUserAccess(user,roles)).find((user)=>user.id===actor.id&&user.status==='active'&&user.companyId===actor.companyId);
+      if(!currentActor||!current||current.version!==expectedVersion||current.companyId!==currentActor.companyId||!['letter','document'].includes(current.moduleId))throw new Error('نامه یا سند هم‌زمان تغییر کرده یا دیگر در دسترس شما نیست.');
+      const previousProjectId=typeof current.payload.projectId==='string'?current.payload.projectId:undefined;
+      const previousProject=previousProjectId?await tx.get<OperationalRecord>('projects',previousProjectId):undefined;
+      if(previousProjectId&&(!previousProject||previousProject.companyId!==currentActor.companyId||!isProjectMember(previousProject,currentActor)))throw new Error('پروژه فعلی این رکورد دیگر در دسترس شما نیست.');
+      if(previousProject){const previousDecision=authorize({persona:currentActor,permission:permissionFor('project','manage'),action:'edit',resource:operationalRecordResource(currentActor,previousProject)});if(!previousDecision.allowed)throw new Error('فقط مدیر پروژه فعلی می‌تواند پیوند این رکورد را تغییر دهد.');}
+      if(projectId&&(!project||project.companyId!==currentActor.companyId||!isProjectMember(project,currentActor)))throw new Error('پروژه مقصد دیگر در دسترس شما نیست.');
+      if(project){const projectDecision=authorize({persona:currentActor,permission:permissionFor('project','manage'),action:'edit',resource:operationalRecordResource(currentActor,project)});if(!projectDecision.allowed)throw new Error(projectDecision.reasonFa);}
+      const recordDecision=authorize({persona:currentActor,permission:permissionFor(current.moduleId,'view'),action:'view',resource:operationalRecordResource(currentActor,current)});if(!recordDecision.allowed)throw new Error('مجوز مشاهده این نامه یا سند را ندارید.');
+      const updated:OperationalRecord={...current,updatedByActorId:currentActor.actorId,updatedAt:now,version:current.version+1,payload:{...current.payload,projectId:projectId??null}};
+      await tx.put(store,updated);
+      await tx.put('workflow_history',{id:newId('history'),recordId:current.id,moduleId:current.moduleId,sequence:histories.filter((item)=>item.recordId===current.id).length+1,eventType:'edited',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,snapshot:{action:projectId?'linked_to_project':'unlinked_from_project',projectId:projectId??null,previousProjectId:previousProjectId??null,version:updated.version},occurredAt:now} satisfies OperationalRecordHistory);
+      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:currentActor.companyId,category:'system',action:projectId?'collaboration.record.linked':'collaboration.record.unlinked',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:projectId?'یک رکورد به پرونده پروژه متصل شد.':'اتصال یک رکورد از پرونده پروژه برداشته شد.',outcome:'success',correlationId,metadata:{recordId:current.id,moduleId:current.moduleId,projectId:projectId??null,previousProjectId:previousProjectId??null,version:updated.version}} satisfies AuditEvent);
+      await tx.put('domain_events',{id:newId('event'),aggregateType:current.moduleId,aggregateId:current.id,eventType:projectId?'RecordLinkedToProject':'RecordUnlinkedFromProject',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{projectId:projectId??null,previousProjectId:previousProjectId??null,version:updated.version}} satisfies DomainEvent);
+      await tx.put('meta',{id:'lastPersistedAt',value:now});
+    });
+    return this.loadState();
+  }
+
+  async transitionProject(projectId: string, targetStatus: 'active'|'paused'|'completed'|'archived', reason: string, expectedVersion: number): Promise<FoundationState> {
+    const state=await this.loadState();const actor=state.activeUser;if(state.session.actingAdminUserId)throw new Error('تغییر وضعیت پروژه در حالت مشاهده آزمایشی مجاز نیست.');const now=new Date().toISOString(),correlationId=newId('correlation');
+    await this.storage.transaction(['users','security_roles','projects','workflow_versions','workflow_history','audit_events','domain_events','meta'],'readwrite',async(tx)=>{
+      const [rawUsers,roles,project,workflowVersions,histories,audits]=await Promise.all([tx.getAll<LocalUser>('users'),tx.getAll<SecurityRole>('security_roles'),tx.get<OperationalRecord>('projects',projectId),tx.getAll<WorkflowDefinition>('workflow_versions'),tx.getAll<OperationalRecordHistory>('workflow_history'),tx.getAll<AuditEvent>('audit_events')]);
+      const currentActor=rawUsers.map((user)=>resolveUserAccess(user,roles)).find((user)=>user.id===actor.id&&user.status==='active'&&user.companyId===actor.companyId);if(!currentActor||!project||project.version!==expectedVersion||!isProjectMember(project,currentActor))throw new Error('پروژه هم‌زمان تغییر کرده یا دیگر در دسترس شما نیست.');
+      requirePermission(currentActor,permissionFor('project','manage'),'فقط مدیر پروژه می‌تواند وضعیت کل پروژه را تغییر دهد.');
+      const decision=authorize({persona:currentActor,permission:permissionFor('project','manage'),action:'transition',resource:operationalRecordResource(currentActor,project)});if(!decision.allowed)throw new Error(decision.reasonFa);
+      const workflow=workflowVersions.find((item)=>item.moduleId==='project'&&item.version===project.workflowVersion);if(!workflow)throw new Error('نسخه گردش‌کار این پروژه در دسترس نیست؛ تغییر وضعیت متوقف شد.');
+      const transition=workflow.transitions.find((item)=>item.from.includes(project.status)&&item.to===targetStatus);if(!transition)throw new Error('این انتقال در نسخه گردش‌کار پروژه مجاز نیست.');
+      requirePermission(currentActor,transition.permission,'مجوز این انتقال گردش‌کار پروژه را ندارید.');if(transition.reasonRequired&&reason.trim().length<3)throw new Error('دلیل تغییر وضعیت پروژه الزامی است.');
+      const updated:OperationalRecord={...project,status:targetStatus,updatedByActorId:currentActor.actorId,updatedAt:now,version:project.version+1};await tx.put('projects',updated);await tx.put('workflow_history',{id:newId('history'),recordId:project.id,moduleId:'project',sequence:histories.filter((item)=>item.recordId===project.id).length+1,eventType:'transitioned',fromState:project.status,toState:targetStatus,actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,reason:reason.trim()||undefined,snapshot:{version:updated.version,workflowVersion:project.workflowVersion,transitionId:transition.id},occurredAt:now} satisfies OperationalRecordHistory);
+      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:currentActor.companyId,category:'system',action:'project.project.transitioned',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:'وضعیت یک پروژه همکاری تغییر کرد.',outcome:'success',correlationId,metadata:{projectId,fromState:project.status,toState:targetStatus,version:updated.version,workflowVersion:project.workflowVersion}} satisfies AuditEvent);await tx.put('domain_events',{id:newId('event'),aggregateType:'project',aggregateId:project.id,eventType:'ProjectTransitioned',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{fromState:project.status,toState:targetStatus,version:updated.version}} satisfies DomainEvent);await tx.put('meta',{id:'lastPersistedAt',value:now});
+    });return this.loadState();
+  }
+
+  async createProjectTask(input: ProjectTaskInput): Promise<FoundationState> { return this.createProjectTasksBatch({...input,assigneeUserIds:[input.assigneeUserId]}); }
+
+  async createProjectTasksBatch(input: ProjectTaskBatchInput): Promise<FoundationState> {
+    const state=await this.loadState();const actor=state.activeUser;if(state.session.actingAdminUserId)throw new Error('ساخت وظیفه در حالت مشاهده آزمایشی مجاز نیست.');const title=input.title.trim(),description=input.description?.trim()??'';if(title.length<2)throw new Error('عنوان وظیفه را کامل وارد کنید.');
+    const assigneeUserIds=[...new Set(input.assigneeUserIds.filter(Boolean))];if(!assigneeUserIds.length)throw new Error('حداقل یک مسئول وظیفه انتخاب کنید.');const labels=normalizeTaskLabels(input.labels);const checklistTitles=(input.checklist??[]).map((item)=>item.title.trim()).filter(Boolean);const now=new Date().toISOString(),correlationId=newId('correlation'),assignmentBatchId=newId('task-batch');
+    await this.storage.transaction(['users','security_roles','projects','tasks','workflow_versions','workflow_history','notifications','audit_events','domain_events','meta'],'readwrite',async(tx)=>{
+      const [rawUsers,roles,project,tasks,workflowVersions,histories,audits]=await Promise.all([tx.getAll<LocalUser>('users'),tx.getAll<SecurityRole>('security_roles'),input.projectId?tx.get<OperationalRecord>('projects',input.projectId):Promise.resolve(undefined),tx.getAll<OperationalRecord>('tasks'),tx.getAll<WorkflowDefinition>('workflow_versions'),tx.getAll<OperationalRecordHistory>('workflow_history'),tx.getAll<AuditEvent>('audit_events')]);
+      const currentActor=rawUsers.map((user)=>resolveUserAccess(user,roles)).find((user)=>user.id===actor.id&&user.status==='active'&&user.companyId===actor.companyId);if(!currentActor)throw new Error('حساب شما هم‌زمان تغییر کرده است؛ دوباره وارد شوید.');requirePermission(currentActor,permissionFor('task','create'),'مجوز ساخت وظیفه را ندارید.');
+      if(input.projectId&&(!project||!isProjectMember(project,currentActor)||['completed','archived'].includes(project.status)||!authorize({persona:currentActor,permission:permissionFor('project','view'),action:'view',resource:operationalRecordResource(currentActor,project)}).allowed))throw new Error('پروژه در دسترس یا قابل برنامه‌ریزی نیست.');if(project&&!authorize({persona:currentActor,permission:permissionFor('task','create'),action:'create',resource:operationalRecordResource(currentActor,project)}).allowed)throw new Error('محدوده نقش شما اجازه ساخت وظیفه در این پروژه را نمی‌دهد.');
+      const assignees=assigneeUserIds.map((id)=>rawUsers.find((user)=>user.id===id&&user.status==='active'&&user.companyId===currentActor.companyId));if(assignees.some((user)=>!user))throw new Error('همه مسئولان وظیفه باید کاربر فعال همان شرکت باشند.');if(project&&assigneeUserIds.some((id)=>!projectMemberUserIds(project).includes(id)))throw new Error('مسئول وظیفه باید عضو همان پروژه باشد.');const taskWorkflow=workflowVersions.filter((item)=>item.moduleId==='task'&&item.status==='published').sort((a,b)=>b.version-a.version)[0];if(!taskWorkflow)throw new Error('گردش‌کار منتشرشده وظیفه پیدا نشد.');
+      for(const [index,assigneeUserId] of assigneeUserIds.entries()){const taskId=newId('task');const checklist:TaskChecklistItem[]=checklistTitles.map((itemTitle)=>({id:newId('checklist'),title:itemTitle,completed:false}));const task:OperationalRecord={id:taskId,moduleId:'task',domain:'task',trackingCode:`TSK-${new Date(now).getFullYear()}-${String(tasks.length+index+1).padStart(5,'0')}`,title,description,status:'todo',priority:input.priority??'normal',companyId:currentActor.companyId,unitId:project?.unitId??currentActor.unitId,ownerPersonnelId:currentActor.personnelId,assigneeUserId,relatedRecordId:undefined,dueAt:input.dueAt,createdByActorId:currentActor.actorId,createdByUserId:currentActor.id,updatedByActorId:currentActor.actorId,workflowVersion:taskWorkflow.version,version:1,payload:{projectId:input.projectId??null,assignmentBatchId,labels,checklist:checklist as unknown as OperationalPayloadValue,reminderAt:input.reminderAt??null},createdAt:now,updatedAt:now};await tx.put('tasks',task);await tx.put('workflow_history',{id:newId('history'),recordId:task.id,moduleId:'task',sequence:histories.filter((item)=>item.recordId===task.id).length+1,eventType:'created',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,snapshot:{projectId:input.projectId??null,assignmentBatchId,assigneeUserId,checklistCount:checklist.length,labelCount:labels.length},occurredAt:now} satisfies OperationalRecordHistory);await tx.put('domain_events',{id:newId('event'),aggregateType:'task',aggregateId:task.id,eventType:'ProjectTaskCreated',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{projectId:input.projectId??null,assignmentBatchId,assigneeUserId}} satisfies DomainEvent);if(assigneeUserId!==currentActor.id)await tx.put('notifications',{id:newId('notification'),userId:assigneeUserId,kind:'workflow',title:`کار تازه: ${title}`,message:`یک کار در پروژه «${project?.title??'میز همکاری'}» به شما واگذار شد.`,actorUserId:currentActor.id,relatedRecordId:task.id,relatedModuleId:'task',dedupeKey:`task:${task.id}:assignment:${assigneeUserId}`,createdAt:now} satisfies UserNotification);}
+      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:currentActor.companyId,category:'system',action:'task.task.batch_created',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:'وظیفه‌های همکاری ایجاد شدند.',outcome:'success',correlationId,metadata:{projectId:input.projectId??null,taskCount:assigneeUserIds.length}} satisfies AuditEvent);await tx.put('meta',{id:'lastPersistedAt',value:now});
+    });return this.loadState();
+  }
+
+  async updateProjectTask(taskId:string,input:ProjectTaskUpdateInput,expectedVersion:number):Promise<FoundationState>{
+    const state=await this.loadState();const actor=state.activeUser;if(state.session.actingAdminUserId)throw new Error('ویرایش وظیفه در حالت مشاهده آزمایشی مجاز نیست.');const title=input.title.trim();if(title.length<2)throw new Error('عنوان وظیفه را کامل وارد کنید.');const labels=normalizeTaskLabels(input.labels),now=new Date().toISOString(),correlationId=newId('correlation');
+    await this.storage.transaction(['users','security_roles','projects','tasks','workflow_history','audit_events','domain_events','meta'],'readwrite',async(tx)=>{
+      const [rawUsers,roles,task,histories,audits]=await Promise.all([tx.getAll<LocalUser>('users'),tx.getAll<SecurityRole>('security_roles'),tx.get<OperationalRecord>('tasks',taskId),tx.getAll<OperationalRecordHistory>('workflow_history'),tx.getAll<AuditEvent>('audit_events')]);
+      const currentActor=rawUsers.map((user)=>resolveUserAccess(user,roles)).find((user)=>user.id===actor.id&&user.status==='active'&&user.companyId===actor.companyId);const projectId=task?taskProjectId(task):undefined;const project=projectId?await tx.get<OperationalRecord>('projects',projectId):undefined;
+      if(!currentActor||!task||task.version!==expectedVersion||task.companyId!==currentActor.companyId||(projectId&&(!project||!isProjectMember(project,currentActor)||!authorize({persona:currentActor,permission:permissionFor('project','view'),action:'view',resource:operationalRecordResource(currentActor,project)}).allowed)))throw new Error('وظیفه هم‌زمان تغییر کرده یا دیگر در دسترس شما نیست.');
+      requirePermission(currentActor,permissionFor('task','edit'),'مجوز ویرایش وظیفه را ندارید.');if(!authorize({persona:currentActor,permission:permissionFor('task','edit'),action:'edit',resource:operationalRecordResource(currentActor,task)}).allowed)throw new Error('محدوده نقش شما اجازه ویرایش این وظیفه را نمی‌دهد.');
+      const managerAllowed=authorize({persona:currentActor,permission:permissionFor('task','manage'),action:'edit',resource:operationalRecordResource(currentActor,task)}).allowed;const projectOwnerAllowed=Boolean(project&&project.assigneeUserId===currentActor.id);if(task.assigneeUserId!==currentActor.id&&task.createdByUserId!==currentActor.id&&!managerAllowed&&!projectOwnerAllowed)throw new Error('فقط مسئول، سازنده، مالک پروژه یا مدیر وظیفه می‌تواند آن را ویرایش کند.');
+      const nextAssigneeUserId=input.assigneeUserId??task.assigneeUserId;if(!nextAssigneeUserId||!rawUsers.some((user)=>user.id===nextAssigneeUserId&&user.status==='active'&&user.companyId===currentActor.companyId)||project&&!projectMemberUserIds(project).includes(nextAssigneeUserId))throw new Error('مسئول تازه باید کاربر فعال و عضو همین پروژه باشد.');
+      if(nextAssigneeUserId!==task.assigneeUserId&&task.createdByUserId!==currentActor.id&&!managerAllowed&&!projectOwnerAllowed)throw new Error('فقط سازنده، مالک پروژه یا مدیر وظیفه می‌تواند مسئول آن را تغییر دهد.');
+      const updated:OperationalRecord={...task,title,description:input.description?.trim()??'',priority:input.priority??task.priority,dueAt:input.dueAt,assigneeUserId:nextAssigneeUserId,updatedByActorId:currentActor.actorId,updatedAt:now,version:task.version+1,payload:{...task.payload,labels,reminderAt:input.reminderAt??null,needsReassignment:false,removedAssigneeUserId:null}};await tx.put('tasks',updated);
+      await tx.put('workflow_history',{id:newId('history'),recordId:task.id,moduleId:'task',sequence:histories.filter((item)=>item.recordId===task.id).length+1,eventType:'edited',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,snapshot:{projectId:projectId??null,assigneeUserId:nextAssigneeUserId,labelCount:labels.length,reminderSet:Boolean(input.reminderAt)},occurredAt:now} satisfies OperationalRecordHistory);await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:currentActor.companyId,category:'system',action:'task.task.updated',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:'یک وظیفه همکاری به‌روزرسانی شد.',outcome:'success',correlationId,metadata:{taskId,projectId:projectId??null,version:updated.version}} satisfies AuditEvent);await tx.put('domain_events',{id:newId('event'),aggregateType:'task',aggregateId:task.id,eventType:'ProjectTaskUpdated',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{projectId:projectId??null,version:updated.version}} satisfies DomainEvent);await tx.put('meta',{id:'lastPersistedAt',value:now});
+    });return this.loadState();
+  }
+
+  async transitionProjectTask(taskId:string,targetStatus:'in_progress'|'done'|'blocked'|'todo',reason:string,expectedVersion:number):Promise<FoundationState>{
+    const state=await this.loadState();const actor=state.activeUser;if(state.session.actingAdminUserId)throw new Error('تغییر وضعیت کار در حالت مشاهده آزمایشی مجاز نیست.');const now=new Date().toISOString(),correlationId=newId('correlation');
+    await this.storage.transaction(['users','security_roles','projects','tasks','workflow_versions','workflow_history','audit_events','domain_events','meta'],'readwrite',async(tx)=>{
+      const [rawUsers,roles,task,workflowVersions,histories,audits]=await Promise.all([tx.getAll<LocalUser>('users'),tx.getAll<SecurityRole>('security_roles'),tx.get<OperationalRecord>('tasks',taskId),tx.getAll<WorkflowDefinition>('workflow_versions'),tx.getAll<OperationalRecordHistory>('workflow_history'),tx.getAll<AuditEvent>('audit_events')]);
+      const currentActor=rawUsers.map((user)=>resolveUserAccess(user,roles)).find((user)=>user.id===actor.id&&user.status==='active'&&user.companyId===actor.companyId);const projectId=task?taskProjectId(task):undefined;const project=projectId?await tx.get<OperationalRecord>('projects',projectId):undefined;
+      if(!currentActor||!task||task.version!==expectedVersion||task.companyId!==currentActor.companyId||(projectId&&(!project||!isProjectMember(project,currentActor)||!authorize({persona:currentActor,permission:permissionFor('project','view'),action:'view',resource:operationalRecordResource(currentActor,project)}).allowed)))throw new Error('کار هم‌زمان تغییر کرده یا دیگر در دسترس شما نیست.');
+      requirePermission(currentActor,permissionFor('task','transition'),'مجوز تغییر وضعیت کار را ندارید.');const decision=authorize({persona:currentActor,permission:permissionFor('task','transition'),action:'transition',resource:operationalRecordResource(currentActor,task)});if(!decision.allowed)throw new Error(decision.reasonFa);
+      const projectOwnerAllowed=Boolean(project&&project.assigneeUserId===currentActor.id);if(task.assigneeUserId!==currentActor.id&&!projectOwnerAllowed&&!authorize({persona:currentActor,permission:permissionFor('task','manage'),action:'transition',resource:operationalRecordResource(currentActor,task)}).allowed)throw new Error('فقط مسئول، مالک پروژه یا مدیر کار می‌تواند وضعیت آن را تغییر دهد.');
+      const workflow=workflowVersions.find((item)=>item.moduleId==='task'&&item.version===task.workflowVersion);if(!workflow)throw new Error('نسخه گردش‌کار این وظیفه در دسترس نیست؛ تغییر وضعیت متوقف شد.');const transition=workflow.transitions.find((item)=>item.from.includes(task.status)&&item.to===targetStatus);if(!transition)throw new Error('این انتقال در نسخه گردش‌کار وظیفه مجاز نیست.');
+      if(targetStatus==='done'&&taskChecklist(task).some((item)=>!item.completed))throw new Error('پیش از تکمیل کار، همه ردیف‌های چک‌لیست را انجام دهید.');if(transition.reasonRequired&&reason.trim().length<3)throw new Error('دلیل تغییر وضعیت کار الزامی است.');
+      const updated:OperationalRecord={...task,status:targetStatus,updatedByActorId:currentActor.actorId,updatedAt:now,version:task.version+1,payload:{...task.payload,waitingReason:targetStatus==='blocked'?reason.trim():null}};await tx.put('tasks',updated);await tx.put('workflow_history',{id:newId('history'),recordId:task.id,moduleId:'task',sequence:histories.filter((item)=>item.recordId===task.id).length+1,eventType:'transitioned',fromState:task.status,toState:targetStatus,actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,reason:reason.trim()||undefined,snapshot:{projectId:projectId??null,workflowVersion:task.workflowVersion,transitionId:transition.id,version:updated.version},occurredAt:now} satisfies OperationalRecordHistory);await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:currentActor.companyId,category:'system',action:'task.task.transitioned',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:'وضعیت یک کار همکاری تغییر کرد.',outcome:'success',correlationId,metadata:{taskId,projectId:projectId??null,fromState:task.status,toState:targetStatus,version:updated.version}} satisfies AuditEvent);await tx.put('domain_events',{id:newId('event'),aggregateType:'task',aggregateId:task.id,eventType:'ProjectTaskTransitioned',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{projectId:projectId??null,fromState:task.status,toState:targetStatus,version:updated.version}} satisfies DomainEvent);await tx.put('meta',{id:'lastPersistedAt',value:now});
+    });return this.loadState();
+  }
+
+  async setTaskChecklistItem(taskId:string,itemId:string,completed:boolean,expectedVersion:number):Promise<FoundationState>{
+    const state=await this.loadState();
+    const actor=state.activeUser;
+    if(state.session.actingAdminUserId)throw new Error('تغییر چک‌لیست در حالت مشاهده آزمایشی مجاز نیست.');
+    const now=new Date().toISOString(),correlationId=newId('correlation');
+    await this.storage.transaction(['users','security_roles','projects','tasks','workflow_history','audit_events','domain_events','meta'],'readwrite',async(tx)=>{
+      const [rawUsers,roles,task,histories,audits]=await Promise.all([
+        tx.getAll<LocalUser>('users'),tx.getAll<SecurityRole>('security_roles'),tx.get<OperationalRecord>('tasks',taskId),
+        tx.getAll<OperationalRecordHistory>('workflow_history'),tx.getAll<AuditEvent>('audit_events'),
+      ]);
+      const currentActor=rawUsers.map((user)=>resolveUserAccess(user,roles)).find((user)=>user.id===actor.id&&user.status==='active'&&user.companyId===actor.companyId);
+      const projectId=task?taskProjectId(task):undefined;
+      const project=projectId?await tx.get<OperationalRecord>('projects',projectId):undefined;
+      const projectVisible=Boolean(!projectId||(project&&currentActor&&isProjectMember(project,currentActor)&&authorize({persona:currentActor,permission:permissionFor('project','view'),action:'view',resource:operationalRecordResource(currentActor,project)}).allowed));
+      if(!currentActor||!task||task.version!==expectedVersion||task.companyId!==currentActor.companyId||!projectVisible)throw new Error('وظیفه هم‌زمان تغییر کرده یا دیگر در دسترس شما نیست.');
+      requirePermission(currentActor,permissionFor('task','edit'),'مجوز تغییر چک‌لیست را ندارید.');
+      const taskResource=operationalRecordResource(currentActor,task);
+      if(!authorize({persona:currentActor,permission:permissionFor('task','edit'),action:'edit',resource:taskResource}).allowed)throw new Error('محدوده نقش شما اجازه تغییر این چک‌لیست را نمی‌دهد.');
+      const managerAllowed=authorize({persona:currentActor,permission:permissionFor('task','manage'),action:'edit',resource:taskResource}).allowed;
+      const projectOwnerAllowed=Boolean(project&&project.assigneeUserId===currentActor.id);
+      if(task.assigneeUserId!==currentActor.id&&!managerAllowed&&!projectOwnerAllowed)throw new Error('فقط مسئول، مالک پروژه یا مدیر وظیفه می‌تواند چک‌لیست را تغییر دهد.');
+      const currentChecklist=taskChecklist(task);
+      if(!currentChecklist.some((item)=>item.id===itemId))throw new Error('ردیف چک‌لیست پیدا نشد.');
+      const checklist=currentChecklist.map((item)=>item.id===itemId?{...item,completed,completedAt:completed?now:undefined,completedByUserId:completed?currentActor.id:undefined}:item);
+      const updated:OperationalRecord={...task,updatedByActorId:currentActor.actorId,updatedAt:now,version:task.version+1,payload:{...task.payload,checklist:checklist as unknown as OperationalPayloadValue}};
+      await tx.put('tasks',updated);
+      await tx.put('workflow_history',{id:newId('history'),recordId:task.id,moduleId:'task',sequence:histories.filter((item)=>item.recordId===task.id).length+1,eventType:'edited',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,snapshot:{action:'checklist_changed',itemId,completed,projectId:projectId??null},occurredAt:now} satisfies OperationalRecordHistory);
+      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:currentActor.companyId,category:'system',action:'task.checklist.updated',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:'وضعیت یک ردیف چک‌لیست وظیفه تغییر کرد.',outcome:'success',correlationId,metadata:{taskId,projectId:projectId??null,itemId,completed,version:updated.version}} satisfies AuditEvent);
+      await tx.put('domain_events',{id:newId('event'),aggregateType:'task',aggregateId:task.id,eventType:'TaskChecklistChanged',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{projectId:projectId??null,itemId,completed,version:updated.version}} satisfies DomainEvent);
+      await tx.put('meta',{id:'lastPersistedAt',value:now});
+    });
+    return this.loadState();
+  }
+
+  async updateChatPreference(chatId:string,input:ChatPreferenceInput,expectedVersion:number):Promise<FoundationState>{
+    const state=await this.loadState();const actor=state.activeUser;if(state.session.actingAdminUserId)throw new Error('تغییر تنظیم گفت‌وگو در حالت مشاهده آزمایشی مجاز نیست.');const now=new Date().toISOString(),id=chatPreferenceId(chatId,actor.id),correlationId=newId('correlation');
+    await this.storage.transaction(['users','security_roles','projects','chats','chat_preferences','audit_events','domain_events','meta'],'readwrite',async(tx)=>{
+      const [rawUsers,roles,projects,chat,current,audits]=await Promise.all([tx.getAll<LocalUser>('users'),tx.getAll<SecurityRole>('security_roles'),tx.getAll<OperationalRecord>('projects'),tx.get<OperationalRecord>('chats',chatId),tx.get<ChatPreference>('chat_preferences',id),tx.getAll<AuditEvent>('audit_events')]);
+      const currentActor=rawUsers.map((user)=>resolveUserAccess(user,roles)).find((user)=>user.id===actor.id&&user.status==='active'&&user.companyId===actor.companyId);
+      const projectId=chat&&typeof chat.payload.projectId==='string'?chat.payload.projectId:chat?.relatedRecordId&&projects.some((project)=>project.id===chat.relatedRecordId)?chat.relatedRecordId:undefined;
+      const project=projectId?projects.find((candidate)=>candidate.id===projectId):undefined;
+      const projectVisible=Boolean(!projectId||(project&&currentActor&&isProjectMember(project,currentActor)&&authorize({persona:currentActor,permission:permissionFor('project','view'),action:'view',resource:operationalRecordResource(currentActor,project)}).allowed));
+      if(!currentActor||!chat||chat.companyId!==currentActor.companyId||!isChatMember(chat,currentActor)||!projectVisible)throw new Error('گفت‌وگو دیگر در دسترس شما نیست.');
+      if(!can(currentActor,permissionFor('chat','view')))throw new Error('مجوز مشاهده این گفت‌وگو را ندارید.');
+      if((current?.version??0)!==expectedVersion)throw new Error('تنظیم گفت‌وگو هم‌زمان تغییر کرده است.');
+      const preference:ChatPreference={id,chatId,userId:currentActor.id,companyId:currentActor.companyId,pinned:input.pinned,muted:input.muted,version:(current?.version??0)+1,createdAt:current?.createdAt??now,updatedAt:now};
+      await tx.put('chat_preferences',preference);
+      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:currentActor.companyId,category:'system',action:'communications.chat.preference_updated',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:'تنظیم شخصی یک گفت‌وگو به‌روزرسانی شد.',outcome:'success',correlationId,metadata:{chatId,projectId:projectId??null,pinned:input.pinned,muted:input.muted,version:preference.version}} satisfies AuditEvent);
+      await tx.put('domain_events',{id:newId('event'),aggregateType:'chat-preference',aggregateId:id,eventType:'ChatPreferenceUpdated',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{chatId,projectId:projectId??null,pinned:input.pinned,muted:input.muted,version:preference.version}} satisfies DomainEvent);
+      await tx.put('meta',{id:'lastPersistedAt',value:now});
+    });return this.loadState();
   }
 
   async createChatConversation(input: ChatConversationInput): Promise<FoundationState> {
@@ -701,13 +954,15 @@ export class LocalFoundationService {
     if (actor.status !== 'active') throw new Error('حساب غیرفعال نمی‌تواند گفت‌وگو بسازد.');
     const requestedIds = [...new Set((input.memberUserIds ?? []).filter((id) => id && id !== actor.id))];
     const now = new Date().toISOString(); const conversationId = newId('chat'); const correlationId = newId('correlation');
-    await this.storage.transaction(['users','organizational_units','chats','workflow_history','audit_events','domain_events','meta'], 'readwrite', async (tx) => {
-      const [users, units, chats, history, audits] = await Promise.all([
-        tx.getAll<LocalUser>('users'), tx.getAll<OrganizationalUnit>('organizational_units'),
+    await this.storage.transaction(['users','security_roles','organizational_units','chats','workflow_history','audit_events','domain_events','meta'], 'readwrite', async (tx) => {
+      const [rawUsers, roles, units, chats, history, audits] = await Promise.all([
+        tx.getAll<LocalUser>('users'), tx.getAll<SecurityRole>('security_roles'), tx.getAll<OrganizationalUnit>('organizational_units'),
         tx.getAll<OperationalRecord>('chats'), tx.getAll<OperationalRecordHistory>('workflow_history'), tx.getAll<AuditEvent>('audit_events'),
       ]);
+      const users=rawUsers.map((user)=>resolveUserAccess(user,roles));
       const currentActor = users.find((user) => user.id === actor.id && user.status === 'active');
       if (!currentActor || currentActor.companyId !== actor.companyId) throw new Error('حساب شما هم‌زمان تغییر کرده است؛ دوباره وارد شوید.');
+      requirePermission(currentActor,permissionFor('chat','create'),'مجوز ساخت گفت‌وگو را ندارید.');
       let title = input.title?.trim() ?? '';
       let unitId: string | undefined;
       let memberUserIds: string[];
@@ -734,7 +989,7 @@ export class LocalFoundationService {
               const updated = {...existing,updatedByActorId:currentActor.actorId,updatedAt:now,version:existing.version+1,payload:{...existing.payload,hiddenForUserIds}};
               await tx.put('chats', updated);
               await tx.put('workflow_history',{id:newId('history'),recordId:existing.id,moduleId:'chat',sequence:history.filter((item)=>item.recordId===existing.id).length+1,eventType:'edited',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,snapshot:{action:'restored_for_user'},occurredAt:now} satisfies OperationalRecordHistory);
-              await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:actor.companyId,category:'system',action:'communications.chat.restored',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:`گفت‌وگوی «${existing.title}» به فهرست بازگردانده شد.`,outcome:'success',correlationId,metadata:{conversationId:existing.id}} satisfies AuditEvent);
+              await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:actor.companyId,category:'system',action:'communications.chat.restored',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:`گفت‌وگوی «${existing.title}» به فهرست بازگردانده شد.`,outcome:'success',correlationId,metadata:{conversationId:existing.id,chatId:existing.id}} satisfies AuditEvent);
               await tx.put('domain_events',{id:newId('event'),aggregateType:'chat',aggregateId:existing.id,eventType:'ChatRestoredForUser',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{userId:currentActor.id}} satisfies DomainEvent);
               await tx.put('meta',{id:'lastPersistedAt',value:now});
             }
@@ -747,7 +1002,7 @@ export class LocalFoundationService {
       const conversation: OperationalRecord = {id:conversationId,moduleId:'chat',domain:'communications',trackingCode:`CHT-${new Date().getFullYear()}-${String(sequence).padStart(4,'0')}`,title,description:'',status:'active',priority:'normal',companyId:actor.companyId,unitId,ownerPersonnelId:actor.personnelId,assigneeUserId:actor.id,createdByActorId:actor.actorId,createdByUserId:actor.id,updatedByActorId:actor.actorId,workflowVersion:1,version:1,payload:{conversationKind:input.kind,memberUserIds,ownerUserId:actor.id,adminUserIds:input.kind==='group'?[actor.id]:[],lastMessageAt:null},createdAt:now,updatedAt:now};
       await tx.put('chats', conversation);
       await tx.put('workflow_history', {id:newId('history'),recordId:conversation.id,moduleId:'chat',sequence:1,eventType:'created',actorId:actor.actorId,actorName:actor.name,effectiveUserId:actor.id,snapshot:{conversationKind:input.kind,memberCount:memberUserIds.length,unitId:unitId??null},occurredAt:now} satisfies OperationalRecordHistory);
-      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:actor.companyId,category:'system',action:'communications.chat.created',actorId:actor.actorId,actorName:actor.name,effectiveUserId:actor.id,occurredAt:now,summary:`گفت‌وگوی «${title}» ساخته شد.`,outcome:'success',correlationId,metadata:{conversationId,kind:input.kind,memberCount:memberUserIds.length}} satisfies AuditEvent);
+      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:actor.companyId,category:'system',action:'communications.chat.created',actorId:actor.actorId,actorName:actor.name,effectiveUserId:actor.id,occurredAt:now,summary:`گفت‌وگوی «${title}» ساخته شد.`,outcome:'success',correlationId,metadata:{conversationId,chatId:conversationId,kind:input.kind,memberCount:memberUserIds.length}} satisfies AuditEvent);
       await tx.put('domain_events',{id:newId('event'),aggregateType:'chat',aggregateId:conversationId,eventType:'ChatCreated',actorId:actor.actorId,occurredAt:now,correlationId,payload:{kind:input.kind,memberCount:memberUserIds.length}} satisfies DomainEvent);
       await tx.put('meta',{id:'lastPersistedAt',value:now});
     });
@@ -762,13 +1017,19 @@ export class LocalFoundationService {
     const attachment = input.attachment ? validateChatAttachment(input.attachment) : undefined;
     if (!body && !attachment) throw new Error('متن، فایل یا ویس را برای ارسال انتخاب کنید.');
     const now = new Date().toISOString(); const messageId = newId('message'); const correlationId = newId('correlation');
-    await this.storage.transaction(['users','chats','messages','workflow_history','notifications','audit_events','domain_events','meta'], 'readwrite', async (tx) => {
-      const [users, conversation, messages, audits] = await Promise.all([
-        tx.getAll<LocalUser>('users'), tx.get<OperationalRecord>('chats', input.conversationId), tx.getAll<OperationalRecord>('messages'),
+    await this.storage.transaction(['users','security_roles','projects','chats','messages','chat_preferences','workflow_history','notifications','audit_events','domain_events','meta'], 'readwrite', async (tx) => {
+      const [rawUsers, roles, projects, conversation, messages, chatPreferences, audits] = await Promise.all([
+        tx.getAll<LocalUser>('users'), tx.getAll<SecurityRole>('security_roles'), tx.getAll<OperationalRecord>('projects'), tx.get<OperationalRecord>('chats', input.conversationId), tx.getAll<OperationalRecord>('messages'),
+        tx.getAll<ChatPreference>('chat_preferences'),
         tx.getAll<AuditEvent>('audit_events'),
       ]);
-      const currentActor = users.find((user) => user.id === actor.id && user.status === 'active');
-      if (!currentActor || !conversation || conversation.status !== 'active' || !isChatMember(conversation, currentActor)) throw new Error('این گفت‌وگو در دسترس شما نیست یا بسته شده است.');
+      const users=rawUsers.map((user)=>resolveUserAccess(user,roles));
+      const currentActor = users.find((user) => user.id === actor.id && user.status === 'active' && user.companyId === actor.companyId);
+      const projectId=conversation&&typeof conversation.payload.projectId==='string'?conversation.payload.projectId:conversation?.relatedRecordId&&projects.some((project)=>project.id===conversation.relatedRecordId)?conversation.relatedRecordId:undefined;
+      const project=projectId?projects.find((candidate)=>candidate.id===projectId):undefined;
+      const projectVisible=Boolean(!projectId||(project&&currentActor&&isProjectMember(project,currentActor)&&authorize({persona:currentActor,permission:permissionFor('project','view'),action:'view',resource:operationalRecordResource(currentActor,project)}).allowed));
+      if (!currentActor || !conversation || conversation.companyId!==currentActor.companyId || conversation.status !== 'active' || !isChatMember(conversation, currentActor) || !projectVisible) throw new Error('این گفت‌وگو در دسترس شما نیست یا بسته شده است.');
+      if(!can(currentActor,permissionFor('chat','view'))||!can(currentActor,permissionFor('message','create')))throw new Error('مجوز ارسال پیام در این گفت‌وگو را ندارید.');
       const committedAttachment = attachment ? validateChatAttachment(attachment) : undefined;
       const replyToMessageId = input.replyToMessageId?.trim() || undefined;
       if (replyToMessageId) {
@@ -780,14 +1041,16 @@ export class LocalFoundationService {
       const recipients = chatKind(conversation)==='unit'
         ? users.filter((user)=>user.status==='active'&&user.companyId===actor.companyId&&user.unitId===conversation.unitId&&user.id!==actor.id)
         : chatMemberUserIds(conversation).filter((id)=>id!==actor.id).map((id)=>users.find((user)=>user.id===id&&user.status==='active')).filter((user):user is LocalUser=>Boolean(user));
-      const recipientIds = new Set(recipients.map((recipient) => recipient.id));
+      const authorizedRecipients=recipients.filter((recipient)=>can(recipient,permissionFor('chat','view'))&&can(recipient,permissionFor('message','view')));
+      const recipientIds = new Set(authorizedRecipients.map((recipient) => recipient.id));
       const hiddenForUserIds = chatHiddenForUserIds(conversation).filter((id) => !recipientIds.has(id));
       await tx.put('messages', message);
       await tx.put('chats', {...conversation,updatedByActorId:currentActor.actorId,updatedAt:now,version:conversation.version+1,payload:{...conversation.payload,lastMessageAt:now,lastMessageSenderUserId:currentActor.id,hiddenForUserIds}});
       await tx.put('workflow_history',{id:newId('history'),recordId:message.id,moduleId:'message',sequence:1,eventType:'created',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,snapshot:{conversationId:conversation.id,messageKind:committedAttachment?.kind??'text',hasText:Boolean(body),fileName:committedAttachment?.fileName??null,fileSize:committedAttachment?.size??null,replyToMessageId:replyToMessageId??null},occurredAt:now} satisfies OperationalRecordHistory);
-      for (const recipient of recipients) await tx.put('notifications',{id:newId('notification'),userId:recipient.id,kind:'chat_message',title:`پیام جدید در ${conversation.title}`,message:`${currentActor.name} پیام تازه‌ای فرستاد.`,actorUserId:currentActor.id,relatedRecordId:conversation.id,relatedModuleId:'chat',dedupeKey:`chat:${conversation.id}:${recipient.id}:${message.id}`,createdAt:now} satisfies UserNotification);
-      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:actor.companyId,category:'system',action:'communications.message.sent',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:`پیام جدید در گفت‌وگوی «${conversation.title}» ثبت شد.`,outcome:'success',correlationId,metadata:{conversationId:conversation.id,messageId,messageKind:committedAttachment?.kind??'text',recipientCount:recipients.length}} satisfies AuditEvent);
-      await tx.put('domain_events',{id:newId('event'),aggregateType:'chat',aggregateId:conversation.id,eventType:'ChatMessageSent',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{messageId,messageKind:committedAttachment?.kind??'text',recipientCount:recipients.length}} satisfies DomainEvent);
+      const notifiedRecipients=authorizedRecipients.filter((recipient)=>!preferenceForChat(chatPreferences,conversation.id,recipient.id)?.muted);
+      for (const recipient of notifiedRecipients) await tx.put('notifications',{id:newId('notification'),userId:recipient.id,kind:'chat_message',title:`پیام جدید در ${conversation.title}`,message:`${currentActor.name} پیام تازه‌ای فرستاد.`,actorUserId:currentActor.id,relatedRecordId:conversation.id,relatedModuleId:'chat',dedupeKey:`chat:${conversation.id}:${recipient.id}:${message.id}`,createdAt:now} satisfies UserNotification);
+      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:actor.companyId,category:'system',action:'communications.message.sent',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:`پیام جدید در گفت‌وگوی «${conversation.title}» ثبت شد.`,outcome:'success',correlationId,metadata:{conversationId:conversation.id,chatId:conversation.id,projectId:projectId??null,messageId,messageKind:committedAttachment?.kind??'text',recipientCount:authorizedRecipients.length,notificationCount:notifiedRecipients.length}} satisfies AuditEvent);
+      await tx.put('domain_events',{id:newId('event'),aggregateType:'chat',aggregateId:conversation.id,eventType:'ChatMessageSent',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{projectId:projectId??null,messageId,messageKind:committedAttachment?.kind??'text',recipientCount:authorizedRecipients.length}} satisfies DomainEvent);
       await tx.put('meta',{id:'lastPersistedAt',value:now});
     });
     return this.loadState();
@@ -797,19 +1060,21 @@ export class LocalFoundationService {
     const state = await this.loadState(); const actor = state.activeUser;
     if (state.session.actingAdminUserId) throw new Error('حذف گفتگو در حالت مشاهده آزمایشی مجاز نیست.');
     const now = new Date().toISOString(); const correlationId = newId('correlation');
-    await this.storage.transaction(['users','chats','workflow_history','audit_events','domain_events','meta'],'readwrite',async(tx)=>{
-      const [users,conversation,history,audits]=await Promise.all([
-        tx.getAll<LocalUser>('users'),tx.get<OperationalRecord>('chats',conversationId),tx.getAll<OperationalRecordHistory>('workflow_history'),tx.getAll<AuditEvent>('audit_events'),
+    await this.storage.transaction(['users','security_roles','projects','chats','workflow_history','audit_events','domain_events','meta'],'readwrite',async(tx)=>{
+      const [rawUsers,roles,projects,conversation,history,audits]=await Promise.all([
+        tx.getAll<LocalUser>('users'),tx.getAll<SecurityRole>('security_roles'),tx.getAll<OperationalRecord>('projects'),tx.get<OperationalRecord>('chats',conversationId),tx.getAll<OperationalRecordHistory>('workflow_history'),tx.getAll<AuditEvent>('audit_events'),
       ]);
-      const currentActor=users.find((user)=>user.id===actor.id&&user.status==='active'&&user.companyId===actor.companyId);
+      const currentActor=rawUsers.map((user)=>resolveUserAccess(user,roles)).find((user)=>user.id===actor.id&&user.status==='active'&&user.companyId===actor.companyId);
       if(!currentActor||!conversation||conversation.version!==expectedVersion)throw new Error('این گفتگو هم‌زمان تغییر کرده است؛ صفحه را تازه کنید.');
       if(!isChatMember(conversation,currentActor))throw new Error('این گفتگو در دسترس شما نیست.');
+      const projectId=assertLinkedProjectChatAccess(currentActor,conversation,projects);
+      if(!can(currentActor,permissionFor('chat','view')))throw new Error('مجوز مشاهده این گفت‌وگو را ندارید.');
       if(chatKind(conversation)==='unit')throw new Error('گفتگوی واحد سازمانی از فهرست حذف نمی‌شود.');
       const hiddenForUserIds=[...new Set([...chatHiddenForUserIds(conversation),currentActor.id])];
       const updated={...conversation,updatedByActorId:currentActor.actorId,updatedAt:now,version:conversation.version+1,payload:{...conversation.payload,hiddenForUserIds}};
       await tx.put('chats',updated);
       await tx.put('workflow_history',{id:newId('history'),recordId:conversation.id,moduleId:'chat',sequence:history.filter((item)=>item.recordId===conversation.id).length+1,eventType:'edited',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,snapshot:{action:'hidden_for_user'},occurredAt:now} satisfies OperationalRecordHistory);
-      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:actor.companyId,category:'system',action:'communications.chat.hidden',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:`گفتگوی «${conversation.title}» از فهرست کاربر حذف شد.`,outcome:'success',correlationId,metadata:{conversationId:conversation.id}} satisfies AuditEvent);
+      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:actor.companyId,category:'system',action:'communications.chat.hidden',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:`گفتگوی «${conversation.title}» از فهرست کاربر حذف شد.`,outcome:'success',correlationId,metadata:{conversationId:conversation.id,chatId:conversation.id,projectId:projectId??null}} satisfies AuditEvent);
       await tx.put('domain_events',{id:newId('event'),aggregateType:'chat',aggregateId:conversation.id,eventType:'ChatHiddenForUser',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{userId:currentActor.id}} satisfies DomainEvent);
       await tx.put('meta',{id:'lastPersistedAt',value:now});
     });
@@ -820,12 +1085,14 @@ export class LocalFoundationService {
     const state = await this.loadState(); const actor = state.activeUser;
     if (state.session.actingAdminUserId) throw new Error('ثبت مشاهده گفتگو در حالت مشاهده آزمایشی مجاز نیست.');
     const now = new Date().toISOString(); const correlationId = newId('correlation');
-    await this.storage.transaction(['users','chats','messages','workflow_history','domain_events','meta'],'readwrite',async(tx)=>{
-      const [users,conversation,messages,history]=await Promise.all([
-        tx.getAll<LocalUser>('users'),tx.get<OperationalRecord>('chats',conversationId),tx.getAll<OperationalRecord>('messages'),tx.getAll<OperationalRecordHistory>('workflow_history'),
+    await this.storage.transaction(['users','security_roles','projects','chats','messages','workflow_history','domain_events','meta'],'readwrite',async(tx)=>{
+      const [rawUsers,roles,projects,conversation,messages,history]=await Promise.all([
+        tx.getAll<LocalUser>('users'),tx.getAll<SecurityRole>('security_roles'),tx.getAll<OperationalRecord>('projects'),tx.get<OperationalRecord>('chats',conversationId),tx.getAll<OperationalRecord>('messages'),tx.getAll<OperationalRecordHistory>('workflow_history'),
       ]);
-      const currentActor=users.find((user)=>user.id===actor.id&&user.status==='active'&&user.companyId===actor.companyId);
+      const currentActor=rawUsers.map((user)=>resolveUserAccess(user,roles)).find((user)=>user.id===actor.id&&user.status==='active'&&user.companyId===actor.companyId);
       if(!currentActor||!conversation||conversation.status!=='active'||!isChatMember(conversation,currentActor))throw new Error('این گفتگو در دسترس شما نیست.');
+      assertLinkedProjectChatAccess(currentActor,conversation,projects);
+      if(!can(currentActor,permissionFor('chat','view')))throw new Error('مجوز مشاهده این گفت‌وگو را ندارید.');
       const latestIncoming=messages.filter((message)=>message.relatedRecordId===conversation.id&&message.createdByUserId!==currentActor.id&&!chatMessageIsDeleted(message)).sort((a,b)=>b.createdAt.localeCompare(a.createdAt)||b.id.localeCompare(a.id))[0];
       if(!latestIncoming)return;
       const lastReadAt=chatReadAt(history,conversation.id,currentActor.id);
@@ -843,16 +1110,19 @@ export class LocalFoundationService {
     const title=input.title.trim();if(title.length<3)throw new Error('نام گروه باید حداقل ۳ نویسه باشد.');
     const requestedMembers=[...new Set(input.memberUserIds.filter(Boolean))];const requestedAdmins=[...new Set(input.adminUserIds.filter(Boolean))];
     const now=new Date().toISOString(),correlationId=newId('correlation');
-    await this.storage.transaction(['users','chats','workflow_history','notifications','audit_events','domain_events','meta'],'readwrite',async(tx)=>{
-      const [users,conversation,history,audits]=await Promise.all([tx.getAll<LocalUser>('users'),tx.get<OperationalRecord>('chats',conversationId),tx.getAll<OperationalRecordHistory>('workflow_history'),tx.getAll<AuditEvent>('audit_events')]);
-      const currentActor=users.find((user)=>user.id===actor.id&&user.status==='active'&&user.companyId===actor.companyId);
+    await this.storage.transaction(['users','security_roles','projects','chats','workflow_history','notifications','audit_events','domain_events','meta'],'readwrite',async(tx)=>{
+      const [rawUsers,roles,projects,conversation,history,audits]=await Promise.all([tx.getAll<LocalUser>('users'),tx.getAll<SecurityRole>('security_roles'),tx.getAll<OperationalRecord>('projects'),tx.get<OperationalRecord>('chats',conversationId),tx.getAll<OperationalRecordHistory>('workflow_history'),tx.getAll<AuditEvent>('audit_events')]);
+      const currentActor=rawUsers.map((user)=>resolveUserAccess(user,roles)).find((user)=>user.id===actor.id&&user.status==='active'&&user.companyId===actor.companyId);
       if(!currentActor||!conversation||conversation.version!==expectedVersion)throw new Error('این گروه هم‌زمان تغییر کرده است؛ دوباره باز کنید.');
       if(chatKind(conversation)!=='group'||!isChatMember(conversation,currentActor))throw new Error('این گروه در دسترس شما نیست.');
+      const projectId=assertLinkedProjectChatAccess(currentActor,conversation,projects);
+      if(!can(currentActor,permissionFor('chat','edit')))throw new Error('مجوز مدیریت این گفت‌وگو را ندارید.');
+      if(projectId)throw new Error('اعضا و نام گفت‌وگوی پروژه فقط از صفحه همان پروژه مدیریت می‌شوند.');
       const ownerUserId=chatOwnerUserId(conversation),currentAdmins=chatAdminUserIds(conversation);const isOwner=currentActor.id===ownerUserId,isAdmin=currentAdmins.includes(currentActor.id);
       if(!isOwner&&!isAdmin)throw new Error('فقط مالک یا مدیر گروه می‌تواند اعضا را مدیریت کند.');
       const memberUserIds=[...new Set([ownerUserId,...requestedMembers])].sort();
       if(memberUserIds.length<2)throw new Error('گروه باید دست‌کم دو عضو داشته باشد.');
-      const members=memberUserIds.map((id)=>users.find((user)=>user.id===id&&user.status==='active'&&user.companyId===actor.companyId));
+      const members=memberUserIds.map((id)=>rawUsers.find((user)=>user.id===id&&user.status==='active'&&user.companyId===actor.companyId));
       if(members.some((user)=>!user))throw new Error('یکی از اعضای انتخاب‌شده دیگر فعال یا هم‌شرکت نیست.');
       let adminUserIds=[...new Set([ownerUserId,...requestedAdmins])].filter((id)=>memberUserIds.includes(id)).sort();
       if(!isOwner){
@@ -866,7 +1136,7 @@ export class LocalFoundationService {
       await tx.put('chats',updated);
       await tx.put('workflow_history',{id:newId('history'),recordId:conversation.id,moduleId:'chat',sequence:history.filter((item)=>item.recordId===conversation.id).length+1,eventType:'edited',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,snapshot:{action:'group_updated',addedUserIds:added,removedUserIds:removed,adminUserIds,title},occurredAt:now} satisfies OperationalRecordHistory);
       for(const userId of added)await tx.put('notifications',{id:newId('notification'),userId,kind:'chat_message',title:`عضویت در ${title}`,message:`${currentActor.name} شما را به این گروه اضافه کرد.`,actorUserId:currentActor.id,relatedRecordId:conversation.id,relatedModuleId:'chat',dedupeKey:`chat-member-added:${conversation.id}:${userId}:${conversation.version+1}`,createdAt:now} satisfies UserNotification);
-      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:actor.companyId,category:'system',action:'communications.chat.group_updated',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:`اعضا یا مشخصات گروه «${conversation.title}» به‌روزرسانی شد.`,outcome:'success',correlationId,metadata:{conversationId:conversation.id,addedCount:added.length,removedCount:removed.length,adminCount:adminUserIds.length}} satisfies AuditEvent);
+      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:actor.companyId,category:'system',action:'communications.chat.group_updated',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:`اعضا یا مشخصات گروه «${conversation.title}» به‌روزرسانی شد.`,outcome:'success',correlationId,metadata:{conversationId:conversation.id,chatId:conversation.id,projectId:projectId??null,addedCount:added.length,removedCount:removed.length,adminCount:adminUserIds.length}} satisfies AuditEvent);
       await tx.put('domain_events',{id:newId('event'),aggregateType:'chat',aggregateId:conversation.id,eventType:'ChatGroupUpdated',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{addedUserIds:added,removedUserIds:removed,adminUserIds}} satisfies DomainEvent);
       await tx.put('meta',{id:'lastPersistedAt',value:now});
     });
@@ -878,17 +1148,19 @@ export class LocalFoundationService {
     if(state.session.actingAdminUserId)throw new Error('ویرایش پیام در حالت مشاهده آزمایشی مجاز نیست.');
     const body=bodyInput.trim();if(!body)throw new Error('متن ویرایش‌شده نمی‌تواند خالی باشد.');if(body.length>4000)throw new Error('متن پیام نباید بیشتر از ۴۰۰۰ نویسه باشد.');
     const now=new Date().toISOString(),correlationId=newId('correlation');
-    await this.storage.transaction(['users','chats','messages','workflow_history','audit_events','domain_events','meta'],'readwrite',async(tx)=>{
-      const [users,message,history,audits]=await Promise.all([tx.getAll<LocalUser>('users'),tx.get<OperationalRecord>('messages',messageId),tx.getAll<OperationalRecordHistory>('workflow_history'),tx.getAll<AuditEvent>('audit_events')]);
-      const currentActor=users.find((user)=>user.id===actor.id&&user.status==='active'&&user.companyId===actor.companyId);const conversation=message?.relatedRecordId?await tx.get<OperationalRecord>('chats',message.relatedRecordId):undefined;
+    await this.storage.transaction(['users','security_roles','projects','chats','messages','workflow_history','audit_events','domain_events','meta'],'readwrite',async(tx)=>{
+      const [rawUsers,roles,projects,message,history,audits]=await Promise.all([tx.getAll<LocalUser>('users'),tx.getAll<SecurityRole>('security_roles'),tx.getAll<OperationalRecord>('projects'),tx.get<OperationalRecord>('messages',messageId),tx.getAll<OperationalRecordHistory>('workflow_history'),tx.getAll<AuditEvent>('audit_events')]);
+      const currentActor=rawUsers.map((user)=>resolveUserAccess(user,roles)).find((user)=>user.id===actor.id&&user.status==='active'&&user.companyId===actor.companyId);const conversation=message?.relatedRecordId?await tx.get<OperationalRecord>('chats',message.relatedRecordId):undefined;
       if(!currentActor||!message||message.version!==expectedVersion||!conversation||!isChatMember(conversation,currentActor))throw new Error('این پیام هم‌زمان تغییر کرده یا دیگر در دسترس نیست.');
+      const projectId=assertLinkedProjectChatAccess(currentActor,conversation,projects);
+      if(!can(currentActor,permissionFor('message','edit')))throw new Error('مجوز ویرایش پیام را ندارید.');
       if(message.createdByUserId!==currentActor.id)throw new Error('فقط فرستنده می‌تواند پیام خودش را ویرایش کند.');
       if(chatMessageIsDeleted(message))throw new Error('پیام حذف‌شده قابل ویرایش نیست.');
       if(Date.parse(now)-Date.parse(message.createdAt)>CHAT_MESSAGE_EDIT_WINDOW_MS)throw new Error('مهلت ۱۵ دقیقه‌ای ویرایش پیام تمام شده است.');
       const updated={...message,title:body.slice(0,80),description:body,updatedByActorId:currentActor.actorId,updatedAt:now,version:message.version+1,payload:{...message.payload,editedAt:now,editCount:Number(message.payload.editCount??0)+1}};
       await tx.put('messages',updated);await tx.put('chats',{...conversation,updatedByActorId:currentActor.actorId,updatedAt:now,version:conversation.version+1});
       await tx.put('workflow_history',{id:newId('history'),recordId:message.id,moduleId:'message',sequence:history.filter((item)=>item.recordId===message.id).length+1,eventType:'edited',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,snapshot:{action:'message_edited',previousBodySha256:await sha256TextHex(message.description)},occurredAt:now} satisfies OperationalRecordHistory);
-      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:actor.companyId,category:'system',action:'communications.message.edited',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:`یک پیام در گفت‌وگوی «${conversation.title}» ویرایش شد.`,outcome:'success',correlationId,metadata:{conversationId:conversation.id,messageId:message.id}} satisfies AuditEvent);
+      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:actor.companyId,category:'system',action:'communications.message.edited',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:`یک پیام در گفت‌وگوی «${conversation.title}» ویرایش شد.`,outcome:'success',correlationId,metadata:{conversationId:conversation.id,chatId:conversation.id,projectId:projectId??null,messageId:message.id}} satisfies AuditEvent);
       await tx.put('domain_events',{id:newId('event'),aggregateType:'chat',aggregateId:conversation.id,eventType:'ChatMessageEdited',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{messageId:message.id}} satisfies DomainEvent);await tx.put('meta',{id:'lastPersistedAt',value:now});
     });
     return this.loadState();
@@ -898,10 +1170,12 @@ export class LocalFoundationService {
     const state=await this.loadState();const actor=state.activeUser;
     if(state.session.actingAdminUserId)throw new Error('حذف پیام در حالت مشاهده آزمایشی مجاز نیست.');
     const now=new Date().toISOString(),correlationId=newId('correlation');
-    await this.storage.transaction(['users','chats','messages','workflow_history','audit_events','domain_events','meta'],'readwrite',async(tx)=>{
-      const [users,message,history,audits]=await Promise.all([tx.getAll<LocalUser>('users'),tx.get<OperationalRecord>('messages',messageId),tx.getAll<OperationalRecordHistory>('workflow_history'),tx.getAll<AuditEvent>('audit_events')]);
-      const currentActor=users.find((user)=>user.id===actor.id&&user.status==='active'&&user.companyId===actor.companyId);const conversation=message?.relatedRecordId?await tx.get<OperationalRecord>('chats',message.relatedRecordId):undefined;
+    await this.storage.transaction(['users','security_roles','projects','chats','messages','workflow_history','audit_events','domain_events','meta'],'readwrite',async(tx)=>{
+      const [rawUsers,roles,projects,message,history,audits]=await Promise.all([tx.getAll<LocalUser>('users'),tx.getAll<SecurityRole>('security_roles'),tx.getAll<OperationalRecord>('projects'),tx.get<OperationalRecord>('messages',messageId),tx.getAll<OperationalRecordHistory>('workflow_history'),tx.getAll<AuditEvent>('audit_events')]);
+      const currentActor=rawUsers.map((user)=>resolveUserAccess(user,roles)).find((user)=>user.id===actor.id&&user.status==='active'&&user.companyId===actor.companyId);const conversation=message?.relatedRecordId?await tx.get<OperationalRecord>('chats',message.relatedRecordId):undefined;
       if(!currentActor||!message||message.version!==expectedVersion||!conversation||!isChatMember(conversation,currentActor))throw new Error('این پیام هم‌زمان تغییر کرده یا دیگر در دسترس نیست.');
+      const projectId=assertLinkedProjectChatAccess(currentActor,conversation,projects);
+      if(!can(currentActor,permissionFor('message','edit')))throw new Error('مجوز حذف پیام را ندارید.');
       if(message.createdByUserId!==currentActor.id)throw new Error('فقط فرستنده می‌تواند پیام خودش را حذف کند.');
       if(chatMessageIsDeleted(message))return;
       if(Date.parse(now)-Date.parse(message.createdAt)>CHAT_MESSAGE_EDIT_WINDOW_MS)throw new Error('مهلت ۱۵ دقیقه‌ای حذف پیام تمام شده است.');
@@ -909,7 +1183,7 @@ export class LocalFoundationService {
       const updated={...message,title:'پیام حذف‌شده',description:'',status:'cancelled',updatedByActorId:currentActor.actorId,updatedAt:now,version:message.version+1,payload:{...message.payload,attachment:null,deleted:true,deletedAt:now,deletedByUserId:currentActor.id}};
       await tx.put('messages',updated);await tx.put('chats',{...conversation,updatedByActorId:currentActor.actorId,updatedAt:now,version:conversation.version+1});
       await tx.put('workflow_history',{id:newId('history'),recordId:message.id,moduleId:'message',sequence:history.filter((item)=>item.recordId===message.id).length+1,eventType:'edited',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,snapshot:{action:'message_deleted',contentSha256:contentDigest,hadAttachment:Boolean(chatAttachment(message))},occurredAt:now} satisfies OperationalRecordHistory);
-      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:actor.companyId,category:'system',action:'communications.message.deleted',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:`یک پیام در گفت‌وگوی «${conversation.title}» حذف شد.`,outcome:'success',correlationId,metadata:{conversationId:conversation.id,messageId:message.id}} satisfies AuditEvent);
+      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:actor.companyId,category:'system',action:'communications.message.deleted',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:`یک پیام در گفت‌وگوی «${conversation.title}» حذف شد.`,outcome:'success',correlationId,metadata:{conversationId:conversation.id,chatId:conversation.id,projectId:projectId??null,messageId:message.id}} satisfies AuditEvent);
       await tx.put('domain_events',{id:newId('event'),aggregateType:'chat',aggregateId:conversation.id,eventType:'ChatMessageDeleted',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{messageId:message.id}} satisfies DomainEvent);await tx.put('meta',{id:'lastPersistedAt',value:now});
     });
     return this.loadState();
@@ -2708,9 +2982,12 @@ async setRoleStatus(roleId: string, expectedVersion: number, status: UserStatus)
 
   private async createOperationalRecordInternal(moduleId: string, input: OperationalRecordInput, allowSpecialized: boolean): Promise<FoundationState> {
     const module = ERP_MODULES.find((item) => item.id === moduleId); if (!module) throw new Error('ماژول عملیاتی پیدا نشد.');
+    if (['project','chat','message'].includes(moduleId)) throw new Error('این رکورد همکاری فقط از مسیر تخصصی خودش ایجاد می‌شود.');
     if (moduleId === 'recruitment-case' && !allowSpecialized) throw new Error('پرونده جذب فقط از مسیر اختصاصی اعلام نیاز نیرو قابل ایجاد است.');
     if (moduleId === 'personnel-document' && !allowSpecialized) throw new Error('مدرک پرسنلی فقط از بخش «مدارک پرسنلی» پرونده یا حساب خود فرد ثبت می‌شود.');
     if (moduleId === 'employee-advance') throw new Error('مساعده فقط از مسیر اختصاصی مساعده ثبت می‌شود.');
+    if (moduleId === 'task' && typeof input.payload?.projectId === 'string') throw new Error('کار پروژه فقط از میز همکاری ساخته می‌شود.');
+    if (['letter','document'].includes(moduleId) && typeof input.payload?.projectId === 'string') throw new Error('پیوند پروژه فقط پس از ساخت رکورد و از پرونده همان پروژه ثبت می‌شود.');
     const state = await this.loadState(); const effectiveUser = state.activeUser;
     requirePermission(effectiveUser, permissionFor(moduleId, 'create'), 'مجوز ایجاد رکورد در این ماژول را ندارید.');
     const preparedInput = moduleId === 'purchase-request' ? preparePurchaseRequestInput(state, input) : input;
@@ -2771,10 +3048,13 @@ async setRoleStatus(roleId: string, expectedVersion: number, status: UserStatus)
 
   async updateOperationalRecord(moduleId: string, recordId: string, expectedVersion: number, input: Partial<OperationalRecordInput>): Promise<FoundationState> {
     const module = ERP_MODULES.find((item) => item.id === moduleId); if (!module) throw new Error('ماژول عملیاتی پیدا نشد.');
+    if (['project','chat','message'].includes(moduleId)) throw new Error('این رکورد همکاری فقط از مسیر تخصصی خودش ویرایش می‌شود.');
     if (moduleId === 'personnel-document') throw new Error('جایگزینی مدرک فقط از بخش «مدارک پرسنلی» انجام می‌شود تا نسخه قبلی حفظ شود.');
     if (moduleId === 'employee-advance') throw new Error('ویرایش مساعده فقط از مسیر اختصاصی مساعده انجام می‌شود.');
     const state = await this.loadState(); const effectiveUser = state.activeUser; requirePermission(effectiveUser, permissionFor(moduleId, 'edit'), 'مجوز ویرایش این رکورد را ندارید.');
     const record = state.operationalRecords.find((item) => item.id === recordId && item.moduleId === moduleId); if (!record) throw new Error('رکورد پیدا نشد.');
+    if (moduleId === 'task' && taskProjectId(record)) throw new Error('کار پروژه فقط از میز همکاری و مسیر تخصصی پروژه ویرایش می‌شود.');
+    if (['letter','document'].includes(moduleId) && input.payload && Object.prototype.hasOwnProperty.call(input.payload,'projectId') && input.payload.projectId !== record.payload.projectId) throw new Error('اتصال یا قطع پیوند پروژه فقط از پرونده پروژه انجام می‌شود.');
     this.assertRecordScope(effectiveUser, record, 'edit'); if (record.version !== expectedVersion) throw new Error('این رکورد در تب دیگری تغییر کرده است. تازه‌سازی کنید و دوباره تلاش کنید.');
     if (moduleId === 'purchase-request' && !['draft', 'needs_correction'].includes(record.status)) throw new Error('ویرایش درخواست خرید فقط در پیش‌نویس یا وضعیت نیازمند اصلاح مجاز است.');
     if (moduleId === 'purchase-request' && record.createdByUserId !== effectiveUser.id) throw new Error('فقط سازنده درخواست خرید می‌تواند پیش‌نویس یا اصلاحات آن را ویرایش کند.');
@@ -2787,10 +3067,12 @@ async setRoleStatus(roleId: string, expectedVersion: number, status: UserStatus)
   }
 
   async transitionOperationalRecord(moduleId: string, recordId: string, transitionId: string, reason = '', idempotencyKey?: string): Promise<FoundationState> {
+    if (['project','chat','message'].includes(moduleId)) throw new Error('گردش این رکورد همکاری فقط از مسیر تخصصی خودش انجام می‌شود.');
     if (moduleId === 'personnel-document') throw new Error('گردش مدرک پرسنلی فقط از بخش تخصصی مدارک مدیریت می‌شود.');
     if (moduleId === 'employee-advance') throw new Error('تصمیم مساعده فقط از مسیر اختصاصی مساعده انجام می‌شود.');
     const module = ERP_MODULES.find((item) => item.id === moduleId); if (!module) throw new Error('ماژول عملیاتی پیدا نشد.');
     const state = await this.loadState(); const effectiveUser = state.activeUser; const record = state.operationalRecords.find((item) => item.id === recordId && item.moduleId === moduleId); if (!record) throw new Error('رکورد پیدا نشد.');
+    if (moduleId === 'task' && taskProjectId(record)) throw new Error('تغییر وضعیت کار پروژه فقط از میز همکاری انجام می‌شود.');
     const workflow = workflowForRecord(state, module, record);
     const transition = workflow.transitions.find((item) => item.id === transitionId && item.from.includes(record.status)); if (!transition) throw new Error('این انتقال از وضعیت فعلی مجاز نیست.');
     if (moduleId === 'purchase-request' && !['submitted','cancelled'].includes(transition.to)) throw new Error('تصمیم درخواست خرید فقط از مسیر اختصاصی بررسی و تأیید انجام می‌شود.');
@@ -3185,8 +3467,14 @@ async setRoleStatus(roleId: string, expectedVersion: number, status: UserStatus)
     if (moduleId === 'personnel-document') throw new Error('تخصیص مدرک پرسنلی از مسیر عمومی مجاز نیست.');
     if (moduleId === 'employee-advance') throw new Error('تخصیص مساعده فقط از مسیر اختصاصی و مرحله مصوب آن انجام می‌شود.');
     const module = ERP_MODULES.find((item) => item.id === moduleId); if (!module) throw new Error('ماژول عملیاتی پیدا نشد.');
-    const state = await this.loadState(); const effectiveUser = state.activeUser; requirePermission(effectiveUser, permissionFor(moduleId, 'manage'), 'مجوز تخصیص این رکورد را ندارید.');
-    const record = state.operationalRecords.find((item) => item.id === recordId); const target = state.users.find((item) => item.id === assigneeUserId && item.status === 'active'); if (!record || !target) throw new Error('رکورد یا کاربر مقصد معتبر نیست.'); if (reason.trim().length < 3) throw new Error('دلیل تخصیص را وارد کنید.');
+    const state = await this.loadState(); const effectiveUser = state.activeUser;
+    const record = state.operationalRecords.find((item) => item.id === recordId && item.moduleId === moduleId);
+    const target = state.users.find((item) => item.id === assigneeUserId && item.status === 'active' && item.companyId === effectiveUser.companyId);
+    if (!record || !target) throw new Error('رکورد یا کاربر مقصد معتبر نیست.');
+    const assignmentDecision=authorize({persona:effectiveUser,permission:permissionFor(record.moduleId,'manage'),action:'edit',resource:operationalRecordResource(effectiveUser,record)});
+    if(!assignmentDecision.allowed)throw new Error(assignmentDecision.reasonFa);
+    if (['project','chat','message'].includes(record.moduleId) || (record.moduleId === 'task' && taskProjectId(record))) throw new Error('تخصیص این رکورد همکاری فقط از میز همکاری و مسیر نسخه‌دار آن انجام می‌شود.');
+    if (reason.trim().length < 3) throw new Error('دلیل تخصیص را وارد کنید.');
     const updated = {...record, assigneeUserId: target.id, updatedByActorId: effectiveUser.actorId, version: record.version + 1, updatedAt: new Date().toISOString()}; const history = this.makeHistory(state, updated, effectiveUser, 'assigned', {reason, snapshot: {fromAssignee: record.assigneeUserId ?? null, toAssignee: target.id}});
     await this.persistOperationalChange(module.store, updated, history, effectiveUser, 'assigned', `«${record.title}» به ${target.name} تخصیص یافت.`, reason); return this.loadState();
   }
@@ -3383,7 +3671,7 @@ async setRoleStatus(roleId: string, expectedVersion: number, status: UserStatus)
     const snapshot = await this.storage.exportSnapshot();
     return password ? encryptSnapshot(snapshot, password) : snapshot;
   }
-  async importSnapshot(input: unknown, password?: string): Promise<FoundationState> { const before = await this.loadState(); let snapshot: SnapshotManifest; if (isEncryptedSnapshot(input)) {if (!password) throw new Error('این پشتیبان رمزگذاری شده است؛ رمز را وارد کنید.'); snapshot = await decryptSnapshot(input, password);} else {validateSnapshotShape(input); snapshot = input;} await this.storage.importSnapshot(snapshot); const restored = await this.loadState(); await this.appendAudit({actor: before.activeUser, effectiveUser: restored.activeUser, category: 'data', action: 'foundation.backup.restored', summary: 'داده محلی از فایل پشتیبان بازیابی شد.', outcome: 'success', metadata: {restoredSeedVersion: snapshot.seedVersion, restoredUserId: restored.activeUser.id}}); return this.loadState(); }
+  async importSnapshot(input: unknown, password?: string): Promise<FoundationState> { const before = await this.loadState(); let snapshot: SnapshotManifest; if (isEncryptedSnapshot(input)) {if (!password) throw new Error('این پشتیبان رمزگذاری شده است؛ رمز را وارد کنید.'); snapshot = await decryptSnapshot(input, password);} else {validateSnapshotShape(input); snapshot = input;} await this.storage.importSnapshot(snapshot); const restored = await this.initialize(); await this.appendAudit({actor: before.activeUser, effectiveUser: restored.activeUser, category: 'data', action: 'foundation.backup.restored', summary: 'داده محلی از فایل پشتیبان بازیابی شد.', outcome: 'success', metadata: {restoredSeedVersion: snapshot.seedVersion, restoredUserId: restored.activeUser.id}}); return this.loadState(); }
   async reset(): Promise<FoundationState> { const before = await this.loadState(); await this.storage.replaceAll(createSeedData()); const seededAdmin = (await this.storage.getAll<LocalUser>('users'))[0]; await this.appendAudit({actor: before.activeUser, effectiveUser: seededAdmin, category: 'data', action: 'foundation.local.reset', summary: 'داده‌های محلی به سناریوی قطعی ERP V1 بازنشانی شد.', reason: 'بازنشانی دستی پذیرش محصول', outcome: 'success', metadata: {seedVersion: FOUNDATION_SEED_VERSION}}); return this.loadState(); }
 
   async recordPersonnelExport(personnelCount: number, movementCount: number, includesBanking: boolean): Promise<FoundationState> {
@@ -3722,6 +4010,22 @@ export function userConcurrencyToken(user: LocalUser) {
 
 function projectUserSecurityState(user:LocalUser):LocalUser {
   return {...user,secondaryPasswordHash:undefined,secondaryPasswordOtpHash:undefined,secondaryPasswordOtpExpiresAt:undefined,secondaryPasswordOtpRequestedAt:undefined,secondaryPasswordOtpAttempts:undefined,secondaryPasswordFailedAttempts:undefined,secondaryPasswordLockedUntil:undefined,hasSecondaryPassword:Boolean(user.secondaryPasswordHash)};
+}
+
+function linkedProjectIdForChat(chat:OperationalRecord,projects:OperationalRecord[]):string|undefined {
+  if(chat.moduleId!=='chat')return undefined;
+  if(typeof chat.payload.projectId==='string'&&chat.payload.projectId)return chat.payload.projectId;
+  return chat.relatedRecordId&&projects.some((project)=>project.moduleId==='project'&&project.id===chat.relatedRecordId)
+    ? chat.relatedRecordId
+    : undefined;
+}
+
+function assertLinkedProjectChatAccess(actor:LocalUser,chat:OperationalRecord,projects:OperationalRecord[]):string|undefined {
+  const projectId=linkedProjectIdForChat(chat,projects);
+  if(!projectId)return undefined;
+  const project=projects.find((candidate)=>candidate.id===projectId&&candidate.moduleId==='project');
+  if(!project||project.companyId!==actor.companyId||!isProjectMember(project,actor)||!authorize({persona:actor,permission:permissionFor('project','view'),action:'view',resource:operationalRecordResource(actor,project)}).allowed)throw new Error('گفت‌وگوی این پروژه دیگر در دسترس شما نیست.');
+  return projectId;
 }
 
 const PROTECTED_FINANCIAL_DOMAINS = new Set(['finance', 'treasury', 'accounting']);

@@ -1,10 +1,10 @@
 # ماتریس قابلیت‌ها و شواهد
 
-> **آخرین تطبیق:** شاخه مستقل `fix/ocr-blockers-20260824` با پایه `feature/workflow-management@a0f02dd`، 2026-08-24
+> **آخرین تطبیق:** baseline محلی پایدار روی شاخه قابلیت `codex/shahrah-collaboration-hub` و طراحی هاب همکاری، 2026-08-27
 
 ## روش خواندن
 
-`Verified` یعنی رفتار با تست/اجرای این بازبینی تأیید شده است. `Implemented-Unverified` یعنی تعریف، UI یا use-case در کد هست، اما آزمون مستقیم کامل هر جریان انجام نشده است. همه APIهای این جدول متد محلی `LocalFoundationService` هستند؛ Backend/HTTP API و external side effect وجود ندارد.
+`Verified` یعنی رفتار با تست/اجرای این بازبینی تأیید شده است. `Implemented-Unverified` یعنی تعریف، UI یا use-case در کد هست، اما آزمون مستقیم کامل هر جریان انجام نشده است. `In progress` یعنی طراحی یا پیاده‌سازی روی شاخه قابلیت جریان دارد و هنوز قرارداد پذیرش کامل نشده است. `Planned` یعنی در سند محصول تعریف شده اما در runtime فعلی قابل استفاده نیست. همه APIهای این جدول متد محلی `LocalFoundationService` هستند؛ Backend/HTTP API و external side effect وجود ندارد.
 
 ## قابلیت‌های تخصصی و Foundation
 
@@ -32,6 +32,25 @@
 | مساعده | پرسنل/مدیر شعبه/حسابداری/تأییدکننده/خزانه | `EmployeeAdvanceUi.tsx` | create/update/decide | branch scope، route، correction، version | `employeeAdvance.test.ts` — `Verified` | سقف و تعداد محدود نشده |
 | مدیریت گردش‌کار | Workflow Admin | `WorkflowAdminPage.tsx` | `updateWorkflowPolicy` | version، route overlap، state-machine protected | `workflowPolicy.test.ts` — `Verified` | ویرایش آزاد state ممنوع |
 | رکورد عمومی ERP | اپراتورهای دامنه | `ErpWorkspacePage.tsx` | create/update/transition/assign | permission/scope/maker-checker | catalog/auth tests — `Verified` | payload و UI عمومی است |
+
+## هاب همکاری شاهراه V1
+
+این بخش وضعیت قابلیت جدید را از baseline موجود جدا می‌کند. مرجع قرارداد `docs/product/collaboration-hub-v1.md` و تصمیم معماری `ADR-016` است. هیچ ردیف `In progress` یا `Planned` به معنی قابل استفاده بودن در runtime نیست.
+
+> **به‌روزرسانی نهایی شاخه قابلیت — ۲۰۲۶/۰۸/۲۷:** Project Hub، Task تخصصی، داشبورد/فیلترهای همکاری، گفت‌وگوی دقیق پروژه، فعالیت اخیر، منابع پیوندخورده و preference شخصی گفتگو در runtime محلی `Verified` هستند. Gate کامل، ۵۱ سناریوی مرورگر و دو بازبینی مستقل بدون blocker پاس شدند. Realtime، حضور آنلاین، Push و فایل مرکزی همچنان عمداً خارج از نسخهٔ محلی‌اند.
+
+| جزء | استفاده مجدد/منبع حقیقت | وضعیت فعلی | شاهد یا شرط خروج |
+|---|---|---|---|
+| گفت‌وگوی شخصی، گروهی و واحدی | `chats` + `messages` و سرویس تخصصی فعلی | `Verified` baseline | `communications.test.ts` و Playwrightهای ثبت‌شده در ممیزی اولویت‌ها |
+| نامه‌نگاری و دبیرخانه | `letters` و سرویس تخصصی فعلی | `Verified` baseline | `letters.test.ts` و سناریوهای مرورگر ثبت‌شده |
+| وظیفه عمومی و تخصصی پروژه | `tasks` و workflow نسخه‌دار `task` | `Verified` | command تخصصی، checklist، label، reminder، blocked/reopen و denied path |
+| ADR و قرارداد محصول هاب | `ADR-016` + `collaboration-hub-v1.md` | `Verified (Local-first)` | Gate کامل، migration، آزمون‌های مثبت/منفی و بازبینی مستقل |
+| Project Hub و عضویت صریح | module/store `project`/`projects` | `Verified (Local-first)` | denied path، persistence، concurrency، rollback و migration 11→12 |
+| Task تخصصی پروژه | store فعلی `tasks` + command/UI تخصصی | `Verified (Local-first)` | checklist، label، board/list و ساخت اتمیک چندمسئولی |
+| داشبورد همکاری | selector مشتق از Project/Task/History | `Verified (Local-first)` | امروز، عقب‌افتاده، مسدود، واگذارشده و فعالیت اخیر بدون projection موازی |
+| اتصال Project به Chat/Letter/Document | `payload.projectId` و سرویس‌های تخصصی موجود | `Verified (Local-first)` | visibility intersection، پیوند/قطع پیوند و بازکردن مقصد تخصصی |
+| پین/بی‌صداکردن گفتگو | store `chat_preferences` | `Verified (Local-first)` | preference شخصی versioned، persistence و عدم تغییر عضویت |
+| realtime، presence، Push و فایل مرکزی | نیازمند Server/API/Object Storage | `Planned` برای مرحله Server؛ خارج از V1 محلی | ADR سرور، auth سمت سرور و UAT چندکاربره |
 
 ## ۶۷ ماژول Registry
 
