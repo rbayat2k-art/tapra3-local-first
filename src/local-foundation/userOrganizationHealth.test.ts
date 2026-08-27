@@ -38,4 +38,31 @@ describe('userOrganizationHealth', () => {
     const health = userOrganizationHealth(user, {...state, users: state.users.map((item) => item.id === user.id ? user : item)});
     expect(health.issues).toEqual(expect.arrayContaining(['invalid-role', 'invalid-manager', 'legacy-direct-grant']));
   });
+
+  it('finds duplicate identity links, company drift, and organization projection drift', () => {
+    const state = healthState();
+    const original = state.users.find((item) => item.id === 'persona-seller')!;
+    const personnel = state.personnel.find((item) => item.id === original.personnelId)!;
+    const duplicatePersonnel = {...personnel, id: 'personnel-duplicate-link', personnelCode: 'P-DUPLICATE'};
+    const duplicateUser = {...original, id: 'user-duplicate-link', actorId: 'actor-duplicate-link', username: 'duplicate.link'};
+    const driftedPersonnel = {...personnel, companyId: 'other-company', branchUnitId: 'branch-other', managerPersonnelId: undefined};
+    const user = {...original, branchUnitId: 'branch-current', managerUserId: 'persona-product-owner'};
+    const health = userOrganizationHealth(user, {
+      ...state,
+      users: state.users.map((item) => item.id === user.id ? user : item).concat(duplicateUser),
+      personnel: state.personnel.map((item) => item.id === personnel.id ? driftedPersonnel : item).concat(duplicatePersonnel),
+    });
+    expect(health.issues).toEqual(expect.arrayContaining([
+      'duplicate-personnel-link',
+      'duplicate-user-link',
+      'company-mismatch',
+      'branch-assignment-mismatch',
+      'manager-assignment-mismatch',
+    ]));
+  });
+
+  it('keeps the deterministic seed free of identity and organization health issues', () => {
+    const state = healthState();
+    expect(state.users.flatMap((user) => userOrganizationHealth(user, state).issues.map((issue) => `${user.id}:${issue}`))).toEqual([]);
+  });
 });

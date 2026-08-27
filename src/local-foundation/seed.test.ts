@@ -1,6 +1,6 @@
 import {describe, expect, it} from 'vitest';
 import {FOUNDATION_STORES} from './model';
-import {createSeedData, LOCAL_USERS, ORGANIZATIONAL_POSITIONS, ORGANIZATIONAL_UNITS, PERSONNEL_RECORDS, QA_PERSONAS, resolveUserAccess, SALES_STRUCTURES, SECURITY_ROLES, SEED_TIME} from './seed';
+import {ADMINISTRATIVE_ADVANCE_REQUESTER_USER_IDS, createSeedData, LOCAL_USERS, ORGANIZATIONAL_POSITIONS, ORGANIZATIONAL_UNITS, PERSONNEL_RECORDS, QA_PERSONAS, resolveUserAccess, SALES_STRUCTURES, SECURITY_ROLES, SEED_TIME} from './seed';
 import {salesStructureHasAssignmentHistory, salesStructureSupervisorName} from './salesStructureIdentity';
 import {positionIdForSalesHierarchy} from './salesPersonnelIdentity';
 import {isValidQaNationalId} from './qaPersonnelCompletion';
@@ -31,7 +31,7 @@ describe('deterministic local seed', () => {
     expect(admin.roleTitle).toBe('ادمین');
     expect(admin.permissions).toContain('foundation.users.qa_login');
     expect(seller.permissions).not.toContain('foundation.users.qa_login');
-    expect(LOCAL_USERS.some((item) => item.status === 'inactive')).toBe(true);
+    expect(LOCAL_USERS.filter((item) => item.personnelId).every((item) => item.status === 'active')).toBe(true);
   });
 
   it('applies denials but quarantines legacy direct grants without mutating the role bundle', () => {
@@ -98,6 +98,30 @@ describe('deterministic local seed', () => {
       expect(ORGANIZATIONAL_POSITIONS.some((position) => position.id === user.positionId)).toBe(true);
       expect(user.roleIds.length).toBeGreaterThan(0);
       expect(user.passwordHash).toMatch(/^pbkdf2\$120000\$/);
+    }
+  });
+
+  it('gives every approved administrative employee own-only advance access', () => {
+    const requesterRole = SECURITY_ROLES.find((role) => role.id === 'role-employee-advance-requester')!;
+    expect(requesterRole.scope).toBe('SELF');
+    for (const userId of ADMINISTRATIVE_ADVANCE_REQUESTER_USER_IDS) {
+      const user = LOCAL_USERS.find((item) => item.id === userId);
+      expect(user, `${userId} باید در داده نمونه وجود داشته باشد`).toBeDefined();
+      expect(user?.status).toBe('active');
+      expect(user?.roleIds).toContain('role-employee-advance-requester');
+      expect(user?.permissionEntitlements?.some((item) => item.sourceRoleId === 'role-employee-advance-requester' && item.scope === 'SELF')).toBe(true);
+    }
+    expect(LOCAL_USERS.find((item) => item.id === 'persona-auditor')?.roleIds).not.toContain('role-employee-advance-requester');
+  });
+
+  it('has a valid active responsible user for every staffed unit and every branch', () => {
+    const staffedUnitIds = new Set(PERSONNEL_RECORDS.filter((person) => person.employmentStatus === 'active').map((person) => person.unitId));
+    for (const unit of ORGANIZATIONAL_UNITS.filter((item) => item.type === 'شعبه' || staffedUnitIds.has(item.id))) {
+      const manager = LOCAL_USERS.find((user) => user.id === unit.managerUserId);
+      expect(manager, `${unit.name} باید مسئول مشخص داشته باشد`).toBeDefined();
+      expect(manager?.status).toBe('active');
+      if (unit.type === 'شعبه') expect(manager?.roleIds).toContain('role-advance-branch-manager');
+      else expect(PERSONNEL_RECORDS.find((person) => person.id === manager?.personnelId)?.unitId).toBe(unit.id);
     }
   });
 

@@ -15,7 +15,7 @@ import {workspaceParam, workspaceRouteUrl, type WorkspaceRouteUpdate} from './na
 import {RecordDialog} from './RecordDialog';
 import {userDisplayLabel} from './personIdentity';
 import {EmployeeAdvanceDrawer, EmployeeAdvanceEditor, EmployeeAdvanceTable} from './EmployeeAdvanceUi';
-import {advanceBeneficiaryName, isEmployeeAdvanceVisible} from './employeeAdvance';
+import {advanceBeneficiaryName, canProxyAdvance, isEmployeeAdvanceVisible, personnelAdvanceEligibility} from './employeeAdvance';
 import {workflowWithActivePolicy} from './workflowPolicy';
 import {AssetCustodyDrawer, AssetCustodyEditor} from './AssetCustodyUi';
 import {OffboardingDrawer, StructuredPayloadDetails, StructuredRecordEditor, structuredOperationalModules} from './LifecycleOperationsUi';
@@ -68,6 +68,7 @@ export function ErpWorkspacePage({state, moduleIds, service, execute, routeUrl =
     && (moduleId !== 'treasury-execution' || isTreasuryRecordVisibleToUser(item, state))
     && (moduleId !== 'employee-advance' || isEmployeeAdvanceVisible(item, state))
     && authorize({persona: state.activeUser, permission: permissionFor(moduleId, 'view'), action: 'view', resource: operationalRecordResource(state.activeUser, item)}).allowed).length;
+  const hasEligibleAdvanceBeneficiary = active.id !== 'employee-advance' || state.personnel.some((person) => person.employmentStatus === 'active' && personnelAdvanceEligibility(person).allowed && (person.id === state.activeUser.personnelId || canProxyAdvance(state.activeUser, person, state)));
   const updateWorkspaceUrl = (update: WorkspaceRouteUpdate) => {
     const nextUrl = workspaceRouteUrl(routeUrl, update);
     if (onRouteChange) onRouteChange(nextUrl);
@@ -75,7 +76,8 @@ export function ErpWorkspacePage({state, moduleIds, service, execute, routeUrl =
   };
   return (
     <div className="page-stack erp-workspace">
-      <section className="page-intro erp-intro"><div className="page-intro__icon"><FileClock size={24}/></div><div><span className="eyebrow">گردش‌کار عملیاتی · نسخه‌دار</span><h2>{active.group}</h2><p>{active.description}</p></div><div className="erp-intro__actions"><span className="scope-badge">{state.activeUser.roleTitle}</span>{active.id !== 'offboarding' && can(state.activeUser, permissionFor(active.id,'create')) && <button className="button button--primary" onClick={() => setEditing('new')}><Plus size={18}/> ایجاد {active.singular}</button>}</div></section>
+      <section className="page-intro erp-intro"><div className="page-intro__icon"><FileClock size={24}/></div><div><span className="eyebrow">گردش‌کار عملیاتی · نسخه‌دار</span><h2>{active.group}</h2><p>{active.description}</p></div><div className="erp-intro__actions"><span className="scope-badge">{state.activeUser.roleTitle}</span>{active.id !== 'offboarding' && can(state.activeUser, permissionFor(active.id,'create')) && hasEligibleAdvanceBeneficiary && <button className="button button--primary" onClick={() => setEditing('new')}><Plus size={18}/> ایجاد {active.singular}</button>}</div></section>
+      {active.id === 'employee-advance' && can(state.activeUser, permissionFor(active.id,'create')) && !hasEligibleAdvanceBeneficiary && <div className="decision-note"><CircleAlert size={19}/><div><strong>ثبت درخواست جدید فعلاً مجاز نیست</strong><span>استحقاق مساعده در پرونده پرسنلی شما یا همه افراد تحت پوشش متوقف شده است. درخواست‌های قبلی همچنان قابل پیگیری هستند.</span></div></div>}
       <div className="module-tabs" role="tablist" aria-label="زیربخش‌ها">{visible.map((module) => <button role="tab" aria-selected={module.id===active.id} className={module.id===active.id?'active':''} key={module.id} onClick={() => {
         if (module.id !== active.id && onOpenModule) {onOpenModule(module.id);return;}
         setActiveId(module.id);setSelected(null);setTreasuryEditRequested(false);setStatus('all');setCartableId('');setQuery('');updateWorkspaceUrl({module:module.id,cartable:null,status:null,q:null});onNavigateModule?.(module.id);

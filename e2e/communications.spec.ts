@@ -64,6 +64,24 @@ test('گفت‌وگوی شخصی با هویت متمایز، متن، فایل 
   await page.reload();
   await expect(page.locator('.chat-message--mine')).toHaveCount(3);
 
+  const firstMessage=page.locator('.chat-message--mine').first();
+  await firstMessage.getByRole('button',{name:'پاسخ به پیام'}).click();
+  await expect(composer).toContainText('پاسخ به پیام');
+  await composer.getByRole('textbox',{name:'متن پیام'}).fill('پاسخ آزمایشی به پیام اول');
+  await composer.getByRole('button',{name:'ارسال پیام'}).click();
+  const replyMessage=page.locator('.chat-message--mine').last();
+  await expect(replyMessage.locator('.chat-reply-quote')).toContainText('فایل برنامه');
+  await replyMessage.getByRole('button',{name:'ویرایش پیام'}).click();
+  await composer.getByRole('textbox',{name:'ویرایش متن پیام'}).fill('پاسخ ویرایش‌شده به پیام اول');
+  await composer.getByRole('button',{name:'ثبت ویرایش'}).click();
+  await expect(replyMessage).toContainText('پاسخ ویرایش‌شده');
+  await expect(replyMessage).toContainText('ویرایش‌شده');
+  await replyMessage.getByRole('button',{name:'حذف پیام برای همه'}).click();
+  const deleteDialog=page.getByRole('dialog',{name:'حذف پیام برای همه'});
+  await expect(deleteDialog).toContainText('اثرانگشت محتوا');
+  await deleteDialog.getByRole('button',{name:'حذف برای همه'}).click();
+  await expect(page.locator('.chat-message--deleted')).toContainText('این پیام توسط فرستنده حذف شده است');
+
   await page.getByRole('button',{name:'جست‌وجو در پیام‌ها و فایل‌ها'}).click();
   const messageSearch=page.getByRole('textbox',{name:'جست‌وجو در پیام‌ها و نام فایل‌ها'});
   await messageSearch.fill('plan.txt');
@@ -94,4 +112,32 @@ test('گفت‌وگوی شخصی با هویت متمایز، متن، فایل 
   await expect(hideDialog).toContainText('برای طرف مقابل یا اعضای گروه حذف نمی‌شوند');
   await hideDialog.getByRole('button',{name:'حذف از فهرست من'}).click();
   await expect(page.locator('.chat-thread-header')).toHaveCount(0);
+});
+
+test('مالک گروه اعضا و مدیران را با جست‌وجوی هویتی مدیریت می‌کند',async({page})=>{
+  test.setTimeout(60_000);
+  await enterAsAdmin(page);
+  await page.getByRole('button',{name:/گفت‌وگوی جدید/}).first().click();
+  const createDialog=page.getByRole('dialog',{name:'ساخت گفت‌وگوی جدید'});
+  await createDialog.getByRole('radio',{name:'گروهی'}).click();
+  await createDialog.getByLabel('نام گروه').fill('گروه ممیزی محلی');
+  const memberSearch=createDialog.getByRole('textbox',{name:'جست‌وجوی شخص یا عضو'});
+  await memberSearch.fill('s.moradi');
+  await createDialog.locator('.chat-member-picker label').filter({hasText:'@s.moradi'}).filter({hasNotText:'@s.moradi.sales'}).locator('input').check();
+  await createDialog.getByRole('button',{name:'ساخت گفت‌وگو'}).click();
+  await expect(page.locator('.chat-thread-header')).toContainText('گروه ممیزی محلی');
+
+  await page.getByRole('button',{name:'مدیریت اعضا و مدیران گروه'}).click();
+  const manageDialog=page.getByRole('dialog',{name:'مدیریت اعضا و مدیران گروه'});
+  await expect(manageDialog).toContainText('به‌عنوان مالک');
+  const groupSearch=manageDialog.getByRole('textbox',{name:'جست‌وجوی اعضای گروه'});
+  await groupSearch.fill('s.moradi');
+  const currentMember=manageDialog.locator('.chat-group-member').filter({hasText:'@s.moradi'}).filter({hasNotText:'@s.moradi.sales'});
+  await currentMember.getByText('مدیر گروه').locator('..').locator('input').check();
+  await groupSearch.fill('p.javadi');
+  await manageDialog.locator('.chat-group-member').filter({hasText:'@p.javadi'}).locator('input').first().check();
+  await manageDialog.getByRole('button',{name:'ذخیره تغییرات گروه'}).click();
+  await expect(page.locator('.chat-thread-header')).toContainText('۳ عضو');
+  await page.reload();
+  await expect(page.locator('.chat-thread-header')).toContainText('گروه ممیزی محلی');
 });

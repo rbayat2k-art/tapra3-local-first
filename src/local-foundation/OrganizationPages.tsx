@@ -18,6 +18,7 @@ import {activeActingManager, effectiveUnitManagerUserId, flattenOrganizationUnit
 import {positionUsage} from './positionUsage';
 import {permissionDomainLabel, roleAttentionLabel, roleInsight} from './roleInsights';
 import {organizationActionItems, type OrganizationActionItem} from './organizationActionCenter';
+import {normalizeNavigationText} from './navigationDiscovery';
 
 export type FoundationExecutor = (label: string, work: () => Promise<FoundationState>, success: string) => Promise<boolean>;
 
@@ -258,18 +259,24 @@ export function RolesPage({state, service, execute}: PageProps) {
     {key: 'users', kind: 'number', value: (item) => state.users.filter((user) => user.roleIds.includes(item.id)).length},
   ], [state.users]);
   const filteredRoles = useMemo(() => {
-    const search = query.trim().toLocaleLowerCase('fa-IR');
-    return state.roles.filter((role) => {
+    const search = normalizeNavigationText(query);
+    const filteredByStatus = state.roles.filter((role) => {
       const insight = insightByRoleId.get(role.id)!;
       if (filter === 'assigned' && !insight.users.length) return false;
       if (filter === 'unused' && !insight.attention.includes('unused')) return false;
       if (filter === 'protected' && !insight.protectedAccess) return false;
       if (filter === 'attention' && !insight.attention.length) return false;
-      if (!search) return true;
+      return true;
+    });
+    if (!search) return filteredByStatus;
+    const directMatches = filteredByStatus.filter((role) => normalizeNavigationText(`${role.name} ${role.description}`).includes(search));
+    if (directMatches.length) return directMatches;
+    return filteredByStatus.filter((role) => {
+      const insight = insightByRoleId.get(role.id)!;
       const permissionText = role.permissions.map(permissionLabel).join(' ');
       const domainText = insight.domains.map((domain) => domain.label).join(' ');
       const userText = insight.users.map((user) => userDisplayLabel(user, state)).join(' ');
-      return `${role.name} ${role.description} ${scopeLabel(role.scope)} ${role.status === 'active' ? 'فعال' : 'غیرفعال'} ${permissionText} ${role.permissions.join(' ')} ${domainText} ${userText}`.toLocaleLowerCase('fa-IR').includes(search);
+      return normalizeNavigationText(`${role.name} ${role.description} ${scopeLabel(role.scope)} ${role.status === 'active' ? 'فعال' : 'غیرفعال'} ${permissionText} ${role.permissions.join(' ')} ${domainText} ${userText}`).includes(search);
     });
   }, [filter, insightByRoleId, query, state]);
   const {sortedRows: sortedRoles, sort: roleSort, requestSort: requestRoleSort} = useSortableRows(filteredRoles, roleSortColumns, 'role', 'asc');

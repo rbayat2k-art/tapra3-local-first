@@ -16,6 +16,7 @@ import {RecordDialog} from './RecordDialog';
 import {formatPortalAmount, normalizeBankCard} from '../utils/operationalFormat';
 import {canRequestTreasuryFollowUp} from './purchaseFollowUp';
 import {decisionsForWorkflowState, roleIdsForWorkflowState} from './workflowPolicy';
+import {readFinancialPaymentProgress} from './financialCore';
 
 type Execute = (label: string, work: () => Promise<FoundationState>, success: string) => Promise<boolean>;
 const today = () => new Date().toISOString().slice(0, 10);
@@ -23,7 +24,7 @@ const newId = (prefix: string) => `${prefix}-${globalThis.crypto?.randomUUID?.()
 const rial = (value: string | bigint | undefined) => `${BigInt(value || '0').toLocaleString('en-US')} ریال`;
 const groupedNumber = (value: string | undefined) => value ? formatPortalAmount(value) : '';
 const priorityLabel = (value: OperationalRecord['priority']) => ({low: 'کم', normal: 'عادی', high: 'زیاد', critical: 'بحرانی'})[value];
-const tone = (status: string) => ['purchase_approved', 'sent_to_treasury'].includes(status) ? 'good' : ['rejected', 'cancelled'].includes(status) ? 'danger' : status === 'draft' ? 'neutral' : 'progress';
+const tone = (status: string) => ['purchase_approved', 'sent_to_treasury', 'paid'].includes(status) ? 'good' : ['rejected', 'cancelled'].includes(status) ? 'danger' : status === 'draft' ? 'neutral' : 'progress';
 
 const emptyLine = (): PurchaseRequestLine => ({id: newId('line'), title: '', category: '', specification: '', quantity: '1', unit: 'عدد', estimatedUnitPriceRial: '', preferredSupplier: ''});
 const emptyAllocation = (): PurchaseRequestAllocation => ({id: newId('allocation'), branchUnitId: '', costCenterUnitId: '', amountRial: '', note: ''});
@@ -185,7 +186,7 @@ export function PurchaseRequestDrawer({state, record, module, service, execute, 
     setErrors(next);
     if (next.length) return;
     const message = decision === 'approve_and_forward' ? 'درخواست تأیید و به مقصد بعدی ارجاع شد.' : decision === 'needs_correction' ? 'درخواست برای اصلاح به کارتابل درخواست‌کننده بازگشت.' : 'درخواست رد و بسته شد.';
-    void execute('purchase-decision', () => service.decidePurchaseRequest(record.id, decision, assignee, reason), message).then((succeeded) => {if (succeeded) {setReason(''); setAssignee(''); setErrors([]);}});
+    void execute('purchase-decision', () => service.decidePurchaseRequest(record.id, decision, assignee, reason, record.version), message).then((succeeded) => {if (succeeded) {setReason(''); setAssignee(''); setErrors([]);}});
   };
   return <RecordDialog ariaLabel={`جزئیات ${record.title}`} className="purchase-drawer" onClose={onClose}><header><div><span className="eyebrow">{record.trackingCode}</span><h2>{record.title}</h2><p>{record.description}</p></div><button className="icon-button" onClick={onClose} aria-label="بستن"><X size={20}/></button></header><div className="drawer-body">
     <div className="record-status-hero"><span className={`state-badge state-badge--${tone(record.status)}`}>{stateLabel(module.workflow, record.status)}</span><span>نسخه {record.version.toLocaleString('en-US')}</span><span>{priorityLabel(record.priority)}</span><strong>{rial(record.amountRial)}</strong></div>
@@ -200,8 +201,10 @@ export function PurchaseRequestDrawer({state, record, module, service, execute, 
 
 export function PurchaseRequestDetails({state, record, revealBeneficiaryCard = false}: {state: FoundationState; record: OperationalRecord; revealBeneficiaryCard?: boolean}) {
   const payload = readPurchaseRequestPayload(record.payload);
+  const paymentProgress = readFinancialPaymentProgress(record);
   return <>
     <div className="purchase-summary-grid"><span>تاریخ درخواست<strong>{payload.requestDate ? formatPersianDate(payload.requestDate) : '—'}</strong></span><span>تاریخ موردنیاز<strong>{record.dueAt ? formatPersianDate(record.dueAt) : '—'}</strong></span><span>نوع خرید<strong>{{goods: 'کالا', service: 'خدمت', mixed: 'کالا و خدمت'}[payload.purchaseType]}</strong></span><span>درخواست‌کننده<strong>{state.users.find((user) => user.id === record.createdByUserId)?.name ?? '—'}</strong></span></div>
+    {paymentProgress && <section className="financial-progress" aria-label="پیشرفت پرداخت درخواست"><div><span>سهم‌های پرداخت‌شده</span><strong>{paymentProgress.paidCount.toLocaleString('en-US')} از {paymentProgress.obligationCount.toLocaleString('en-US')}</strong></div><div><span>مبلغ پرداخت‌شده</span><strong>{rial(paymentProgress.paidRial)}</strong></div><div><span>وضعیت تعهد</span><strong>{paymentProgress.complete ? 'تسویه کامل' : 'در انتظار تکمیل پرداخت'}</strong></div></section>}
     <section className="purchase-detail-section"><h3>ردیف‌های خرید</h3><div className="purchase-detail-table"><div className="purchase-detail-table__head"><span>ردیف</span><span>شرح</span><span>مقدار</span><span>قیمت واحد</span><span>جمع</span></div>{payload.lines.map((line, index) => <div key={line.id}><span>{(index + 1).toLocaleString('en-US')}</span><span><strong>{line.title}</strong><small>{line.category} · {line.specification || 'بدون مشخصات تکمیلی'}</small></span><span>{Number(line.quantity).toLocaleString('en-US')} {line.unit}</span><span>{rial(line.estimatedUnitPriceRial)}</span><span>{rial(purchaseLineTotal(line))}</span></div>)}</div></section>
     <section className="purchase-detail-section"><h3>تقسیم مالی شعب</h3><div className="allocation-cards">{payload.allocations.map((item, index) => <article key={item.id}><i>{(index + 1).toLocaleString('en-US')}</i><Building2 size={18}/><span>شعبه<strong>{state.units.find((unit) => unit.id === item.branchUnitId)?.name ?? '—'}</strong></span><Landmark size={18}/><span>مرکز هزینه<strong>{state.units.find((unit) => unit.id === item.costCenterUnitId)?.name ?? '—'}</strong></span><b>{rial(item.amountRial)}</b>{item.note && <small>{item.note}</small>}</article>)}</div></section>
     <section className="purchase-detail-section"><h3>پیش‌فاکتور و اطلاعات پرداخت</h3><div className="quotation-payment-summary"><span>نام خانوادگی صاحب کارت<strong>{payload.beneficiaryLastName || '—'}</strong></span><span>{revealBeneficiaryCard ? 'شماره کارت مقصد پرداخت' : 'شماره کارت'}<strong dir="ltr">{revealBeneficiaryCard ? visibleCard(payload.beneficiaryCardNumber) : maskedCard(payload.beneficiaryCardNumber)}</strong>{revealBeneficiaryCard && <small>نمایش کامل فقط برای مجری همین پرداخت</small>}</span></div>{payload.quotationAttachments.length > 0 ? <div className="quote-cards">{payload.quotationAttachments.map((attachment) => <article key={attachment.id}>{attachment.mimeType.startsWith('image/') && attachment.dataUrl ? <img src={attachment.dataUrl} alt={`پیش‌نمایش ${attachment.fileName}`}/> : <FileText size={18}/>}<span><strong>{attachment.fileName}</strong><small>{attachment.size ? fileSizeLabel(attachment.size) : 'پیوست منتقل‌شده از نسخه قبلی'}</small></span>{attachment.dataUrl && <a className="icon-button" href={attachment.dataUrl} download={attachment.fileName} aria-label={`دریافت ${attachment.fileName}`} title="دریافت فایل"><Download size={16}/></a>}</article>)}</div> : <div className="quiet-state">فایل پیش‌فاکتوری بارگذاری نشده است.</div>}</section>

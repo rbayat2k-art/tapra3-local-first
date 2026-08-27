@@ -1,4 +1,4 @@
-import type {FoundationState, LocalUser, OperationalPayloadValue, OperationalRecord, PersonnelRecord, WorkflowApprovalStageDefinition} from './model';
+import type {AdvanceEligibilityStatus, FoundationState, LocalUser, OperationalPayloadValue, OperationalRecord, PersonnelRecord, WorkflowApprovalStageDefinition} from './model';
 import {approvalStagesForRoute, assignmentModeForStage, roleIdsForWorkflowState, routeVariantForBranch} from './workflowPolicy';
 
 export type AdvanceStage = 'draft' | 'branch_review' | 'accounting_review' | 'final_review' | 'needs_correction' | 'sent_to_treasury' | 'rejected' | 'paid';
@@ -49,11 +49,40 @@ export interface EmployeeAdvancePayload {
   proxyByUserId?: string;
   proxyByName?: string;
   selfApprovedAt?: string;
+  branchReviewSkipped?: boolean;
+  branchReviewSkippedReason?: string;
   resumeStage?: AdvanceStage;
   signedByUserId: string;
   signedByName: string;
   signedAt: string;
   trail: AdvanceTrailItem[];
+}
+
+export interface AdvanceEligibilityDecision {
+  allowed: boolean;
+  status: AdvanceEligibilityStatus;
+  reason?: string;
+  effectiveFrom?: string;
+  effectiveUntil?: string;
+}
+
+/**
+ * Eligibility is independent from RBAC. Legacy records are eligible. A dated suspension
+ * blocks only inside its effective window; an ineligible record stays blocked until HR changes it.
+ */
+export function personnelAdvanceEligibility(personnel: Pick<PersonnelRecord, 'advanceEligibilityStatus' | 'advanceEligibilityReason' | 'advanceEligibilityEffectiveFrom' | 'advanceEligibilityEffectiveUntil'>, onDate = new Date().toISOString().slice(0, 10)): AdvanceEligibilityDecision {
+  const status = personnel.advanceEligibilityStatus ?? 'eligible';
+  const effectiveFrom = personnel.advanceEligibilityEffectiveFrom;
+  const effectiveUntil = personnel.advanceEligibilityEffectiveUntil;
+  const reason = personnel.advanceEligibilityReason?.trim() || undefined;
+  if (status === 'eligible') return {allowed: true, status};
+  if (effectiveFrom && onDate < effectiveFrom) return {allowed: true, status, reason, effectiveFrom, effectiveUntil};
+  if (status === 'suspended' && effectiveUntil && onDate > effectiveUntil) return {allowed: true, status, reason, effectiveFrom, effectiveUntil};
+  return {allowed: false, status, reason, effectiveFrom, effectiveUntil};
+}
+
+export function advanceEligibilityStatusLabel(status?: AdvanceEligibilityStatus): string {
+  return status === 'suspended' ? 'تعلیق موقت' : status === 'ineligible' ? 'غیرمجاز' : 'مجاز';
 }
 
 const text = (value: unknown) => typeof value === 'string' ? value : '';
@@ -72,6 +101,7 @@ export function readEmployeeAdvancePayload(recordOrPayload: OperationalRecord | 
     internalCreditEligible: bool(payload.internalCreditEligible), submittedOnBehalf: bool(payload.submittedOnBehalf),
     proxyByUserId: text(payload.proxyByUserId) || undefined, proxyByName: text(payload.proxyByName) || undefined,
     selfApprovedAt: text(payload.selfApprovedAt) || undefined, resumeStage: text(payload.resumeStage) as AdvanceStage || undefined,
+    branchReviewSkipped: bool(payload.branchReviewSkipped), branchReviewSkippedReason: text(payload.branchReviewSkippedReason) || undefined,
     signedByUserId: text(payload.signedByUserId), signedByName: text(payload.signedByName), signedAt: text(payload.signedAt),
     trail: Array.isArray(payload.trail) ? payload.trail as unknown as AdvanceTrailItem[] : [],
   };
@@ -85,7 +115,6 @@ export function advanceBranchIds(user: LocalUser, state: Pick<FoundationState, '
 }
 
 export function canSelfSubmitAdvance(branchUnitId: string, state?: Pick<FoundationState, 'workflows' | 'roles'>): boolean {
-  if (!branchUnitId) return false;
   const workflow = state?.workflows.find((item) => item.moduleId === 'employee-advance');
   if (!workflow || !state) return true;
   const variant = routeVariantForBranch(workflow, branchUnitId);
@@ -114,7 +143,11 @@ export function canUserTakeAdvanceStage(
   if (stage.roleIds.length && !user.roleIds.some((roleId) => stage.roleIds.includes(roleId))) return false;
   if (stage.scope === 'SELF' && user.id !== context.beneficiaryUserId) return false;
   if (stage.scope === 'UNIT' && user.unitId !== context.unitId) return false;
-  if (stage.scope === 'BRANCH' && !advanceBranchIds(user, state).includes(context.branchUnitId)) return false;
+  if (stage.scope === 'BRANCH') {
+    if (!context.branchUnitId) {
+      if (!user.isAdmin && !user.advanceBranchIds?.includes('*')) return false;
+    } else if (!advanceBranchIds(user, state).includes(context.branchUnitId)) return false;
+  }
   return true;
 }
 
@@ -154,7 +187,9 @@ export function isEmployeeAdvanceVisible(record: OperationalRecord, state: Found
   const branchRoles = roleIdsForWorkflowState(state, 'employee-advance', 'branch_review', ['role-advance-branch-manager'], record.workflowVersion, record.workflowRouteId);
   const finalRoles = roleIdsForWorkflowState(state, 'employee-advance', 'final_review', ['role-sales-advance-approver'], record.workflowVersion, record.workflowRouteId);
   if (user.roleIds.some((roleId) => accountingRoles.includes(roleId))) return true;
-  if (user.roleIds.some((roleId) => branchRoles.includes(roleId) || finalRoles.includes(roleId))) return advanceBranchIds(user, state).includes(payload.branchUnitId);
+  if (user.roleIds.some((roleId) => branchRoles.includes(roleId) || finalRoles.includes(roleId))) {
+    return payload.branchUnitId ? advanceBranchIds(user, state).includes(payload.branchUnitId) : Boolean(user.advanceBranchIds?.includes('*'));
+  }
   return false;
 }
 

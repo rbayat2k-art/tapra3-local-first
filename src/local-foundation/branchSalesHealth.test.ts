@@ -42,12 +42,13 @@ function stateSlice(): Pick<FoundationState, 'units' | 'users' | 'personnel' | '
 }
 
 describe('branch and sales structure health', () => {
-  it('keeps the staffed central branch healthy and flags an unmanaged branch', () => {
+  it('keeps staffed branches healthy and still flags a branch when its manager is removed', () => {
     const state = stateSlice();
     const central = state.units.find((item) => item.id === 'unit-branch-central')!;
     const poonak = state.units.find((item) => item.id === 'unit-branch-poonak')!;
     expect(branchHealthInsight(central, state).issues).toEqual([]);
-    expect(branchHealthInsight(poonak, state).issues).toContain('missing-manager');
+    expect(branchHealthInsight(poonak, state).issues).toEqual([]);
+    expect(branchHealthInsight({...poonak, managerUserId: undefined}, state).issues).toContain('missing-manager');
   });
 
   it('separates a healthy route from a route that merely has no active sellers yet', () => {

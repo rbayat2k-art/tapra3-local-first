@@ -5,12 +5,13 @@ import type {
   OrganizationalUnit, PermissionCode, PersonnelMovement, PersonnelMovementKind, PersonnelProfileChangeField,
   PersonnelProfileChangeRequest, PersonnelProfileChangeValues, PersonnelRecord, SalesStructure, SecurityRole, SnapshotManifest, ScopeType, UserStatus,
   OperationalRecord, OperationalRecordHistory, RegistrationRequest, QaDatasetManifest, ProjectionRecord, WorkflowDefinition, WorkflowApprovalStageDefinition, WorkflowRouteVariantDefinition,
-  FoundationStoreName, PersonnelDocumentFile, UserNotification,
+  FoundationStoreName, OperationalPayloadValue, PersonnelDocumentFile, UserNotification,
 } from './model';
 import {FOUNDATION_SCHEMA_VERSION, FOUNDATION_SEED_VERSION, FOUNDATION_STORES} from './model';
 import {
   COMPANY_ID, createSeedData, CUSTOMER_RECORDS, LOCAL_USERS, ORGANIZATIONAL_POSITIONS, ORGANIZATIONAL_UNITS,
   PERMISSION_CATALOG, PERSONNEL_RECORDS, resolveUserAccess, ROLE_TEMPLATES, SALES_STRUCTURES, SECURITY_ROLES,
+  SEED_UNIT_MANAGER_ASSIGNMENTS, SEED_USER_ROLE_ADDITIONS,
 } from './seed';
 import {decryptSnapshot, encryptSnapshot, IndexedDBAdapter, type StorageAdapter, type StorageTransaction, validateSnapshotShape} from './storage';
 import {ERP_MODULES, ERP_OPERATIONAL_STORES, permissionFor, stateLabel} from './erpCatalog';
@@ -20,7 +21,7 @@ import {positionIdForSalesHierarchy} from './salesPersonnelIdentity';
 import {completeRequiredQaPersonnelRecords} from './qaPersonnelCompletion';
 import {preparePurchaseRequestInput, purchasePayloadForRecord, readPurchaseRequestPayload} from './purchaseRequest';
 import {canRequestTreasuryFollowUp, linkedTreasuryQueueRecords, treasuryFollowUpDedupeKey} from './purchaseFollowUp';
-import {advanceBranchIds, canEmployeeAdvanceReviewerDecide, canProxyAdvance, canSelfSubmitAdvance, canUserTakeAdvanceStage, readEmployeeAdvancePayload, resolveAdvanceStageAssignee, type AdvanceDecision, type AdvanceStage, type EmployeeAdvanceInput} from './employeeAdvance';
+import {advanceBranchIds, advanceEligibilityStatusLabel, canEmployeeAdvanceReviewerDecide, canProxyAdvance, canSelfSubmitAdvance, canUserTakeAdvanceStage, isEmployeeAdvanceVisible, personnelAdvanceEligibility, readEmployeeAdvancePayload, resolveAdvanceStageAssignee, type AdvanceDecision, type AdvanceStage, type EmployeeAdvanceInput} from './employeeAdvance';
 import {isValidBankCard, isValidIranianLandline, isValidIranianMobile, isValidPostalCode} from '../utils/operationalFormat';
 import {activeWorkflowFor, approvalStagesForRoute, defaultApprovalStages, roleIdsForWorkflowState, routeVariantForBranch, selectWorkflowRoute, validateWorkflowPolicy, workflowForRecord, workflowStageAllows} from './workflowPolicy';
 import {createDefaultSalesCompensationRecord, validateSalesCompensationInput, type SalesCompensationInput} from './salesCompensation';
@@ -36,11 +37,16 @@ import {
   REGISTRATION_ASSIGNABLE_ROLE_IDS,
 } from './accessPolicy';
 import {
-  chatAttachment, chatHiddenForUserIds, chatKind, chatMemberUserIds, isChatMember, validateChatAttachment,
-  type ChatConversationInput, type ChatMessageInput,
+  CHAT_MESSAGE_EDIT_WINDOW_MS, chatAdminUserIds, chatAttachment, chatHiddenForUserIds, chatKind, chatMemberUserIds,
+  chatMessageIsDeleted, chatOwnerUserId, chatReadAt, isChatMember, validateChatAttachment,
+  type ChatConversationInput, type ChatGroupUpdateInput, type ChatMessageInput,
 } from './communications';
 import {
-  isLetterParticipant, letterAttachment, letterDirection, letterRecipientUnitIds, letterRecipientUserIds, letterSignatureCanonicalText, validateLetterAttachment,
+  financialPaymentProgress, fiscalPeriodForPayment, nextFinancialDocumentNumber, paymentReferenceKey, requirePositiveRialAmount, validateFinancialPayment,
+  type FinancialObligation, type FinancialPaymentInput,
+} from './financialCore';
+import {
+  isLetterParticipant, letterAttachment, letterClassification, letterCopyRecipientUserIds, letterDeliveredRecipientUserIds, letterDirection, letterExternalParty, letterIsProtected, letterRecipientUnitIds, letterRecipientUserIds, letterSignatureCanonicalText, redactLockedLetter, validateLetterAttachment,
   type LetterAction, type LetterDigitalSignature, type LetterInput,
 } from './letters';
 
@@ -58,6 +64,7 @@ export interface UnitInput {
 export interface PositionInput {title: string; description: string; unitIds?: string[];}
 export interface UserInput {name: string; username: string; unitId: string; positionId: string; branchUnitId?: string; managerUserId?: string; roleIds: string[]; password?: string; personnelId?: string; permissionGrants?: PermissionCode[]; permissionDenials?: PermissionCode[];}
 export interface SelfCredentialChangeInput {currentPassword: string; username: string; newPassword?: string;}
+export interface SecondaryPasswordChangeInput {verificationCode:string;secondaryPassword:string;}
 export interface RoleInput {name: string; description: string; scope: ScopeType; permissions: PermissionCode[];}
 export type PersonnelInput = Omit<PersonnelRecord, 'id' | 'companyId' | 'createdAt' | 'updatedAt' | 'linkedUserId' | 'movements' | 'salesCompensationHistory' | 'lifecycleHistory' | 'pendingLifecycleChange'>;
 export type {SalesCompensationInput} from './salesCompensation';
@@ -77,12 +84,7 @@ export interface RegistrationInput {fullName: string; mobile: string; secondaryM
 export interface LocalSmsPreview {maskedMobile: string; message: string; verificationCode?: string;}
 export interface OwnProfileChangeInput {requestedValues: PersonnelProfileChangeValues; reason: string;}
 export type PurchaseRequestDecision = 'approve_and_forward' | 'needs_correction' | 'rejected';
-export interface TreasuryPaymentInput {
-  paidAt: string;
-  paymentReference: string;
-  note: string;
-  receipt?: {id: string; fileName: string; mimeType: string; size: number; dataUrl: string};
-}
+export type TreasuryPaymentInput = FinancialPaymentInput;
 
 function newId(prefix: string): string { return `${prefix}-${crypto.randomUUID()}`; }
 function currentLocalDate(): string {
@@ -321,6 +323,16 @@ export class LocalFoundationService {
     );
     const existing = Object.fromEntries(existingEntries) as Record<FoundationStoreName, unknown[]>;
     const migrationBasePersistedAt = (existing.meta as MetaRecord[]).find((item) => item.id === 'lastPersistedAt')?.value;
+    const priorSeededAt = (existing.meta as MetaRecord[]).find((item) => item.id === 'seededAt')?.value;
+    const priorAudits = existing.audit_events as AuditEvent[];
+    const isUntouchedSeedRecord = (record: {createdAt?: string; updatedAt?: string}) => Boolean(
+      priorSeededAt && record.createdAt === priorSeededAt && record.updatedAt === priorSeededAt,
+    );
+    const userAccessWasMutated = (userId: string) => priorAudits.some((event) =>
+      typeof event.metadata?.userId === 'string'
+      && event.metadata.userId === userId
+      && ['organization.user.updated', 'organization.user.permission_overrides_changed', 'organization.user.activated', 'organization.user.deactivated'].includes(event.action),
+    );
     for (const store of FOUNDATION_STORES) if (existing[store].length) seeded[store] = existing[store];
     const priorWorkflowDefinitions = existing.workflow_definitions as WorkflowDefinition[];
     seeded.workflow_definitions = [
@@ -370,7 +382,7 @@ export class LocalFoundationService {
     seeded.security_roles = [...SECURITY_ROLES.map((template) => {
       const prior = priorRoles.find((role) => role.id === template.id);
       if (!prior) return {...template, version: 1};
-      return securityPatchedRoleIds.has(template.id)
+      return securityPatchedRoleIds.has(template.id) && isUntouchedSeedRecord(prior)
         ? {...prior, protected: template.protected, permissions: [...template.permissions], version:(prior.version??1)+1, updatedAt:now}
         : {...template, ...prior, version:prior.version??1};
     }), ...customRoles];
@@ -378,7 +390,19 @@ export class LocalFoundationService {
     const customUnits = priorUnits.filter((unit) => !ORGANIZATIONAL_UNITS.some((template) => template.id === unit.id));
     seeded.organizational_units = [...ORGANIZATIONAL_UNITS.map((template) => {
       const prior = priorUnits.find((unit) => unit.id === template.id);
-      return prior ? {...template, ...prior, name: template.name, type: template.type, parentId: template.parentId, order: template.order, updatedAt: now} : template;
+      const approvedManagerUserId = SEED_UNIT_MANAGER_ASSIGNMENTS[template.id];
+      return prior ? {
+        ...template,
+        ...prior,
+        ...(isUntouchedSeedRecord(prior) ? {
+          name: template.name,
+          type: template.type,
+          parentId: template.parentId,
+          order: template.order,
+          ...(approvedManagerUserId ? {managerUserId: approvedManagerUserId} : {}),
+          updatedAt: now,
+        } : {}),
+      } : template;
     }), ...customUnits];
     const priorPositions = existing.organizational_positions as OrganizationalPosition[];
     const customPositions = priorPositions.filter((position) => !ORGANIZATIONAL_POSITIONS.some((template) => template.id === position.id));
@@ -392,7 +416,9 @@ export class LocalFoundationService {
     ]);
     seeded.organizational_positions = [...ORGANIZATIONAL_POSITIONS.map((template) => {
       const prior = priorPositions.find((position) => position.id === template.id);
-      return prior ? {...prior, ...template, unitIds: [...template.unitIds], updatedAt: now} : {...template, unitIds: [...template.unitIds]};
+      if (!prior) return {...template, unitIds: [...template.unitIds]};
+      if (isUntouchedSeedRecord(prior)) return {...prior, ...template, unitIds: [...template.unitIds], updatedAt: now};
+      return {...prior, unitIds: normalizePositionUnitIds(prior.unitIds?.length ? prior.unitIds : inferredUnitIds(prior.id))};
     }), ...customPositions.map((position) => ({...position, unitIds: normalizePositionUnitIds(position.unitIds?.length ? position.unitIds : inferredUnitIds(position.id).length ? inferredUnitIds(position.id) : fallbackUnitIds)}))];
     const roles = seeded.security_roles as SecurityRole[];
     seeded.workflow_definitions = (seeded.workflow_definitions as WorkflowDefinition[]).map((workflow) => {
@@ -417,7 +443,10 @@ export class LocalFoundationService {
           assignmentMode: stage.assignmentMode ?? (stage.stateId === 'branch_review' ? 'branch_manager' as const : 'role_queue' as const),
         })),
       }));
-      return {...workflow, title: catalogWorkflow?.title ?? workflow.title, allowSelfSubmission: workflow.allowSelfSubmission ?? true, approvalStages: migratedStages, routeVariants, updatedAt: now};
+      const transitions = workflow.moduleId === 'employee-advance' && catalogWorkflow
+        ? [...workflow.transitions, ...catalogWorkflow.transitions.filter((candidate) => !workflow.transitions.some((current) => current.id === candidate.id && current.to === candidate.to && current.from.some((from) => candidate.from.includes(from))))]
+        : workflow.transitions;
+      return {...workflow, title: catalogWorkflow?.title ?? workflow.title, transitions, assignmentPolicy: catalogWorkflow?.assignmentPolicy ?? workflow.assignmentPolicy, allowSelfSubmission: workflow.allowSelfSubmission ?? true, approvalStages: migratedStages, routeVariants, updatedAt: now};
     });
     seeded.workflow_versions = (seeded.workflow_versions as WorkflowDefinition[]).map((workflow) => {
       const catalogWorkflow = ERP_MODULES.find((module) => module.id === workflow.moduleId)?.workflow;
@@ -434,9 +463,14 @@ export class LocalFoundationService {
     const mergedPersonnel = [...PERSONNEL_RECORDS.map((template) => {
       const prior = priorPersonnel.find((person) => person.id === template.id);
       if (!prior) return template;
+      const assignmentRepair = isUntouchedSeedRecord(prior) && (template.id === 'personnel-user-manager' || template.id === 'personnel-purchase-approver');
       return {
         ...template,
         ...prior,
+        ...(assignmentRepair ? {unitId: template.unitId, positionId: template.positionId, managerPersonnelId: template.managerPersonnelId} : {}),
+        // نسخه‌های قدیمی به اشتباه همه پرسنل ستادی را عضو شعبه مرکزی می‌کردند.
+        // برای داده‌های نمونه قطعی، شعبه فقط از الگوی سازمانی مصوب می‌آید.
+        branchUnitId: isUntouchedSeedRecord(prior) ? template.branchUnitId : prior.branchUnitId,
         // New required profile fields are backfilled only when an older seeded
         // record has no meaningful value. Real values entered by the user win.
         gender: prior.gender && prior.gender !== 'unspecified' ? prior.gender : template.gender,
@@ -498,18 +532,26 @@ export class LocalFoundationService {
       };
       const correctedSalesRole = salesRoleByPersona[prior.id];
       const hadLegacySellerRole = prior.roleIds.some((roleId) => ['role-sales-seller', 'role-seller'].includes(roleId));
-      const preservedRoles = correctedSalesRole && hadLegacySellerRole ? prior.roleIds.filter((roleId) => !['role-sales-seller', 'role-seller'].includes(roleId)) : prior.roleIds;
-      const roleIds = [...new Set([...preservedRoles, ...(correctedSalesRole && hadLegacySellerRole ? [correctedSalesRole] : [])])];
-      const roleId = ['role-sales-seller', 'role-seller'].includes(prior.roleId) && correctedSalesRole && hadLegacySellerRole ? correctedSalesRole : prior.roleId;
+      const mayRepairSeedAccess = !userAccessWasMutated(prior.id);
+      const repairLegacySalesRole = Boolean(mayRepairSeedAccess && correctedSalesRole && hadLegacySellerRole);
+      const preservedRoles = repairLegacySalesRole ? prior.roleIds.filter((roleId) => !['role-sales-seller', 'role-seller'].includes(roleId)) : prior.roleIds;
+      const roleIds = [...new Set([
+        ...preservedRoles,
+        ...(repairLegacySalesRole ? [correctedSalesRole!] : []),
+        ...(mayRepairSeedAccess ? (SEED_USER_ROLE_ADDITIONS[prior.id] ?? []) : []),
+      ])];
+      const roleId = ['role-sales-seller', 'role-seller'].includes(prior.roleId) && repairLegacySalesRole ? correctedSalesRole! : prior.roleId;
       return {...template, ...prior, roleId, roleIds};
     }), ...customUsers];
     seeded.users = mergedUsers.map((value) => {
       const user = value as LocalUser;
-      const fallback = LOCAL_USERS.find((item) => item.id === user.id) ?? LOCAL_USERS[0];
+      if (userAccessWasMutated(user.id)) return user;
+      const seedTemplate = LOCAL_USERS.find((item) => item.id === user.id);
+      const fallback = seedTemplate ?? LOCAL_USERS[0];
       const linkedPersonnel = migratedPersonnel.find((person) => person.id === user.personnelId || person.linkedUserId === user.id);
       const normalizedRoleIds = [...new Set((user.roleIds?.length ? user.roleIds : [user.roleId || fallback.roleId]).map((roleId) => roleId === 'role-seller' ? 'role-sales-seller' : roleId))];
       const normalizedRoleId = (user.roleId === 'role-seller' ? 'role-sales-seller' : user.roleId) || normalizedRoleIds[0];
-      return resolveUserAccess({...fallback, ...user, ...(linkedPersonnel ? {unitId: linkedPersonnel.unitId, positionId: linkedPersonnel.positionId, branchUnitId: linkedPersonnel.branchUnitId, salesHierarchyLevel: linkedPersonnel.salesHierarchyLevel} : {}), roleId: normalizedRoleId, roleIds: normalizedRoleIds, permissionGrants: [], isAdmin: user.id === 'persona-product-owner'}, roles);
+      return resolveUserAccess({...fallback, ...user, ...(linkedPersonnel ? {unitId: linkedPersonnel.unitId, positionId: linkedPersonnel.positionId, branchUnitId: linkedPersonnel.salesBranchUnitId ?? linkedPersonnel.branchUnitId ?? (seedTemplate ? seedTemplate.branchUnitId : user.branchUnitId), salesHierarchyLevel: linkedPersonnel.salesHierarchyLevel} : {}), roleId: normalizedRoleId, roleIds: normalizedRoleIds}, roles);
     });
     const purchaseSeed = (createSeedData().purchase_requests as OperationalRecord[]).find((record) => record.id === 'demo-purchase-request-1');
     seeded.purchase_requests = (seeded.purchase_requests as OperationalRecord[]).map((record) => {
@@ -580,9 +622,10 @@ export class LocalFoundationService {
       this.storage.getAll<ProjectionRecord>('projections'), this.storage.getAll<UserNotification>('notifications'),
       Promise.all(ERP_OPERATIONAL_STORES.map((store) => this.storage.getAll<OperationalRecord>(store))),
     ]);
-    const users = rawUsers.map((user) => resolveUserAccess(user, roles));
-    const activeUser = users.find((user) => user.id === session?.activeUserId) ?? users.find((user) => user.status === 'active');
+    const resolvedUsers = rawUsers.map((user) => resolveUserAccess(user, roles));
+    const activeUser = resolvedUsers.find((user) => user.id === session?.activeUserId) ?? resolvedUsers.find((user) => user.status === 'active');
     if (!activeUser || !session) throw new Error('کاربران محلی آماده نشده‌اند. بازنشانی داده را اجرا کنید.');
+    const users = resolvedUsers.map(projectUserSecurityState);
     const effectiveSession = activeUser.status === 'inactive' && !session.signedOutAt
       ? {...session, signedOutAt: session.switchedAt}
       : session;
@@ -609,24 +652,47 @@ export class LocalFoundationService {
       if (!['in_review','approved_for_send'].includes(record.status)) return false;
       return ['approve','transition','view'].some((action) => authorize({persona:activeUser,permission:permissionFor('letter',action as 'approve'|'transition'|'view'),action:action as 'approve'|'transition'|'view',resource:operationalRecordResource(activeUser,record)}).allowed);
     }).map((record) => record.id));
+    const financialProjectionState = {activeUser, users:resolvedUsers, roles, units, workflows, workflowVersions} as FoundationState;
+    const canViewLinkedFinancialProgress = (record: OperationalRecord) => {
+      if (record.moduleId !== 'treasury-execution' || !record.relatedRecordId) return false;
+      const source = allOperationalRecords.find((candidate) => candidate.id === record.relatedRecordId);
+      if (!source) return false;
+      if (source.moduleId === 'employee-advance') return isEmployeeAdvanceVisible(source, financialProjectionState) && canViewProtectedFinancialRecord(activeUser, source);
+      return canViewProtectedFinancialRecord(activeUser, source);
+    };
     const operationalRecords = (auditorView ? [] : allOperationalRecords).filter((record) => {
       if (record.moduleId === 'chat') return visibleChatIds.has(record.id);
       if (record.moduleId === 'message') return Boolean(record.relatedRecordId && visibleChatIds.has(record.relatedRecordId));
       if (record.moduleId === 'letter') return visibleLetterIds.has(record.id);
+      if (record.moduleId === 'employee-advance') return isEmployeeAdvanceVisible(record, financialProjectionState) && canViewProtectedFinancialRecord(activeUser, record);
+      if (isProtectedFinancialRecord(record)) return canViewProtectedFinancialRecord(activeUser, record) || canViewLinkedFinancialProgress(record);
       if (record.moduleId !== 'personnel-document') return true;
       const target = personnel.find((item) => item.id === record.ownerPersonnelId);
       if (!target) return false;
       if (activeUser.personnelId === target.id || target.linkedUserId === activeUser.id) return true;
       const permission = [PERSONNEL_DOCUMENT_PERMISSION_READ, PERSONNEL_DOCUMENT_PERMISSION_MANAGE, 'organization.personnel.documents.queue.view'].find((candidate) => activeUser.permissions.includes(candidate));
       return Boolean(permission && authorize({persona: activeUser, permission, action: 'view', resource: this.personnelResource({users, activeUser} as FoundationState, target)}).allowed);
+    }).map((record) => {
+      if (record.moduleId === 'letter' && letterIsProtected(record)) return redactLockedLetter(record);
+      if (isProtectedFinancialRecord(record) && !canViewProtectedFinancialDetails(activeUser, record)) return redactProtectedFinancialRecord(record);
+      return record;
     }).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     const projectedActiveUser = projectedUsers.find((user) => user.id === activeUser.id) ?? activeUser;
+    const visibleOperationalRecordIds = new Set(operationalRecords.map((record) => record.id));
+    const operationalRecordById = new Map(allOperationalRecords.map((record) => [record.id, record]));
     const projectedOperationalHistory = auditorView ? [] : history.filter((item) => {
       if (['chat','message'].includes(item.moduleId)) return visibleChatIds.has(item.recordId) || operationalRecords.some((record) => record.id === item.recordId);
       if (item.moduleId === 'letter') return visibleLetterIds.has(item.recordId);
+      const record = operationalRecordById.get(item.recordId);
+      if (record && isProtectedFinancialRecord(record)) return visibleOperationalRecordIds.has(record.id);
       return true;
+    }).map((item) => {
+      const record = operationalRecordById.get(item.recordId);
+      if (!record || !isProtectedFinancialRecord(record) || canViewProtectedFinancialDetails(activeUser, record)) return item;
+      return {...item, snapshot: redactProtectedFinancialValue(item.snapshot) as OperationalRecordHistory['snapshot']};
     }).sort((a, b) => b.occurredAt.localeCompare(a.occurredAt));
-    return {users: projectedUsers, activeUser: projectedActiveUser, session: effectiveSession, units: units.sort((a, b) => a.order - b.order || a.name.localeCompare(b.name, 'fa')), positions: positions.sort((a, b) => a.title.localeCompare(b.title, 'fa')), roles: roles.sort((a, b) => Number(b.protected) - Number(a.protected) || a.name.localeCompare(b.name, 'fa')), personnel: projectedPersonnel.sort((a, b) => a.personnelCode.localeCompare(b.personnelCode, 'fa')), personnelProfileChangeRequests: auditorView ? [] : profileChangeRequests.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), salesStructures: auditorView ? [] : salesStructures.sort((a, b) => salesStructureSupervisorName(a, personnel).localeCompare(salesStructureSupervisorName(b, personnel), 'fa')), customers: auditorView ? [] : customers.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), customerImports: auditorView ? [] : customerImports.sort((a, b) => b.createdAt.localeCompare(a.createdAt)), workflows, workflowVersions, operationalRecords, operationalHistory: projectedOperationalHistory, notifications: notifications.filter((item) => item.userId === activeUser.id).sort((a, b) => b.createdAt.localeCompare(a.createdAt)), registrationRequests: auditorView ? [] : registrations.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), qaDataset: qaManifests.find((item) => item.id === 'large-qa') ?? {id: 'large-qa', status: 'empty', roleCount: 0, userCount: 0, seed: 'tapra2-large-qa-v1'}, projections: auditorView ? [] : projections, audits: projectedAudits.sort((a, b) => b.sequence - a.sequence), recordCount: auditorView ? projectedAudits.length : records.length + personnel.length + profileChangeRequests.length + salesStructures.length + customers.length + operationalRecords.length + notifications.length, lastPersistedAt: typeof persistedAt?.value === 'string' ? persistedAt.value : effectiveSession.switchedAt};
+    const projectedProjections = auditorView ? [] : can(activeUser, 'foundation.data.manage') ? projections : projections.map((projection) => ({...projection, data:{}}));
+    return {users: projectedUsers, activeUser: projectedActiveUser, session: effectiveSession, units: units.sort((a, b) => a.order - b.order || a.name.localeCompare(b.name, 'fa')), positions: positions.sort((a, b) => a.title.localeCompare(b.title, 'fa')), roles: roles.sort((a, b) => Number(b.protected) - Number(a.protected) || a.name.localeCompare(b.name, 'fa')), personnel: projectedPersonnel.sort((a, b) => a.personnelCode.localeCompare(b.personnelCode, 'fa')), personnelProfileChangeRequests: auditorView ? [] : profileChangeRequests.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), salesStructures: auditorView ? [] : salesStructures.sort((a, b) => salesStructureSupervisorName(a, personnel).localeCompare(salesStructureSupervisorName(b, personnel), 'fa')), customers: auditorView ? [] : customers.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), customerImports: auditorView ? [] : customerImports.sort((a, b) => b.createdAt.localeCompare(a.createdAt)), workflows, workflowVersions, operationalRecords, operationalHistory: projectedOperationalHistory, notifications: notifications.filter((item) => item.userId === activeUser.id).sort((a, b) => b.createdAt.localeCompare(a.createdAt)), registrationRequests: auditorView ? [] : registrations.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), qaDataset: qaManifests.find((item) => item.id === 'large-qa') ?? {id: 'large-qa', status: 'empty', roleCount: 0, userCount: 0, seed: 'tapra2-large-qa-v1'}, projections: projectedProjections, audits: projectedAudits.sort((a, b) => b.sequence - a.sequence), recordCount: auditorView ? projectedAudits.length : records.length + personnel.length + profileChangeRequests.length + salesStructures.length + customers.length + operationalRecords.length + notifications.length, lastPersistedAt: typeof persistedAt?.value === 'string' ? persistedAt.value : effectiveSession.switchedAt};
   }
 
   async createChatConversation(input: ChatConversationInput): Promise<FoundationState> {
@@ -678,7 +744,7 @@ export class LocalFoundationService {
         } else if (title.length < 3) throw new Error('نام گروه باید حداقل ۳ نویسه باشد.');
       }
       const sequence = chats.length + 1;
-      const conversation: OperationalRecord = {id:conversationId,moduleId:'chat',domain:'communications',trackingCode:`CHT-${new Date().getFullYear()}-${String(sequence).padStart(4,'0')}`,title,description:'',status:'active',priority:'normal',companyId:actor.companyId,unitId,ownerPersonnelId:actor.personnelId,assigneeUserId:actor.id,createdByActorId:actor.actorId,createdByUserId:actor.id,updatedByActorId:actor.actorId,workflowVersion:1,version:1,payload:{conversationKind:input.kind,memberUserIds,lastMessageAt:null},createdAt:now,updatedAt:now};
+      const conversation: OperationalRecord = {id:conversationId,moduleId:'chat',domain:'communications',trackingCode:`CHT-${new Date().getFullYear()}-${String(sequence).padStart(4,'0')}`,title,description:'',status:'active',priority:'normal',companyId:actor.companyId,unitId,ownerPersonnelId:actor.personnelId,assigneeUserId:actor.id,createdByActorId:actor.actorId,createdByUserId:actor.id,updatedByActorId:actor.actorId,workflowVersion:1,version:1,payload:{conversationKind:input.kind,memberUserIds,ownerUserId:actor.id,adminUserIds:input.kind==='group'?[actor.id]:[],lastMessageAt:null},createdAt:now,updatedAt:now};
       await tx.put('chats', conversation);
       await tx.put('workflow_history', {id:newId('history'),recordId:conversation.id,moduleId:'chat',sequence:1,eventType:'created',actorId:actor.actorId,actorName:actor.name,effectiveUserId:actor.id,snapshot:{conversationKind:input.kind,memberCount:memberUserIds.length,unitId:unitId??null},occurredAt:now} satisfies OperationalRecordHistory);
       await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:actor.companyId,category:'system',action:'communications.chat.created',actorId:actor.actorId,actorName:actor.name,effectiveUserId:actor.id,occurredAt:now,summary:`گفت‌وگوی «${title}» ساخته شد.`,outcome:'success',correlationId,metadata:{conversationId,kind:input.kind,memberCount:memberUserIds.length}} satisfies AuditEvent);
@@ -704,8 +770,13 @@ export class LocalFoundationService {
       const currentActor = users.find((user) => user.id === actor.id && user.status === 'active');
       if (!currentActor || !conversation || conversation.status !== 'active' || !isChatMember(conversation, currentActor)) throw new Error('این گفت‌وگو در دسترس شما نیست یا بسته شده است.');
       const committedAttachment = attachment ? validateChatAttachment(attachment) : undefined;
+      const replyToMessageId = input.replyToMessageId?.trim() || undefined;
+      if (replyToMessageId) {
+        const replyTarget = messages.find((message) => message.id === replyToMessageId && message.relatedRecordId === conversation.id);
+        if (!replyTarget || chatMessageIsDeleted(replyTarget)) throw new Error('پیامی که به آن پاسخ می‌دهید دیگر در دسترس نیست.');
+      }
       const attachmentPayload = committedAttachment ? {kind:committedAttachment.kind,fileName:committedAttachment.fileName,mimeType:committedAttachment.mimeType,size:committedAttachment.size,dataUrl:committedAttachment.dataUrl} : null;
-      const message: OperationalRecord = {id:messageId,moduleId:'message',domain:'communications',trackingCode:`MSG-${new Date().getFullYear()}-${String(messages.length+1).padStart(5,'0')}`,title:body.slice(0,80)||(committedAttachment?.kind==='voice'?'ویس':'فایل'),description:body,status:'sent',priority:'normal',companyId:actor.companyId,unitId:currentActor.unitId,ownerPersonnelId:currentActor.personnelId,assigneeUserId:currentActor.id,relatedRecordId:conversation.id,createdByActorId:currentActor.actorId,createdByUserId:currentActor.id,updatedByActorId:currentActor.actorId,workflowVersion:1,version:1,payload:{conversationId:conversation.id,senderUserId:currentActor.id,messageKind:committedAttachment?.kind??'text',attachment:attachmentPayload},createdAt:now,updatedAt:now};
+      const message: OperationalRecord = {id:messageId,moduleId:'message',domain:'communications',trackingCode:`MSG-${new Date().getFullYear()}-${String(messages.length+1).padStart(5,'0')}`,title:body.slice(0,80)||(committedAttachment?.kind==='voice'?'ویس':'فایل'),description:body,status:'sent',priority:'normal',companyId:actor.companyId,unitId:currentActor.unitId,ownerPersonnelId:currentActor.personnelId,assigneeUserId:currentActor.id,relatedRecordId:conversation.id,createdByActorId:currentActor.actorId,createdByUserId:currentActor.id,updatedByActorId:currentActor.actorId,workflowVersion:1,version:1,payload:{conversationId:conversation.id,senderUserId:currentActor.id,messageKind:committedAttachment?.kind??'text',attachment:attachmentPayload,replyToMessageId:replyToMessageId??null},createdAt:now,updatedAt:now};
       const recipients = chatKind(conversation)==='unit'
         ? users.filter((user)=>user.status==='active'&&user.companyId===actor.companyId&&user.unitId===conversation.unitId&&user.id!==actor.id)
         : chatMemberUserIds(conversation).filter((id)=>id!==actor.id).map((id)=>users.find((user)=>user.id===id&&user.status==='active')).filter((user):user is LocalUser=>Boolean(user));
@@ -713,7 +784,7 @@ export class LocalFoundationService {
       const hiddenForUserIds = chatHiddenForUserIds(conversation).filter((id) => !recipientIds.has(id));
       await tx.put('messages', message);
       await tx.put('chats', {...conversation,updatedByActorId:currentActor.actorId,updatedAt:now,version:conversation.version+1,payload:{...conversation.payload,lastMessageAt:now,lastMessageSenderUserId:currentActor.id,hiddenForUserIds}});
-      await tx.put('workflow_history',{id:newId('history'),recordId:message.id,moduleId:'message',sequence:1,eventType:'created',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,snapshot:{conversationId:conversation.id,messageKind:committedAttachment?.kind??'text',hasText:Boolean(body),fileName:committedAttachment?.fileName??null,fileSize:committedAttachment?.size??null},occurredAt:now} satisfies OperationalRecordHistory);
+      await tx.put('workflow_history',{id:newId('history'),recordId:message.id,moduleId:'message',sequence:1,eventType:'created',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,snapshot:{conversationId:conversation.id,messageKind:committedAttachment?.kind??'text',hasText:Boolean(body),fileName:committedAttachment?.fileName??null,fileSize:committedAttachment?.size??null,replyToMessageId:replyToMessageId??null},occurredAt:now} satisfies OperationalRecordHistory);
       for (const recipient of recipients) await tx.put('notifications',{id:newId('notification'),userId:recipient.id,kind:'chat_message',title:`پیام جدید در ${conversation.title}`,message:`${currentActor.name} پیام تازه‌ای فرستاد.`,actorUserId:currentActor.id,relatedRecordId:conversation.id,relatedModuleId:'chat',dedupeKey:`chat:${conversation.id}:${recipient.id}:${message.id}`,createdAt:now} satisfies UserNotification);
       await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:actor.companyId,category:'system',action:'communications.message.sent',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:`پیام جدید در گفت‌وگوی «${conversation.title}» ثبت شد.`,outcome:'success',correlationId,metadata:{conversationId:conversation.id,messageId,messageKind:committedAttachment?.kind??'text',recipientCount:recipients.length}} satisfies AuditEvent);
       await tx.put('domain_events',{id:newId('event'),aggregateType:'chat',aggregateId:conversation.id,eventType:'ChatMessageSent',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{messageId,messageKind:committedAttachment?.kind??'text',recipientCount:recipients.length}} satisfies DomainEvent);
@@ -745,77 +816,249 @@ export class LocalFoundationService {
     return this.loadState();
   }
 
-  async createLetter(input:LetterInput):Promise<FoundationState>{
+  async markChatRead(conversationId: string): Promise<FoundationState> {
+    const state = await this.loadState(); const actor = state.activeUser;
+    if (state.session.actingAdminUserId) throw new Error('ثبت مشاهده گفتگو در حالت مشاهده آزمایشی مجاز نیست.');
+    const now = new Date().toISOString(); const correlationId = newId('correlation');
+    await this.storage.transaction(['users','chats','messages','workflow_history','domain_events','meta'],'readwrite',async(tx)=>{
+      const [users,conversation,messages,history]=await Promise.all([
+        tx.getAll<LocalUser>('users'),tx.get<OperationalRecord>('chats',conversationId),tx.getAll<OperationalRecord>('messages'),tx.getAll<OperationalRecordHistory>('workflow_history'),
+      ]);
+      const currentActor=users.find((user)=>user.id===actor.id&&user.status==='active'&&user.companyId===actor.companyId);
+      if(!currentActor||!conversation||conversation.status!=='active'||!isChatMember(conversation,currentActor))throw new Error('این گفتگو در دسترس شما نیست.');
+      const latestIncoming=messages.filter((message)=>message.relatedRecordId===conversation.id&&message.createdByUserId!==currentActor.id&&!chatMessageIsDeleted(message)).sort((a,b)=>b.createdAt.localeCompare(a.createdAt)||b.id.localeCompare(a.id))[0];
+      if(!latestIncoming)return;
+      const lastReadAt=chatReadAt(history,conversation.id,currentActor.id);
+      if(lastReadAt&&lastReadAt>=latestIncoming.createdAt)return;
+      await tx.put('workflow_history',{id:newId('history'),recordId:conversation.id,moduleId:'chat',sequence:history.filter((item)=>item.recordId===conversation.id).length+1,eventType:'viewed',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,snapshot:{action:'read_for_user',userId:currentActor.id,lastReadMessageId:latestIncoming.id},occurredAt:now} satisfies OperationalRecordHistory);
+      await tx.put('domain_events',{id:newId('event'),aggregateType:'chat',aggregateId:conversation.id,eventType:'ChatRead',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{userId:currentActor.id,lastReadMessageId:latestIncoming.id}} satisfies DomainEvent);
+      await tx.put('meta',{id:'lastPersistedAt',value:now});
+    });
+    return this.loadState();
+  }
+
+  async updateChatGroup(conversationId:string,input:ChatGroupUpdateInput,expectedVersion:number):Promise<FoundationState>{
+    const state=await this.loadState();const actor=state.activeUser;
+    if(state.session.actingAdminUserId)throw new Error('مدیریت گروه در حالت مشاهده آزمایشی مجاز نیست.');
+    const title=input.title.trim();if(title.length<3)throw new Error('نام گروه باید حداقل ۳ نویسه باشد.');
+    const requestedMembers=[...new Set(input.memberUserIds.filter(Boolean))];const requestedAdmins=[...new Set(input.adminUserIds.filter(Boolean))];
+    const now=new Date().toISOString(),correlationId=newId('correlation');
+    await this.storage.transaction(['users','chats','workflow_history','notifications','audit_events','domain_events','meta'],'readwrite',async(tx)=>{
+      const [users,conversation,history,audits]=await Promise.all([tx.getAll<LocalUser>('users'),tx.get<OperationalRecord>('chats',conversationId),tx.getAll<OperationalRecordHistory>('workflow_history'),tx.getAll<AuditEvent>('audit_events')]);
+      const currentActor=users.find((user)=>user.id===actor.id&&user.status==='active'&&user.companyId===actor.companyId);
+      if(!currentActor||!conversation||conversation.version!==expectedVersion)throw new Error('این گروه هم‌زمان تغییر کرده است؛ دوباره باز کنید.');
+      if(chatKind(conversation)!=='group'||!isChatMember(conversation,currentActor))throw new Error('این گروه در دسترس شما نیست.');
+      const ownerUserId=chatOwnerUserId(conversation),currentAdmins=chatAdminUserIds(conversation);const isOwner=currentActor.id===ownerUserId,isAdmin=currentAdmins.includes(currentActor.id);
+      if(!isOwner&&!isAdmin)throw new Error('فقط مالک یا مدیر گروه می‌تواند اعضا را مدیریت کند.');
+      const memberUserIds=[...new Set([ownerUserId,...requestedMembers])].sort();
+      if(memberUserIds.length<2)throw new Error('گروه باید دست‌کم دو عضو داشته باشد.');
+      const members=memberUserIds.map((id)=>users.find((user)=>user.id===id&&user.status==='active'&&user.companyId===actor.companyId));
+      if(members.some((user)=>!user))throw new Error('یکی از اعضای انتخاب‌شده دیگر فعال یا هم‌شرکت نیست.');
+      let adminUserIds=[...new Set([ownerUserId,...requestedAdmins])].filter((id)=>memberUserIds.includes(id)).sort();
+      if(!isOwner){
+        if(JSON.stringify(adminUserIds)!==JSON.stringify([...currentAdmins].sort()))throw new Error('فقط مالک گروه می‌تواند مدیران را تغییر دهد.');
+        if(!currentAdmins.every((id)=>memberUserIds.includes(id)))throw new Error('مدیر گروه را فقط مالک می‌تواند از اعضا حذف کند.');
+        adminUserIds=[...currentAdmins].sort();
+      }
+      const previousMembers=chatMemberUserIds(conversation);const added=memberUserIds.filter((id)=>!previousMembers.includes(id));const removed=previousMembers.filter((id)=>!memberUserIds.includes(id));
+      const hiddenForUserIds=chatHiddenForUserIds(conversation).filter((id)=>!added.includes(id));
+      const updated={...conversation,title,updatedByActorId:currentActor.actorId,updatedAt:now,version:conversation.version+1,payload:{...conversation.payload,memberUserIds,adminUserIds,ownerUserId,hiddenForUserIds}};
+      await tx.put('chats',updated);
+      await tx.put('workflow_history',{id:newId('history'),recordId:conversation.id,moduleId:'chat',sequence:history.filter((item)=>item.recordId===conversation.id).length+1,eventType:'edited',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,snapshot:{action:'group_updated',addedUserIds:added,removedUserIds:removed,adminUserIds,title},occurredAt:now} satisfies OperationalRecordHistory);
+      for(const userId of added)await tx.put('notifications',{id:newId('notification'),userId,kind:'chat_message',title:`عضویت در ${title}`,message:`${currentActor.name} شما را به این گروه اضافه کرد.`,actorUserId:currentActor.id,relatedRecordId:conversation.id,relatedModuleId:'chat',dedupeKey:`chat-member-added:${conversation.id}:${userId}:${conversation.version+1}`,createdAt:now} satisfies UserNotification);
+      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:actor.companyId,category:'system',action:'communications.chat.group_updated',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:`اعضا یا مشخصات گروه «${conversation.title}» به‌روزرسانی شد.`,outcome:'success',correlationId,metadata:{conversationId:conversation.id,addedCount:added.length,removedCount:removed.length,adminCount:adminUserIds.length}} satisfies AuditEvent);
+      await tx.put('domain_events',{id:newId('event'),aggregateType:'chat',aggregateId:conversation.id,eventType:'ChatGroupUpdated',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{addedUserIds:added,removedUserIds:removed,adminUserIds}} satisfies DomainEvent);
+      await tx.put('meta',{id:'lastPersistedAt',value:now});
+    });
+    return this.loadState();
+  }
+
+  async editChatMessage(messageId:string,bodyInput:string,expectedVersion:number):Promise<FoundationState>{
+    const state=await this.loadState();const actor=state.activeUser;
+    if(state.session.actingAdminUserId)throw new Error('ویرایش پیام در حالت مشاهده آزمایشی مجاز نیست.');
+    const body=bodyInput.trim();if(!body)throw new Error('متن ویرایش‌شده نمی‌تواند خالی باشد.');if(body.length>4000)throw new Error('متن پیام نباید بیشتر از ۴۰۰۰ نویسه باشد.');
+    const now=new Date().toISOString(),correlationId=newId('correlation');
+    await this.storage.transaction(['users','chats','messages','workflow_history','audit_events','domain_events','meta'],'readwrite',async(tx)=>{
+      const [users,message,history,audits]=await Promise.all([tx.getAll<LocalUser>('users'),tx.get<OperationalRecord>('messages',messageId),tx.getAll<OperationalRecordHistory>('workflow_history'),tx.getAll<AuditEvent>('audit_events')]);
+      const currentActor=users.find((user)=>user.id===actor.id&&user.status==='active'&&user.companyId===actor.companyId);const conversation=message?.relatedRecordId?await tx.get<OperationalRecord>('chats',message.relatedRecordId):undefined;
+      if(!currentActor||!message||message.version!==expectedVersion||!conversation||!isChatMember(conversation,currentActor))throw new Error('این پیام هم‌زمان تغییر کرده یا دیگر در دسترس نیست.');
+      if(message.createdByUserId!==currentActor.id)throw new Error('فقط فرستنده می‌تواند پیام خودش را ویرایش کند.');
+      if(chatMessageIsDeleted(message))throw new Error('پیام حذف‌شده قابل ویرایش نیست.');
+      if(Date.parse(now)-Date.parse(message.createdAt)>CHAT_MESSAGE_EDIT_WINDOW_MS)throw new Error('مهلت ۱۵ دقیقه‌ای ویرایش پیام تمام شده است.');
+      const updated={...message,title:body.slice(0,80),description:body,updatedByActorId:currentActor.actorId,updatedAt:now,version:message.version+1,payload:{...message.payload,editedAt:now,editCount:Number(message.payload.editCount??0)+1}};
+      await tx.put('messages',updated);await tx.put('chats',{...conversation,updatedByActorId:currentActor.actorId,updatedAt:now,version:conversation.version+1});
+      await tx.put('workflow_history',{id:newId('history'),recordId:message.id,moduleId:'message',sequence:history.filter((item)=>item.recordId===message.id).length+1,eventType:'edited',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,snapshot:{action:'message_edited',previousBodySha256:await sha256TextHex(message.description)},occurredAt:now} satisfies OperationalRecordHistory);
+      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:actor.companyId,category:'system',action:'communications.message.edited',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:`یک پیام در گفت‌وگوی «${conversation.title}» ویرایش شد.`,outcome:'success',correlationId,metadata:{conversationId:conversation.id,messageId:message.id}} satisfies AuditEvent);
+      await tx.put('domain_events',{id:newId('event'),aggregateType:'chat',aggregateId:conversation.id,eventType:'ChatMessageEdited',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{messageId:message.id}} satisfies DomainEvent);await tx.put('meta',{id:'lastPersistedAt',value:now});
+    });
+    return this.loadState();
+  }
+
+  async deleteChatMessage(messageId:string,expectedVersion:number):Promise<FoundationState>{
+    const state=await this.loadState();const actor=state.activeUser;
+    if(state.session.actingAdminUserId)throw new Error('حذف پیام در حالت مشاهده آزمایشی مجاز نیست.');
+    const now=new Date().toISOString(),correlationId=newId('correlation');
+    await this.storage.transaction(['users','chats','messages','workflow_history','audit_events','domain_events','meta'],'readwrite',async(tx)=>{
+      const [users,message,history,audits]=await Promise.all([tx.getAll<LocalUser>('users'),tx.get<OperationalRecord>('messages',messageId),tx.getAll<OperationalRecordHistory>('workflow_history'),tx.getAll<AuditEvent>('audit_events')]);
+      const currentActor=users.find((user)=>user.id===actor.id&&user.status==='active'&&user.companyId===actor.companyId);const conversation=message?.relatedRecordId?await tx.get<OperationalRecord>('chats',message.relatedRecordId):undefined;
+      if(!currentActor||!message||message.version!==expectedVersion||!conversation||!isChatMember(conversation,currentActor))throw new Error('این پیام هم‌زمان تغییر کرده یا دیگر در دسترس نیست.');
+      if(message.createdByUserId!==currentActor.id)throw new Error('فقط فرستنده می‌تواند پیام خودش را حذف کند.');
+      if(chatMessageIsDeleted(message))return;
+      if(Date.parse(now)-Date.parse(message.createdAt)>CHAT_MESSAGE_EDIT_WINDOW_MS)throw new Error('مهلت ۱۵ دقیقه‌ای حذف پیام تمام شده است.');
+      const contentDigest=await sha256TextHex(JSON.stringify({body:message.description,attachment:chatAttachment(message)}));
+      const updated={...message,title:'پیام حذف‌شده',description:'',status:'cancelled',updatedByActorId:currentActor.actorId,updatedAt:now,version:message.version+1,payload:{...message.payload,attachment:null,deleted:true,deletedAt:now,deletedByUserId:currentActor.id}};
+      await tx.put('messages',updated);await tx.put('chats',{...conversation,updatedByActorId:currentActor.actorId,updatedAt:now,version:conversation.version+1});
+      await tx.put('workflow_history',{id:newId('history'),recordId:message.id,moduleId:'message',sequence:history.filter((item)=>item.recordId===message.id).length+1,eventType:'edited',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,snapshot:{action:'message_deleted',contentSha256:contentDigest,hadAttachment:Boolean(chatAttachment(message))},occurredAt:now} satisfies OperationalRecordHistory);
+      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:actor.companyId,category:'system',action:'communications.message.deleted',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:`یک پیام در گفت‌وگوی «${conversation.title}» حذف شد.`,outcome:'success',correlationId,metadata:{conversationId:conversation.id,messageId:message.id}} satisfies AuditEvent);
+      await tx.put('domain_events',{id:newId('event'),aggregateType:'chat',aggregateId:conversation.id,eventType:'ChatMessageDeleted',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{messageId:message.id}} satisfies DomainEvent);await tx.put('meta',{id:'lastPersistedAt',value:now});
+    });
+    return this.loadState();
+  }
+
+  async createLetter(input:LetterInput,secondaryPassword?:string):Promise<FoundationState>{
     const state=await this.loadState();const actor=state.activeUser;
     if(state.session.actingAdminUserId)throw new Error('ثبت نامه در حالت مشاهده آزمایشی مجاز نیست.');
+    const classification=input.classification;
     const subject=input.subject.trim(),body=input.body.trim(),externalParty=input.externalParty?.trim()??'';
     const recipientUserIds=[...new Set((input.recipientUserIds??[]).filter((id)=>id&&id!==actor.id))];
     const recipientUnitIds=[...new Set((input.recipientUnitIds??[]).filter(Boolean))];
+    const copyRecipientUserIds=[...new Set((input.copyRecipientUserIds??[]).filter((id)=>id&&id!==actor.id&&!recipientUserIds.includes(id)))];
+    const requiresReply=Boolean(input.requiresReply),responseDueDate=input.responseDueDate?.trim()??'';
+    const correctsLetterId=input.correctsLetterId?.trim()??'';
     if(subject.length<3)throw new Error('موضوع نامه باید حداقل ۳ نویسه باشد.');if(body.length<5)throw new Error('متن نامه را کامل وارد کنید.');
     if(input.direction!=='outgoing'&&!recipientUserIds.length&&!recipientUnitIds.length)throw new Error('برای نامه حداقل یک فرد یا واحد گیرنده انتخاب کنید.');
+    if(['confidential','private'].includes(classification)&&input.direction!=='outgoing'&&!recipientUserIds.length)throw new Error('برای نامه محرمانه یا خصوصی، حداقل یک گیرنده مشخص انتخاب کنید.');
     if(input.direction!=='internal'&&externalParty.length<2)throw new Error('نام فرستنده یا گیرنده بیرونی را وارد کنید.');
+    if(requiresReply&&!/^\d{4}-\d{2}-\d{2}$/.test(responseDueDate))throw new Error('برای نامه نیازمند پاسخ، مهلت پاسخ معتبر انتخاب کنید.');
     if(input.direction==='incoming')requirePermission(actor,permissionFor('letter','create'),'ثبت نامه وارده فقط برای دبیرخانه مجاز است.');
+    const verified=input.direction==='incoming'?await this.verifyOwnSecondaryPassword(secondaryPassword??''):undefined;
     const attachment=input.attachment?validateLetterAttachment(input.attachment):undefined;const now=new Date().toISOString(),letterId=newId('letter'),correlationId=newId('correlation');
     await this.storage.transaction(['users','organizational_units','letters','workflow_history','notifications','audit_events','domain_events','meta'],'readwrite',async(tx)=>{
       const [users,units,letters,audits]=await Promise.all([tx.getAll<LocalUser>('users'),tx.getAll<OrganizationalUnit>('organizational_units'),tx.getAll<OperationalRecord>('letters'),tx.getAll<AuditEvent>('audit_events')]);
       const currentActor=users.find((user)=>user.id===actor.id&&user.status==='active'&&user.companyId===actor.companyId);if(!currentActor)throw new Error('حساب شما هم‌زمان تغییر کرده است؛ دوباره وارد شوید.');
+      const correctionSource=correctsLetterId?letters.find((record)=>record.id===correctsLetterId):undefined;
+      if(correctsLetterId&&(!correctionSource||correctionSource.companyId!==currentActor.companyId||correctionSource.createdByUserId!==currentActor.id||correctionSource.status!=='sent'||letterDirection(correctionSource)==='incoming'))throw new Error('نامه مرجع برای ثبت اصلاحیه معتبر نیست.');
+      if(correctionSource&&(input.direction!==letterDirection(correctionSource)||classification!==letterClassification(correctionSource)||!sameStrings(recipientUserIds,letterRecipientUserIds(correctionSource))||!sameStrings(recipientUnitIds,letterRecipientUnitIds(correctionSource))||!sameStrings(copyRecipientUserIds,letterCopyRecipientUserIds(correctionSource))||externalParty!==letterExternalParty(correctionSource)))throw new Error('اصلاحیه باید با همان نوع، سطح و مخاطبان نامه اصلی ثبت شود.');
+      if(verified&&currentActor.secondaryPasswordHash!==verified.hash)throw new Error('رمز دوم هم‌زمان تغییر کرده است؛ دوباره تلاش کنید.');
       const recipients=recipientUserIds.map((id)=>users.find((user)=>user.id===id&&user.status==='active'&&user.companyId===actor.companyId));if(recipients.some((user)=>!user))throw new Error('یکی از گیرندگان دیگر فعال یا هم‌شرکت نیست.');
+      const copyRecipients=copyRecipientUserIds.map((id)=>users.find((user)=>user.id===id&&user.status==='active'&&user.companyId===actor.companyId));if(copyRecipients.some((user)=>!user))throw new Error('یکی از گیرندگان رونوشت دیگر فعال یا هم‌شرکت نیست.');
       const recipientUnits=recipientUnitIds.map((id)=>units.find((unit)=>unit.id===id&&unit.status==='active'));if(recipientUnits.some((unit)=>!unit))throw new Error('یکی از واحدهای گیرنده دیگر فعال نیست.');
       if(recipientUnitIds.length&&recipients.some((user)=>!user?.unitId||!recipientUnitIds.includes(user.unitId)))throw new Error('گیرندگان مشخص باید از پرسنل واحدهای مقصد انتخاب شوند.');
       const committedAttachment=attachment?validateLetterAttachment(attachment):undefined;const status=input.direction==='incoming'?'sent':'draft';
+      const deliveredRecipientUserIds=status==='sent'?resolveLetterDeliveredRecipients(users,currentActor,recipientUserIds,recipientUnitIds,copyRecipientUserIds,classification):[];
       const persianYear=new Intl.DateTimeFormat('fa-IR-u-nu-latn',{year:'numeric'}).format(new Date(now)).replace(/\D/g,'');
       const letterSequence=letters.reduce((maximum,record)=>{const match=new RegExp(`^LTR-${persianYear}-(\\d+)$`).exec(record.trackingCode);return match?Math.max(maximum,Number(match[1])):maximum;},0)+1;
       const senderUnit=units.find((unit)=>unit.id===currentActor.unitId);
-      const letter:OperationalRecord={id:letterId,moduleId:'letter',domain:'letter',trackingCode:`LTR-${persianYear}-${String(letterSequence).padStart(5,'0')}`,title:subject,description:body.slice(0,180),status,priority:'normal',companyId:actor.companyId,unitId:currentActor.unitId,ownerPersonnelId:currentActor.personnelId,assigneeUserId:currentActor.id,createdByActorId:currentActor.actorId,createdByUserId:currentActor.id,updatedByActorId:currentActor.actorId,workflowVersion:1,version:1,payload:{direction:input.direction,body,recipientUserIds,recipientUnitIds,senderUnitId:currentActor.unitId??null,senderUnitName:senderUnit?.name??null,externalParty:externalParty||null,attachment:committedAttachment?{fileName:committedAttachment.fileName,mimeType:committedAttachment.mimeType,size:committedAttachment.size,dataUrl:committedAttachment.dataUrl}:null},createdAt:now,updatedAt:now};
-      await tx.put('letters',letter);await tx.put('workflow_history',{id:newId('history'),recordId:letter.id,moduleId:'letter',sequence:1,eventType:'created',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,snapshot:{direction:input.direction,status,recipientCount:recipientUserIds.length,recipientUnitCount:recipientUnitIds.length,externalParty:externalParty||null,hasAttachment:Boolean(committedAttachment),fileName:committedAttachment?.fileName??null},occurredAt:now} satisfies OperationalRecordHistory);
-      if(status==='sent'){const notifiedIds=new Set([...recipients.filter((item):item is LocalUser=>Boolean(item)).map((item)=>item.id),...users.filter((user)=>user.status==='active'&&user.companyId===actor.companyId&&user.id!==currentActor.id&&Boolean(user.unitId&&recipientUnitIds.includes(user.unitId))).map((user)=>user.id)]);for(const recipientId of notifiedIds)await tx.put('notifications',{id:newId('notification'),userId:recipientId,kind:'letter_received',title:`نامه جدید: ${subject}`,message:`نامه ${letter.trackingCode} در کارتابل شما ثبت شد.`,actorUserId:currentActor.id,relatedRecordId:letter.id,relatedModuleId:'letter',dedupeKey:`letter:${letter.id}:${recipientId}`,createdAt:now} satisfies UserNotification);}
-      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:actor.companyId,category:'system',action:'letter.created',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:`نامه «${subject}» ثبت شد.`,outcome:'success',correlationId,metadata:{letterId,direction:input.direction,status,recipientCount:recipientUserIds.length,recipientUnitCount:recipientUnitIds.length,hasAttachment:Boolean(committedAttachment)}} satisfies AuditEvent);
+      let letter:OperationalRecord={id:letterId,moduleId:'letter',domain:'letter',trackingCode:`LTR-${persianYear}-${String(letterSequence).padStart(5,'0')}`,title:subject,description:body.slice(0,180),status,priority:'normal',companyId:actor.companyId,unitId:currentActor.unitId,ownerPersonnelId:currentActor.personnelId,assigneeUserId:currentActor.id,createdByActorId:currentActor.actorId,createdByUserId:currentActor.id,updatedByActorId:currentActor.actorId,workflowVersion:1,version:1,payload:{direction:input.direction,classification,body,recipientUserIds,recipientUnitIds,copyRecipientUserIds,requiresReply,responseDueDate:requiresReply?responseDueDate:null,correctsLetterId:correctionSource?.id??null,deliveredRecipientUserIds,senderUnitId:currentActor.unitId??null,senderUnitName:senderUnit?.name??null,externalParty:externalParty||null,attachment:committedAttachment?{fileName:committedAttachment.fileName,mimeType:committedAttachment.mimeType,size:committedAttachment.size,dataUrl:committedAttachment.dataUrl}:null},createdAt:now,updatedAt:now};
+      if(status==='sent'){
+        const signatureIdentity={signerUserId:currentActor.id,signerActorId:currentActor.actorId,signerName:currentActor.name,signerUnitId:currentActor.unitId??'',signerUnitName:senderUnit?.name??'',signedAt:now};
+        const senderSignature:LetterDigitalSignature={kind:'system-sha256-v1',...signatureIdentity,digestSha256:await sha256TextHex(letterSignatureCanonicalText(letter,signatureIdentity))};
+        letter={...letter,payload:{...letter.payload,sentByUserId:currentActor.id,senderSignature}};
+      }
+      await tx.put('letters',letter);await tx.put('workflow_history',{id:newId('history'),recordId:letter.id,moduleId:'letter',sequence:1,eventType:'created',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,snapshot:{direction:input.direction,status,recipientCount:recipientUserIds.length,recipientUnitCount:recipientUnitIds.length,copyRecipientCount:copyRecipientUserIds.length,requiresReply,responseDueDate:requiresReply?responseDueDate:null,correctsLetterId:correctionSource?.id??null,externalParty:externalParty||null,hasAttachment:Boolean(committedAttachment),fileName:committedAttachment?.fileName??null},occurredAt:now} satisfies OperationalRecordHistory);
+      if(status==='sent'){for(const recipientId of deliveredRecipientUserIds)await tx.put('notifications',{id:newId('notification'),userId:recipientId,kind:'letter_received',title:letterIsProtected(letter)?`نامه ${letterClassification(letter)==='private'?'خصوصی':'محرمانه'} جدید`:`نامه جدید: ${subject}`,message:`نامه ${letter.trackingCode} در کارتابل شما ثبت شد.`,actorUserId:currentActor.id,relatedRecordId:letter.id,relatedModuleId:'letter',dedupeKey:`letter:${letter.id}:${recipientId}`,createdAt:now} satisfies UserNotification);}
+      if(verified)await tx.put('users',{...currentActor,secondaryPasswordFailedAttempts:0,secondaryPasswordLockedUntil:undefined});
+      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:actor.companyId,category:'system',action:'letter.created',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:letterIsProtected(letter)?`نامه ${letter.trackingCode} با سطح ${letterClassification(letter)} ثبت شد.`:`نامه «${subject}» ثبت شد.`,outcome:'success',correlationId,metadata:{letterId,direction:input.direction,classification,status,recipientCount:recipientUserIds.length,recipientUnitCount:recipientUnitIds.length,copyRecipientCount:copyRecipientUserIds.length,requiresReply,hasAttachment:Boolean(committedAttachment),secondaryAuthorization:Boolean(verified)}} satisfies AuditEvent);
       await tx.put('domain_events',{id:newId('event'),aggregateType:'letter',aggregateId:letter.id,eventType:'LetterCreated',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{direction:input.direction,status}} satisfies DomainEvent);await tx.put('meta',{id:'lastPersistedAt',value:now});
     });return this.loadState();
   }
 
-  async updateLetter(letterId:string,expectedVersion:number,input:LetterInput):Promise<FoundationState>{
+  async updateLetter(letterId:string,expectedVersion:number,input:LetterInput,secondaryPassword?:string):Promise<FoundationState>{
     const state=await this.loadState();const actor=state.activeUser;
     if(state.session.actingAdminUserId)throw new Error('ویرایش نامه در حالت مشاهده آزمایشی مجاز نیست.');
+    const classification=input.classification;
     const subject=input.subject.trim(),body=input.body.trim(),externalParty=input.externalParty?.trim()??'';
     const recipientUserIds=[...new Set((input.recipientUserIds??[]).filter((id)=>id&&id!==actor.id))];
     const recipientUnitIds=[...new Set((input.recipientUnitIds??[]).filter(Boolean))];
+    const copyRecipientUserIds=[...new Set((input.copyRecipientUserIds??[]).filter((id)=>id&&id!==actor.id&&!recipientUserIds.includes(id)))];
+    const requiresReply=Boolean(input.requiresReply),responseDueDate=input.responseDueDate?.trim()??'';
     if(subject.length<3)throw new Error('موضوع نامه باید حداقل ۳ نویسه باشد.');if(body.length<5)throw new Error('متن نامه را کامل وارد کنید.');
     if(input.direction!=='outgoing'&&!recipientUserIds.length&&!recipientUnitIds.length)throw new Error('برای نامه حداقل یک فرد یا واحد گیرنده انتخاب کنید.');
+    if(['confidential','private'].includes(classification)&&input.direction!=='outgoing'&&!recipientUserIds.length)throw new Error('برای نامه محرمانه یا خصوصی، حداقل یک گیرنده مشخص انتخاب کنید.');
     if(input.direction!=='internal'&&externalParty.length<2)throw new Error('نام فرستنده یا گیرنده بیرونی را وارد کنید.');
+    if(requiresReply&&!/^\d{4}-\d{2}-\d{2}$/.test(responseDueDate))throw new Error('برای نامه نیازمند پاسخ، مهلت پاسخ معتبر انتخاب کنید.');
+    const existingRaw=await this.storage.get<OperationalRecord>('letters',letterId);
+    const verified=(existingRaw&&letterIsProtected(existingRaw))||['confidential','private'].includes(classification)?await this.verifyOwnSecondaryPassword(secondaryPassword??''):undefined;
     const attachment=input.attachment?validateLetterAttachment(input.attachment):undefined;const now=new Date().toISOString(),correlationId=newId('correlation');
     await this.storage.transaction(['users','organizational_units','letters','workflow_history','audit_events','domain_events','meta'],'readwrite',async(tx)=>{
       const [users,units,current,history,audits]=await Promise.all([tx.getAll<LocalUser>('users'),tx.getAll<OrganizationalUnit>('organizational_units'),tx.get<OperationalRecord>('letters',letterId),tx.getAll<OperationalRecordHistory>('workflow_history'),tx.getAll<AuditEvent>('audit_events')]);
       const currentActor=users.find((user)=>user.id===actor.id&&user.status==='active'&&user.companyId===actor.companyId);if(!currentActor||!current||current.version!==expectedVersion)throw new Error('این نامه هم‌زمان تغییر کرده است؛ صفحه را تازه کنید.');
+      if(verified&&currentActor.secondaryPasswordHash!==verified.hash)throw new Error('رمز دوم هم‌زمان تغییر کرده است؛ دوباره تلاش کنید.');
       if(current.createdByUserId!==currentActor.id)throw new Error('فقط نویسنده نامه می‌تواند آن را ویرایش کند.');
       if(!['draft','in_review'].includes(current.status))throw new Error('پس از اقدام بازبین یا صدور مجوز، ویرایش نامه ممکن نیست.');
       const actedByOther=history.some((item)=>item.recordId===current.id&&item.actorId!==currentActor.actorId);if(actedByOther)throw new Error('شخص دیگری روی این نامه اقدام کرده است؛ ویرایش دیگر مجاز نیست.');
       const recipients=recipientUserIds.map((id)=>users.find((user)=>user.id===id&&user.status==='active'&&user.companyId===actor.companyId));if(recipients.some((user)=>!user))throw new Error('یکی از گیرندگان دیگر فعال یا هم‌شرکت نیست.');
+      const copyRecipients=copyRecipientUserIds.map((id)=>users.find((user)=>user.id===id&&user.status==='active'&&user.companyId===actor.companyId));if(copyRecipients.some((user)=>!user))throw new Error('یکی از گیرندگان رونوشت دیگر فعال یا هم‌شرکت نیست.');
       const recipientUnits=recipientUnitIds.map((id)=>units.find((unit)=>unit.id===id&&unit.status==='active'));if(recipientUnits.some((unit)=>!unit))throw new Error('یکی از واحدهای گیرنده دیگر فعال نیست.');
       if(recipientUnitIds.length&&recipients.some((user)=>!user?.unitId||!recipientUnitIds.includes(user.unitId)))throw new Error('گیرندگان مشخص باید از پرسنل واحدهای مقصد انتخاب شوند.');
       const senderUnit=units.find((unit)=>unit.id===currentActor.unitId);const previousStatus=current.status;
-      const updated:OperationalRecord={...current,title:subject,description:body.slice(0,180),status:'draft',unitId:currentActor.unitId,updatedByActorId:currentActor.actorId,updatedAt:now,version:current.version+1,payload:{...current.payload,direction:input.direction,body,recipientUserIds,recipientUnitIds,senderUnitId:currentActor.unitId??null,senderUnitName:senderUnit?.name??null,externalParty:externalParty||null,attachment:attachment?{fileName:attachment.fileName,mimeType:attachment.mimeType,size:attachment.size,dataUrl:attachment.dataUrl}:null,reviewRequestedByUserId:null,approvedByUserId:null,sentByUserId:null,senderSignature:null}};
-      await tx.put('letters',updated);await tx.put('workflow_history',{id:newId('history'),recordId:current.id,moduleId:'letter',sequence:history.filter((item)=>item.recordId===current.id).length+1,eventType:'edited',fromState:previousStatus,toState:'draft',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,snapshot:{action:'edited',subjectChanged:current.title!==subject,recipientCount:recipientUserIds.length,recipientUnitCount:recipientUnitIds.length,hasAttachment:Boolean(attachment)},occurredAt:now} satisfies OperationalRecordHistory);
-      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:current.companyId,category:'system',action:'letter.edited',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:`نامه «${current.title}» ویرایش و به پیش‌نویس بازگردانده شد.`,outcome:'success',correlationId,metadata:{letterId:current.id,previousVersion:current.version,nextVersion:updated.version,fromState:previousStatus,toState:'draft'}} satisfies AuditEvent);
+      const updated:OperationalRecord={...current,title:subject,description:body.slice(0,180),status:'draft',unitId:currentActor.unitId,updatedByActorId:currentActor.actorId,updatedAt:now,version:current.version+1,payload:{...current.payload,direction:input.direction,classification,body,recipientUserIds,recipientUnitIds,copyRecipientUserIds,requiresReply,responseDueDate:requiresReply?responseDueDate:null,deliveredRecipientUserIds:[],senderUnitId:currentActor.unitId??null,senderUnitName:senderUnit?.name??null,externalParty:externalParty||null,attachment:attachment?{fileName:attachment.fileName,mimeType:attachment.mimeType,size:attachment.size,dataUrl:attachment.dataUrl}:null,reviewRequestedByUserId:null,approvedByUserId:null,sentByUserId:null,senderSignature:null}};
+      await tx.put('letters',updated);await tx.put('workflow_history',{id:newId('history'),recordId:current.id,moduleId:'letter',sequence:history.filter((item)=>item.recordId===current.id).length+1,eventType:'edited',fromState:previousStatus,toState:'draft',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,snapshot:{action:'edited',subjectChanged:current.title!==subject,recipientCount:recipientUserIds.length,recipientUnitCount:recipientUnitIds.length,copyRecipientCount:copyRecipientUserIds.length,requiresReply,responseDueDate:requiresReply?responseDueDate:null,hasAttachment:Boolean(attachment)},occurredAt:now} satisfies OperationalRecordHistory);
+      if(verified)await tx.put('users',{...currentActor,secondaryPasswordFailedAttempts:0,secondaryPasswordLockedUntil:undefined});
+      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:current.companyId,category:'system',action:'letter.edited',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:letterIsProtected(updated)?`نامه محرمانه ${current.trackingCode} ویرایش و به پیش‌نویس بازگردانده شد.`:`نامه «${current.title}» ویرایش و به پیش‌نویس بازگردانده شد.`,outcome:'success',correlationId,metadata:{letterId:current.id,previousVersion:current.version,nextVersion:updated.version,fromState:previousStatus,toState:'draft',classification,secondaryAuthorization:Boolean(verified)}} satisfies AuditEvent);
       await tx.put('domain_events',{id:newId('event'),aggregateType:'letter',aggregateId:current.id,eventType:'LetterEdited',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{fromState:previousStatus,toState:'draft',version:updated.version}} satisfies DomainEvent);await tx.put('meta',{id:'lastPersistedAt',value:now});
     });return this.loadState();
   }
 
-  async transitionLetter(letterId:string,expectedVersion:number,action:LetterAction):Promise<FoundationState>{
-    const state=await this.loadState();const actor=state.activeUser;if(state.session.actingAdminUserId)throw new Error('اقدام روی نامه در حالت مشاهده آزمایشی مجاز نیست.');const now=new Date().toISOString(),correlationId=newId('correlation');
-    await this.storage.transaction(['users','organizational_units','letters','workflow_history','notifications','audit_events','domain_events','meta'],'readwrite',async(tx)=>{
-      const [users,units,current,history,audits]=await Promise.all([tx.getAll<LocalUser>('users'),tx.getAll<OrganizationalUnit>('organizational_units'),tx.get<OperationalRecord>('letters',letterId),tx.getAll<OperationalRecordHistory>('workflow_history'),tx.getAll<AuditEvent>('audit_events')]);
+  async transitionLetter(letterId:string,expectedVersion:number,action:LetterAction,secondaryPassword?:string):Promise<FoundationState>{
+    const state=await this.loadState();const actor=state.activeUser;if(state.session.actingAdminUserId)throw new Error('اقدام روی نامه در حالت مشاهده آزمایشی مجاز نیست.');
+    const verified=action==='approve'||action==='send'?await this.verifyOwnSecondaryPassword(secondaryPassword??''):undefined;
+    const now=new Date().toISOString(),correlationId=newId('correlation');
+    await this.storage.transaction(['users','security_roles','organizational_units','letters','workflow_history','notifications','audit_events','domain_events','meta'],'readwrite',async(tx)=>{
+      const [rawUsers,roles,units,current,history,audits]=await Promise.all([tx.getAll<LocalUser>('users'),tx.getAll<SecurityRole>('security_roles'),tx.getAll<OrganizationalUnit>('organizational_units'),tx.get<OperationalRecord>('letters',letterId),tx.getAll<OperationalRecordHistory>('workflow_history'),tx.getAll<AuditEvent>('audit_events')]);
+      const users=rawUsers.map((user)=>resolveUserAccess(user,roles));
       const currentActor=users.find((user)=>user.id===actor.id&&user.status==='active');if(!currentActor||!current||current.version!==expectedVersion)throw new Error('این نامه در پنجره دیگری تغییر کرده است؛ صفحه را تازه کنید.');
+      if(current.companyId!==currentActor.companyId)throw new Error('این نامه خارج از شرکت حساب فعال است.');
+      if(verified&&currentActor.secondaryPasswordHash!==verified.hash)throw new Error('رمز دوم هم‌زمان تغییر کرده است؛ دوباره تلاش کنید.');
       if(letterDirection(current)==='incoming')throw new Error('نامه وارده نیاز به چرخه ارسال ندارد.');let nextStatus:string,eventType:string;
-      if(action==='submit_review'){if(current.status!=='draft'||(current.createdByUserId!==actor.id&&!can(actor,permissionFor('letter','edit'))))throw new Error('این پیش‌نویس قابل ارسال برای بازبینی نیست.');nextStatus='in_review';eventType='LetterSubmittedForReview';}
-      else if(action==='approve'){requirePermission(actor,permissionFor('letter','approve'),'مجوز تأیید نامه را ندارید.');if(current.status!=='in_review')throw new Error('فقط نامه در حال بازبینی قابل تأیید است.');if(current.createdByUserId===actor.id)throw new Error('سازنده نامه نمی‌تواند همان نامه را تأیید کند.');nextStatus='approved_for_send';eventType='LetterApproved';}
-      else{if(current.status!=='approved_for_send')throw new Error('نامه هنوز مجوز ارسال ندارد.');if(current.createdByUserId!==actor.id&&!can(actor,permissionFor('letter','transition')))throw new Error('ارسال این نامه در اختیار شما نیست.');nextStatus='sent';eventType='LetterSent';}
+      if(action==='submit_review'){
+        const delegatedDecision=authorize({persona:currentActor,permission:permissionFor('letter','edit'),action:'edit',resource:operationalRecordResource(currentActor,current)});
+        if(current.status!=='draft'||(current.createdByUserId!==currentActor.id&&!delegatedDecision.allowed))throw new Error('این پیش‌نویس قابل ارسال برای بازبینی نیست.');nextStatus='in_review';eventType='LetterSubmittedForReview';
+      }
+      else if(action==='approve'){
+        const decision=authorize({persona:currentActor,permission:permissionFor('letter','approve'),action:'approve',resource:operationalRecordResource(currentActor,current)});
+        if(!decision.allowed)throw new Error(decision.reasonFa);if(current.status!=='in_review')throw new Error('فقط نامه در حال بازبینی قابل تأیید است.');if(current.createdByUserId===currentActor.id)throw new Error('سازنده نامه نمی‌تواند همان نامه را تأیید کند.');nextStatus='approved_for_send';eventType='LetterApproved';
+      }
+      else{
+        const delegatedDecision=authorize({persona:currentActor,permission:permissionFor('letter','transition'),action:'transition',resource:operationalRecordResource(currentActor,current)});
+        if(current.status!=='approved_for_send'||(current.createdByUserId!==currentActor.id&&!delegatedDecision.allowed))throw new Error('ارسال این نامه در اختیار شما نیست.');nextStatus='sent';eventType='LetterSent';
+      }
+      const deliveredRecipientUserIds=action==='send'?resolveLetterDeliveredRecipients(users,currentActor,letterRecipientUserIds(current),letterRecipientUnitIds(current),letterCopyRecipientUserIds(current),letterClassification(current)):letterDeliveredRecipientUserIds(current);
       const signerUnit=units.find((unit)=>unit.id===currentActor.unitId);const signatureIdentity={signerUserId:currentActor.id,signerActorId:currentActor.actorId,signerName:currentActor.name,signerUnitId:currentActor.unitId??'',signerUnitName:signerUnit?.name??'',signedAt:now};
-      const senderSignature:LetterDigitalSignature|undefined=action==='send'?{kind:'system-sha256-v1',...signatureIdentity,digestSha256:await sha256TextHex(letterSignatureCanonicalText(current,signatureIdentity))}:undefined;
-      const updated:OperationalRecord={...current,status:nextStatus,updatedByActorId:currentActor.actorId,updatedAt:now,version:current.version+1,payload:{...current.payload,[action==='approve'?'approvedByUserId':action==='send'?'sentByUserId':'reviewRequestedByUserId']:currentActor.id,...(senderSignature?{senderSignature}: {})}};await tx.put('letters',updated);
+      const signatureRecord:OperationalRecord={...current,payload:{...current.payload,deliveredRecipientUserIds}};
+      const senderSignature:LetterDigitalSignature|undefined=action==='send'?{kind:'system-sha256-v1',...signatureIdentity,digestSha256:await sha256TextHex(letterSignatureCanonicalText(signatureRecord,signatureIdentity))}:undefined;
+      const updated:OperationalRecord={...current,status:nextStatus,updatedByActorId:currentActor.actorId,updatedAt:now,version:current.version+1,payload:{...current.payload,deliveredRecipientUserIds,[action==='approve'?'approvedByUserId':action==='send'?'sentByUserId':'reviewRequestedByUserId']:currentActor.id,...(senderSignature?{senderSignature}: {})}};await tx.put('letters',updated);
       const sequence=history.filter((item)=>item.recordId===current.id).length+1;await tx.put('workflow_history',{id:newId('history'),recordId:current.id,moduleId:'letter',sequence,eventType:'transitioned',fromState:current.status,toState:nextStatus,actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,snapshot:{action,status:nextStatus},occurredAt:now} satisfies OperationalRecordHistory);
-      if(action==='send'){const unitIds=letterRecipientUnitIds(current);const recipientIds=new Set([...letterRecipientUserIds(current),...users.filter((user)=>user.status==='active'&&user.companyId===current.companyId&&user.id!==currentActor.id&&Boolean(user.unitId&&unitIds.includes(user.unitId))).map((user)=>user.id)]);for(const recipientId of recipientIds){const recipient=users.find((user)=>user.id===recipientId&&user.status==='active'&&user.companyId===current.companyId);if(recipient)await tx.put('notifications',{id:newId('notification'),userId:recipient.id,kind:'letter_received',title:`نامه جدید: ${current.title}`,message:`نامه ${current.trackingCode} در کارتابل شما ثبت شد.`,actorUserId:currentActor.id,relatedRecordId:current.id,relatedModuleId:'letter',dedupeKey:`letter:${current.id}:${recipient.id}`,createdAt:now} satisfies UserNotification);}}
-      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:current.companyId,category:'system',action:`letter.${action}`,actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:`وضعیت نامه «${current.title}» به ${nextStatus} تغییر کرد.`,outcome:'success',correlationId,metadata:{letterId:current.id,fromState:current.status,toState:nextStatus,action}} satisfies AuditEvent);await tx.put('domain_events',{id:newId('event'),aggregateType:'letter',aggregateId:current.id,eventType,actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{fromState:current.status,toState:nextStatus}} satisfies DomainEvent);await tx.put('meta',{id:'lastPersistedAt',value:now});
+      if(action==='send'){for(const recipientId of deliveredRecipientUserIds){const recipient=users.find((user)=>user.id===recipientId&&user.status==='active'&&user.companyId===current.companyId);if(recipient)await tx.put('notifications',{id:newId('notification'),userId:recipient.id,kind:'letter_received',title:letterIsProtected(current)?`نامه ${letterClassification(current)==='private'?'خصوصی':'محرمانه'} جدید`:`نامه جدید: ${current.title}`,message:`نامه ${current.trackingCode} در کارتابل شما ثبت شد.`,actorUserId:currentActor.id,relatedRecordId:current.id,relatedModuleId:'letter',dedupeKey:`letter:${current.id}:${recipient.id}`,createdAt:now} satisfies UserNotification);}}
+      if(verified)await tx.put('users',{...currentActor,secondaryPasswordFailedAttempts:0,secondaryPasswordLockedUntil:undefined});
+      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:current.companyId,category:'system',action:`letter.${action}`,actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:letterIsProtected(current)?`وضعیت نامه محرمانه ${current.trackingCode} به ${nextStatus} تغییر کرد.`:`وضعیت نامه «${current.title}» به ${nextStatus} تغییر کرد.`,outcome:'success',correlationId,metadata:{letterId:current.id,classification:letterClassification(current),fromState:current.status,toState:nextStatus,action,secondaryAuthorization:Boolean(verified)}} satisfies AuditEvent);await tx.put('domain_events',{id:newId('event'),aggregateType:'letter',aggregateId:current.id,eventType,actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{fromState:current.status,toState:nextStatus}} satisfies DomainEvent);await tx.put('meta',{id:'lastPersistedAt',value:now});
+    });return this.loadState();
+  }
+
+  async markLetterRead(letterId:string):Promise<FoundationState>{
+    const state=await this.loadState();const actor=state.activeUser;if(state.session.actingAdminUserId)throw new Error('ثبت مشاهده نامه در حالت مشاهده آزمایشی مجاز نیست.');
+    const now=new Date().toISOString(),correlationId=newId('correlation');
+    await this.storage.transaction(['letters','workflow_history','audit_events','domain_events','meta'],'readwrite',async(tx)=>{
+      const [current,history,audits]=await Promise.all([tx.get<OperationalRecord>('letters',letterId),tx.getAll<OperationalRecordHistory>('workflow_history'),tx.getAll<AuditEvent>('audit_events')]);
+      if(!current||current.status!=='sent'||!isLetterParticipant(current,actor))throw new Error('این نامه در کارتابل شما قابل مشاهده نیست.');
+      if(history.some((item)=>item.recordId===letterId&&item.eventType==='viewed'&&item.effectiveUserId===actor.id))return;
+      await tx.put('workflow_history',{id:newId('history'),recordId:current.id,moduleId:'letter',sequence:history.filter((item)=>item.recordId===current.id).length+1,eventType:'viewed',actorId:actor.actorId,actorName:actor.name,effectiveUserId:actor.id,snapshot:{action:'read'},occurredAt:now} satisfies OperationalRecordHistory);
+      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:current.companyId,category:'system',action:'letter.read',actorId:actor.actorId,actorName:actor.name,effectiveUserId:actor.id,occurredAt:now,summary:`مشاهده نامه ${current.trackingCode} ثبت شد.`,outcome:'success',correlationId,metadata:{letterId:current.id}} satisfies AuditEvent);
+      await tx.put('domain_events',{id:newId('event'),aggregateType:'letter',aggregateId:current.id,eventType:'LetterRead',actorId:actor.actorId,occurredAt:now,correlationId,payload:{readerUserId:actor.id}} satisfies DomainEvent);await tx.put('meta',{id:'lastPersistedAt',value:now});
+    });return this.loadState();
+  }
+
+  async setLetterArchived(letterId:string,archived:boolean):Promise<FoundationState>{
+    const state=await this.loadState();const actor=state.activeUser;if(state.session.actingAdminUserId)throw new Error('بایگانی نامه در حالت مشاهده آزمایشی مجاز نیست.');
+    const now=new Date().toISOString(),correlationId=newId('correlation'),eventType=archived?'archived_for_user':'restored_for_user';
+    await this.storage.transaction(['letters','workflow_history','audit_events','domain_events','meta'],'readwrite',async(tx)=>{
+      const [current,history,audits]=await Promise.all([tx.get<OperationalRecord>('letters',letterId),tx.getAll<OperationalRecordHistory>('workflow_history'),tx.getAll<AuditEvent>('audit_events')]);
+      if(!current||current.status!=='sent'||!isLetterParticipant(current,actor))throw new Error('این نامه در کارتابل شما قابل بایگانی نیست.');
+      const last=history.filter((item)=>item.recordId===letterId&&item.effectiveUserId===actor.id&&(item.eventType==='archived_for_user'||item.eventType==='restored_for_user')).sort((left,right)=>left.occurredAt.localeCompare(right.occurredAt)||left.sequence-right.sequence).at(-1);
+      if((last?.eventType==='archived_for_user')===archived)return;
+      await tx.put('workflow_history',{id:newId('history'),recordId:current.id,moduleId:'letter',sequence:history.filter((item)=>item.recordId===current.id).length+1,eventType,actorId:actor.actorId,actorName:actor.name,effectiveUserId:actor.id,snapshot:{action:archived?'archive':'restore'},occurredAt:now} satisfies OperationalRecordHistory);
+      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:current.companyId,category:'system',action:archived?'letter.archived':'letter.restored',actorId:actor.actorId,actorName:actor.name,effectiveUserId:actor.id,occurredAt:now,summary:`نامه ${current.trackingCode} ${archived?'در کارتابل شخصی بایگانی':'به کارتابل شخصی بازگردانده'} شد.`,outcome:'success',correlationId,metadata:{letterId:current.id}} satisfies AuditEvent);
+      await tx.put('domain_events',{id:newId('event'),aggregateType:'letter',aggregateId:current.id,eventType:archived?'LetterArchivedForUser':'LetterRestoredForUser',actorId:actor.actorId,occurredAt:now,correlationId,payload:{userId:actor.id}} satisfies DomainEvent);await tx.put('meta',{id:'lastPersistedAt',value:now});
     });return this.loadState();
   }
 
@@ -1004,6 +1247,7 @@ export class LocalFoundationService {
 
   async createUser(input: UserInput): Promise<FoundationState> {
     const state = await this.loadState(); const actor = state.activeUser; requirePermission(actor, 'organization.users.create', 'مجوز ایجاد کاربر را ندارید.'); requirePermission(actor, 'organization.roles.assign', 'مجوز انتساب نقش و ریزمجوز به کاربر را ندارید.'); validateUserInput(input, state); if (!input.password || input.password.length < 8) throw new Error('رمز عبور اولیه باید حداقل ۸ نویسه باشد.');
+    if (input.personnelId) throw new Error('اتصال حساب به پرسنل فقط از داخل پرونده همان پرسنل انجام می‌شود تا پیوند دوطرفه و اتمیک بماند.');
     assertDirectAccessAssignmentAllowed(actor, undefined, input.roleIds, input.permissionGrants ?? [], input.permissionDenials ?? [], state.roles, state.session.actingAdminUserId);
     const now = new Date().toISOString(); const id = newId('user'); const primaryRole = state.roles.find((role) => role.id === input.roleIds[0])!;
     const overrides = normalizeUserPermissionOverrides(input, state);
@@ -1100,6 +1344,133 @@ export class LocalFoundationService {
     return this.loadState();
   }
 
+  async requestOwnSecondaryPasswordOtp(): Promise<LocalSmsPreview> {
+    const state = await this.loadState();
+    if (state.session.actingAdminUserId) throw new Error('تعریف یا بازیابی رمز دوم در حالت مشاهده آزمایشی مجاز نیست.');
+    const otp = createLocalOtp();
+    const otpHash = await hashPassword(otp);
+    const now = new Date();
+    let mobile = '';
+    await this.storage.transaction(['users','personnel','audit_events','domain_events','meta'], 'readwrite', async (tx) => {
+      const [current, personnel, audits] = await Promise.all([
+        tx.get<LocalUser>('users', state.activeUser.id), tx.getAll<PersonnelRecord>('personnel'), tx.getAll<AuditEvent>('audit_events'),
+      ]);
+      if (!current || current.status !== 'active') throw new Error('حساب فعال پیدا نشد.');
+      const profile = personnel.find((person) => person.id === current.personnelId || person.linkedUserId === current.id);
+      mobile = normalizePhone(profile?.primaryMobile ?? '');
+      if (!/^09\d{9}$/.test(mobile)) throw new Error('شماره همراه معتبر در پرونده پرسنلی شما ثبت نشده است؛ ابتدا با منابع انسانی هماهنگ کنید.');
+      const lastRequested = current.secondaryPasswordOtpRequestedAt ? new Date(current.secondaryPasswordOtpRequestedAt).getTime() : 0;
+      if (lastRequested && now.getTime() - lastRequested < 60_000) throw new Error('برای درخواست دوباره کد، یک دقیقه صبر کنید.');
+      const occurredAt = now.toISOString();
+      const correlationId = newId('correlation');
+      await tx.put('users', {...current, secondaryPasswordOtpHash: otpHash, secondaryPasswordOtpExpiresAt: new Date(now.getTime() + SECONDARY_PASSWORD_OTP_TTL_MS).toISOString(), secondaryPasswordOtpRequestedAt: occurredAt, secondaryPasswordOtpAttempts: 0});
+      await tx.put('audit_events', {id:newId('audit'),sequence:nextSequence(audits),companyId:current.companyId,category:'session',action:'account.secondary_password.otp_requested',actorId:current.actorId,actorName:current.name,effectiveUserId:current.id,occurredAt,summary:'کد تأیید تعریف یا بازیابی رمز دوم درخواست شد.',outcome:'success',correlationId,metadata:{userId:current.id}} satisfies AuditEvent);
+      await tx.put('domain_events', {id:newId('event'),aggregateType:'user',aggregateId:current.id,eventType:'SecondaryPasswordOtpRequested',actorId:current.actorId,occurredAt,correlationId,payload:{}} satisfies DomainEvent);
+      await tx.put('meta', {id:'lastPersistedAt', value: occurredAt});
+    });
+    return {maskedMobile: maskMobile(mobile), verificationCode: otp, message: `کد تأیید شاهراه برای تعریف یا بازیابی رمز دوم: ${otp}`};
+  }
+
+  async setOwnSecondaryPassword(expectedVersionToken: string, input: SecondaryPasswordChangeInput): Promise<FoundationState> {
+    const state = await this.loadState();
+    if (state.session.actingAdminUserId) throw new Error('تغییر رمز دوم در حالت مشاهده آزمایشی مجاز نیست.');
+    const verificationCode = normalizeDigits(input.verificationCode).replace(/\D/g, '');
+    const secondaryPassword = normalizeDigits(input.secondaryPassword).replace(/\D/g, '');
+    if (!/^\d{6}$/.test(verificationCode)) throw new Error('کد تأیید باید ۶ رقم باشد.');
+    if (!/^\d{4}$/.test(secondaryPassword)) throw new Error('رمز دوم ثابت باید دقیقاً ۴ رقم باشد.');
+    if (/^(\d)\1{3}$/.test(secondaryPassword) || ['1234','4321'].includes(secondaryPassword)) throw new Error('یک رمز دوم غیرقابل‌حدس انتخاب کنید؛ اعداد تکراری یا ترتیبی مجاز نیستند.');
+    const secondaryPasswordHash = await hashPassword(secondaryPassword);
+    // WebCrypto can yield long enough for a real IndexedDB transaction to
+    // auto-commit. Verify outside the transaction, then bind the result to the
+    // exact challenge snapshot again inside the atomic write.
+    const challenge = await this.storage.get<LocalUser>('users', state.activeUser.id);
+    const challengeNow = Date.now();
+    const challengeWasValid = Boolean(challenge?.secondaryPasswordOtpHash && challenge.secondaryPasswordOtpExpiresAt && new Date(challenge.secondaryPasswordOtpExpiresAt).getTime() > challengeNow);
+    const otpMatchesSnapshot = Boolean(challengeWasValid && await verifyPassword(verificationCode, challenge!.secondaryPasswordOtpHash!));
+    let validationError = '';
+    await this.storage.transaction(['users','audit_events','domain_events','meta'], 'readwrite', async (tx) => {
+      const current = await tx.get<LocalUser>('users', state.activeUser.id);
+      if (!current || current.status !== 'active' || userConcurrencyToken(current) !== expectedVersionToken) throw new Error('حساب در پنجره دیگری تغییر کرده است؛ صفحه را تازه کنید.');
+      if (!challenge || current.secondaryPasswordOtpHash !== challenge.secondaryPasswordOtpHash || current.secondaryPasswordOtpExpiresAt !== challenge.secondaryPasswordOtpExpiresAt || (current.secondaryPasswordOtpAttempts ?? 0) !== (challenge.secondaryPasswordOtpAttempts ?? 0)) throw new Error('کد تأیید در پنجره دیگری تغییر کرده است؛ کد تازه بگیرید.');
+      const now = new Date();
+      const audits = await tx.getAll<AuditEvent>('audit_events');
+      const challengeValid = Boolean(current.secondaryPasswordOtpHash && current.secondaryPasswordOtpExpiresAt && new Date(current.secondaryPasswordOtpExpiresAt).getTime() > now.getTime());
+      const otpMatches = challengeValid && otpMatchesSnapshot;
+      if (!otpMatches) {
+        const attempts = (current.secondaryPasswordOtpAttempts ?? 0) + 1;
+        validationError = challengeValid && attempts < SECONDARY_PASSWORD_MAX_ATTEMPTS ? 'کد تأیید صحیح نیست.' : 'کد تأیید منقضی یا مسدود شده است؛ کد تازه بگیرید.';
+        const occurredAt = now.toISOString(); const correlationId = newId('correlation');
+        await tx.put('users', {...current, secondaryPasswordOtpAttempts: attempts, ...(attempts >= SECONDARY_PASSWORD_MAX_ATTEMPTS ? {secondaryPasswordOtpHash:undefined,secondaryPasswordOtpExpiresAt:undefined} : {})});
+        await tx.put('audit_events', {id:newId('audit'),sequence:nextSequence(audits),companyId:current.companyId,category:'session',action:'account.secondary_password.otp_failed',actorId:current.actorId,actorName:current.name,effectiveUserId:current.id,occurredAt,summary:'کد تأیید رمز دوم نامعتبر بود.',outcome:'denied',correlationId,metadata:{userId:current.id,attempts}} satisfies AuditEvent);
+        await tx.put('domain_events', {id:newId('event'),aggregateType:'user',aggregateId:current.id,eventType:'SecondaryPasswordOtpFailed',actorId:current.actorId,occurredAt,correlationId,payload:{attempts}} satisfies DomainEvent);
+        await tx.put('meta', {id:'lastPersistedAt', value: occurredAt});
+        return;
+      }
+      const occurredAt = now.toISOString(); const correlationId = newId('correlation');
+      await tx.put('users', {...current, secondaryPasswordHash, secondaryPasswordUpdatedAt:occurredAt, secondaryPasswordOtpHash:undefined, secondaryPasswordOtpExpiresAt:undefined, secondaryPasswordOtpRequestedAt:undefined, secondaryPasswordOtpAttempts:0, secondaryPasswordFailedAttempts:0, secondaryPasswordLockedUntil:undefined});
+      await tx.put('audit_events', {id:newId('audit'),sequence:nextSequence(audits),companyId:current.companyId,category:'session',action:'account.secondary_password.changed',actorId:current.actorId,actorName:current.name,effectiveUserId:current.id,occurredAt,summary:'رمز دوم ثابت حساب با تأیید پیامکی تنظیم شد.',outcome:'success',correlationId,metadata:{userId:current.id}} satisfies AuditEvent);
+      await tx.put('domain_events', {id:newId('event'),aggregateType:'user',aggregateId:current.id,eventType:'SecondaryPasswordChanged',actorId:current.actorId,occurredAt,correlationId,payload:{}} satisfies DomainEvent);
+      await tx.put('meta', {id:'lastPersistedAt', value: occurredAt});
+    });
+    if (validationError) throw new Error(validationError);
+    return this.loadState();
+  }
+
+  private async verifyOwnSecondaryPassword(secondaryPassword: string): Promise<{userId:string;hash:string}> {
+    const state = await this.loadState();
+    if (state.session.actingAdminUserId) throw new Error('استفاده از رمز دوم در حالت مشاهده آزمایشی مجاز نیست.');
+    const pin = normalizeDigits(secondaryPassword).replace(/\D/g, '');
+    if (!/^\d{4}$/.test(pin)) throw new Error('رمز دوم ثابت باید ۴ رقم باشد.');
+    const credential = await this.storage.get<LocalUser>('users', state.activeUser.id);
+    if (!credential || credential.status !== 'active') throw new Error('حساب فعال پیدا نشد.');
+    if (!credential.secondaryPasswordHash) throw new Error('ابتدا در «حساب و امنیت» رمز دوم ثابت خود را تعریف کنید.');
+    if (credential.secondaryPasswordLockedUntil && new Date(credential.secondaryPasswordLockedUntil).getTime() > Date.now()) throw new Error('رمز دوم به‌دلیل چند تلاش ناموفق موقتاً قفل شده است؛ کمی بعد دوباره تلاش کنید.');
+    const pinMatchesSnapshot = await verifyPassword(pin, credential.secondaryPasswordHash);
+    let verifiedHash = ''; let validationError = '';
+    await this.storage.transaction(['users','audit_events','domain_events','meta'], 'readwrite', async (tx) => {
+      const current = await tx.get<LocalUser>('users', state.activeUser.id);
+      if (!current || current.status !== 'active') throw new Error('حساب فعال پیدا نشد.');
+      if (current.secondaryPasswordHash !== credential.secondaryPasswordHash || current.secondaryPasswordLockedUntil !== credential.secondaryPasswordLockedUntil || (current.secondaryPasswordFailedAttempts ?? 0) !== (credential.secondaryPasswordFailedAttempts ?? 0)) throw new Error('وضعیت رمز دوم در پنجره دیگری تغییر کرده است؛ دوباره تلاش کنید.');
+      const now = new Date(); const audits = await tx.getAll<AuditEvent>('audit_events');
+      if (!pinMatchesSnapshot) {
+        const attempts = (current.secondaryPasswordFailedAttempts ?? 0) + 1;
+        const lockedUntil = attempts >= SECONDARY_PASSWORD_MAX_ATTEMPTS ? new Date(now.getTime() + SECONDARY_PASSWORD_LOCK_MS).toISOString() : undefined;
+        validationError = lockedUntil ? 'رمز دوم به‌دلیل چند تلاش ناموفق، ۱۵ دقیقه قفل شد.' : `رمز دوم صحیح نیست؛ ${SECONDARY_PASSWORD_MAX_ATTEMPTS - attempts} تلاش دیگر باقی مانده است.`;
+        const occurredAt = now.toISOString(); const correlationId = newId('correlation');
+        await tx.put('users', {...current, secondaryPasswordFailedAttempts: lockedUntil ? 0 : attempts, secondaryPasswordLockedUntil: lockedUntil});
+        await tx.put('audit_events', {id:newId('audit'),sequence:nextSequence(audits),companyId:current.companyId,category:'session',action:'account.secondary_password.failed',actorId:current.actorId,actorName:current.name,effectiveUserId:current.id,occurredAt,summary:'یک تلاش ناموفق برای استفاده از رمز دوم ثبت شد.',outcome:'denied',correlationId,metadata:{userId:current.id,locked:Boolean(lockedUntil)}} satisfies AuditEvent);
+        await tx.put('domain_events', {id:newId('event'),aggregateType:'user',aggregateId:current.id,eventType:'SecondaryPasswordFailed',actorId:current.actorId,occurredAt,correlationId,payload:{locked:Boolean(lockedUntil)}} satisfies DomainEvent);
+        await tx.put('meta', {id:'lastPersistedAt', value: occurredAt});
+        return;
+      }
+      verifiedHash = current.secondaryPasswordHash;
+    });
+    if (validationError) throw new Error(validationError);
+    return {userId:state.activeUser.id,hash:verifiedHash};
+  }
+
+  async unlockLetter(letterId:string, expectedVersion:number, secondaryPassword:string):Promise<OperationalRecord> {
+    const state = await this.loadState(); const actor = state.activeUser;
+    const verified = await this.verifyOwnSecondaryPassword(secondaryPassword);
+    let unlocked:OperationalRecord|undefined;
+    await this.storage.transaction(['users','letters','workflow_history','audit_events','domain_events','meta'], 'readwrite', async (tx) => {
+      const [currentUser,current,history,audits] = await Promise.all([tx.get<LocalUser>('users',verified.userId),tx.get<OperationalRecord>('letters',letterId),tx.getAll<OperationalRecordHistory>('workflow_history'),tx.getAll<AuditEvent>('audit_events')]);
+      if (!currentUser || currentUser.status !== 'active' || currentUser.secondaryPasswordHash !== verified.hash) throw new Error('رمز دوم هم‌زمان تغییر کرده است؛ دوباره تلاش کنید.');
+      if (!current || current.version !== expectedVersion || !letterIsProtected(current)) throw new Error('نامه محرمانه هم‌زمان تغییر کرده یا دیگر در دسترس نیست.');
+      const mayReview = ['in_review','approved_for_send'].includes(current.status) && ['approve','transition','view'].some((action) => authorize({persona:actor,permission:permissionFor('letter',action as 'approve'|'transition'|'view'),action:action as 'approve'|'transition'|'view',resource:operationalRecordResource(actor,current)}).allowed);
+      if (!isLetterParticipant(current,currentUser) && !mayReview) throw new Error('این نامه محرمانه در دسترس شما نیست.');
+      const now = new Date().toISOString(); const correlationId = newId('correlation');
+      await tx.put('users', {...currentUser,secondaryPasswordFailedAttempts:0,secondaryPasswordLockedUntil:undefined});
+      if(current.status==='sent'&&!history.some((item)=>item.recordId===current.id&&item.eventType==='viewed'&&item.effectiveUserId===currentUser.id))await tx.put('workflow_history',{id:newId('history'),recordId:current.id,moduleId:'letter',sequence:history.filter((item)=>item.recordId===current.id).length+1,eventType:'viewed',actorId:currentUser.actorId,actorName:currentUser.name,effectiveUserId:currentUser.id,snapshot:{action:'read_after_unlock'},occurredAt:now} satisfies OperationalRecordHistory);
+      await tx.put('audit_events', {id:newId('audit'),sequence:nextSequence(audits),companyId:current.companyId,category:'session',action:'letter.unlocked',actorId:currentUser.actorId,actorName:currentUser.name,effectiveUserId:currentUser.id,occurredAt:now,summary:`نامه محرمانه ${current.trackingCode} برای مشاهده باز شد.`,outcome:'success',correlationId,metadata:{letterId:current.id,classification:letterClassification(current)}} satisfies AuditEvent);
+      await tx.put('domain_events', {id:newId('event'),aggregateType:'letter',aggregateId:current.id,eventType:'LetterUnlocked',actorId:currentUser.actorId,occurredAt:now,correlationId,payload:{classification:letterClassification(current)}} satisfies DomainEvent);
+      await tx.put('meta', {id:'lastPersistedAt', value: now});
+      unlocked = structuredClone(current);
+    });
+    if (!unlocked) throw new Error('بازکردن نامه ممکن نشد.');
+    return unlocked;
+  }
+
   async setUserStatus(userId: string, expectedVersionToken: string, status: UserStatus): Promise<FoundationState> {
     const state = await this.loadState(); const actor = state.activeUser; requirePermission(actor, 'foundation.users.status.manage', 'مجوز فعال‌سازی یا غیرفعال‌سازی کاربر را ندارید.'); const target = state.users.find((user) => user.id === userId); if (!target) throw new Error('کاربر پیدا نشد.'); if (target.id === actor.id) throw new Error('نمی‌توانید وضعیت حسابی را که با آن وارد شده‌اید تغییر دهید.'); if (target.isAdmin) throw new Error('حساب اصلی ادمین قابل غیرفعال‌سازی نیست.');
     if (state.session.actingAdminUserId) throw new Error('در حالت مشاهده آزمایشی، تغییر وضعیت حساب مجاز نیست.');
@@ -1111,15 +1482,24 @@ export class LocalFoundationService {
   async createPersonnel(input: PersonnelInput): Promise<FoundationState> {
     const state = await this.loadState(); const actor = state.activeUser;
     requirePermission(actor, 'organization.personnel.manage', 'مجوز ایجاد پرونده پرسنلی را ندارید.');
-    const inputWithSystemCode = synchronizeSalesPersonnelInput({...input, personnelCode: nextPersonnelCode(state.personnel)}, state);
-    validatePersonnelInput(inputWithSystemCode, state);
     const now = new Date().toISOString();
-    const normalizedInput = normalizePersonnelInput(inputWithSystemCode);
-    const baseRecord: PersonnelRecord = {...normalizedInput, id: newId('personnel'), companyId: actor.companyId, movements: [], lifecycleHistory: [{id: newId('employment-event'), kind: 'employment_started', effectiveDate: normalizedInput.startDate, reason: 'ایجاد پرونده و شروع همکاری', actorId: actor.actorId, actorName: actor.name, recordedAt: now, employmentType: normalizedInput.employmentType, unitId: normalizedInput.unitId, positionId: normalizedInput.positionId, branchUnitId: normalizedInput.branchUnitId, managerPersonnelId: normalizedInput.managerPersonnelId}], createdAt: now, updatedAt: now};
-    const initialCompensation = createDefaultSalesCompensationRecord(baseRecord, now, actor.actorId, actor.name);
-    const record: PersonnelRecord = initialCompensation ? {...baseRecord, salesCompensationHistory: [initialCompensation]} : baseRecord;
-    await this.storage.put('personnel', record);
-    await this.appendAudit({actor, effectiveUser: actor, category: 'system', action: 'organization.personnel.created', summary: `پرونده پرسنلی «${record.firstName} ${record.lastName}» ایجاد شد.`, outcome: 'success', metadata: {personnelId: record.id, personnelCode: record.personnelCode}});
+    const correlationId = newId('correlation');
+    await this.storage.transaction(['personnel','users','organizational_units','organizational_positions','sales_structures','registration_requests','audit_events','domain_events','meta'],'readwrite',async(tx)=>{
+      const [personnel,users,units,positions,salesStructures,registrationRequests,audits]=await Promise.all([
+        tx.getAll<PersonnelRecord>('personnel'),tx.getAll<LocalUser>('users'),tx.getAll<OrganizationalUnit>('organizational_units'),tx.getAll<OrganizationalPosition>('organizational_positions'),tx.getAll<SalesStructure>('sales_structures'),tx.getAll<RegistrationRequest>('registration_requests'),tx.getAll<AuditEvent>('audit_events'),
+      ]);
+      const currentState={...state,personnel,users,units,positions,salesStructures,registrationRequests};
+      const inputWithSystemCode=synchronizeSalesPersonnelInput({...input,personnelCode:nextPersonnelCode(personnel)},currentState);
+      validatePersonnelInput(inputWithSystemCode,currentState);
+      const normalizedInput=normalizePersonnelInput(inputWithSystemCode);
+      const baseRecord:PersonnelRecord={...normalizedInput,id:newId('personnel'),companyId:actor.companyId,movements:[],lifecycleHistory:[{id:newId('employment-event'),kind:'employment_started',effectiveDate:normalizedInput.startDate,reason:'ایجاد پرونده و شروع همکاری',actorId:actor.actorId,actorName:actor.name,recordedAt:now,employmentType:normalizedInput.employmentType,unitId:normalizedInput.unitId,positionId:normalizedInput.positionId,branchUnitId:normalizedInput.branchUnitId,managerPersonnelId:normalizedInput.managerPersonnelId}],createdAt:now,updatedAt:now};
+      const initialCompensation=createDefaultSalesCompensationRecord(baseRecord,now,actor.actorId,actor.name);
+      const record:PersonnelRecord=initialCompensation?{...baseRecord,salesCompensationHistory:[initialCompensation]}:baseRecord;
+      await tx.put('personnel',record);
+      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:actor.companyId,category:'system',action:'organization.personnel.created',actorId:actor.actorId,actorName:actor.name,effectiveUserId:actor.id,occurredAt:now,summary:`پرونده پرسنلی «${record.firstName} ${record.lastName}» ایجاد شد.`,outcome:'success',correlationId,metadata:{personnelId:record.id,personnelCode:record.personnelCode}} satisfies AuditEvent);
+      await tx.put('domain_events',{id:newId('event'),aggregateType:'personnel',aggregateId:record.id,eventType:'PersonnelCreated',actorId:actor.actorId,occurredAt:now,correlationId,payload:{personnelCode:record.personnelCode,unitId:record.unitId,positionId:record.positionId}} satisfies DomainEvent);
+      await tx.put('meta',{id:'lastPersistedAt',value:now});
+    });
     return this.loadState();
   }
 
@@ -1155,6 +1535,7 @@ export class LocalFoundationService {
       const entries:Array<Pick<AuditEvent,'category'|'action'|'summary'|'metadata'>>=[{category:'system',action:'organization.personnel.updated',summary:`پرونده پرسنلی «${updated.firstName} ${updated.lastName}» ویرایش شد.`,metadata:{personnelId,changedAreas:changedAreas.join(',')}}];
       for(const area of changedAreas.filter((item)=>['unit','position','manager','employment'].includes(item)))entries.push({category:'system',action:`organization.personnel.${area}_changed`,summary:`${personnelAreaLabel(area)} «${updated.firstName} ${updated.lastName}» تغییر کرد.`,metadata:{personnelId,changedArea:area}});
       if(changedAreas.includes('sales_hierarchy'))entries.push({category:'system',action:'organization.personnel.sales_hierarchy_changed',summary:`جایگاه «${updated.firstName} ${updated.lastName}» در شبکه فروش تغییر کرد.`,metadata:{personnelId,previousLevel:existing.salesHierarchyLevel??'',newLevel:updated.salesHierarchyLevel??'',previousSalesStartDate:existing.salesAssignmentStartDate??'',newSalesStartDate:updated.salesAssignmentStartDate??'',previousSupervisorId:existing.salesSupervisorPersonnelId??'',newSupervisorId:updated.salesSupervisorPersonnelId??'',previousSalesBranchId:existing.salesBranchUnitId??'',newSalesBranchId:updated.salesBranchUnitId??'',previousChannel:existing.salesChannel??'',newChannel:updated.salesChannel??''}});
+      if(changedAreas.includes('advance_eligibility'))entries.push({category:'authorization',action:'organization.personnel.advance_eligibility_changed',summary:`استحقاق مساعده «${updated.firstName} ${updated.lastName}» به «${advanceEligibilityStatusLabel(updated.advanceEligibilityStatus)}» تغییر کرد.`,metadata:{personnelId,previousStatus:existing.advanceEligibilityStatus??'eligible',newStatus:updated.advanceEligibilityStatus??'eligible',reason:updated.advanceEligibilityReason??'',effectiveFrom:updated.advanceEligibilityEffectiveFrom??'',effectiveUntil:updated.advanceEligibilityEffectiveUntil??''}});
       if(bankingChanged)entries.push({category:'authorization',action:'organization.personnel.banking_changed',summary:`اطلاعات بانکی پرونده «${updated.firstName} ${updated.lastName}» تغییر کرد.`,metadata:{personnelId,bankingChanged:true}});
       let sequence=nextSequence(audits);for(const entry of entries)await tx.put('audit_events',{id:newId('audit'),sequence:sequence++,companyId:actor.companyId,category:entry.category,action:entry.action,actorId:actor.actorId,actorName:actor.name,effectiveUserId:actor.id,occurredAt:now,summary:entry.summary,outcome:'success',correlationId,metadata:entry.metadata} satisfies AuditEvent);
       await tx.put('domain_events',{id:newId('event'),aggregateType:'personnel',aggregateId:personnelId,eventType:'PersonnelUpdated',actorId:actor.actorId,occurredAt:now,correlationId,payload:{changedAreas}} satisfies DomainEvent);await tx.put('meta',{id:'lastPersistedAt',value:now});
@@ -1913,6 +2294,8 @@ async setRoleStatus(roleId: string, expectedVersion: number, status: UserStatus)
     if (actor.status !== 'active') throw new Error('حساب کاربری غیرفعال اجازه ثبت مساعده ندارد.');
     const beneficiary = state.personnel.find((person) => person.id === input.beneficiaryPersonnelId && person.employmentStatus === 'active');
     if (!beneficiary) throw new Error('پرسنل فعال انتخاب‌شده پیدا نشد.');
+    const eligibility = personnelAdvanceEligibility(beneficiary);
+    if (!eligibility.allowed) throw new Error(`ثبت درخواست مساعده برای این پرسنل ${advanceEligibilityStatusLabel(eligibility.status)} است${eligibility.reason ? `: ${eligibility.reason}` : '.'}`);
     const beneficiaryUser = state.users.find((user) => user.id === beneficiary.linkedUserId && user.status === 'active');
     const ownRequest = beneficiary.linkedUserId === actor.id || beneficiary.id === actor.personnelId;
     if (!ownRequest && !canProxyAdvance(actor, beneficiary, state)) throw new Error('ثبت نیابتی فقط برای تأییدکننده اصلی و پرسنل شعب تحت پوشش مجاز است.');
@@ -1936,7 +2319,15 @@ async setRoleStatus(roleId: string, expectedVersion: number, status: UserStatus)
     if (ownRequest && !canSelfSubmitAdvance(branchUnitId, state) && !isMainApprover) throw new Error('ثبت مستقیم مساعده برای این شعبه غیرفعال است؛ مسئول مجاز می‌تواند نیابتی ثبت کند.');
     if (ownRequest && isMainApprover && input.approveAtCreation === true && finalReviewStage?.allowSelfApproval !== true) throw new Error('سیاست این مرحله تأیید درخواست خود را مجاز نمی‌داند.');
     const approvedAtCreation = isMainApprover && input.approveAtCreation === true && (!ownRequest || finalReviewStage?.allowSelfApproval === true);
-    const normalStart = routeStates.find((stage) => stage !== 'sent_to_treasury');
+    const branchStageConfigured = routeStates.includes('branch_review');
+    const branchAssignee = branchStageConfigured && branchUnitId
+      ? resolveAdvanceStageAssignee(state, workflow, selectedRoute.id, 'branch_review', assignmentContext)
+      : undefined;
+    const branchManagerIsBeneficiary = Boolean(branchAssignee && beneficiaryUser && branchAssignee.id === beneficiaryUser.id);
+    const branchReviewSkipped = !approvedAtCreation && (!branchUnitId || (branchStageConfigured && !branchAssignee) || branchManagerIsBeneficiary);
+    const normalStart = branchReviewSkipped
+      ? routeStates.find((stage) => stage === 'accounting_review')
+      : routeStates.find((stage) => stage !== 'sent_to_treasury');
     const status: AdvanceStage | undefined = approvedAtCreation ? routeStates.find((stage) => stage === 'accounting_review') : normalStart;
     if (!status) throw new Error('مسیر تأیید این شعبه مرحله قابل شروع ندارد. تنظیمات گردش‌کار را بررسی کنید.');
     const initialAssignee = resolveAdvanceStageAssignee(state, workflow, selectedRoute.id, status, assignmentContext);
@@ -1952,11 +2343,14 @@ async setRoleStatus(roleId: string, expectedVersion: number, status: UserStatus)
       payload: {
         kind: 'employee_advance', beneficiaryPersonnelId: beneficiary.id, beneficiaryUserId: beneficiaryUser?.id ?? '', personnelCode: beneficiary.personnelCode,
         firstName: beneficiary.firstName, lastName: beneficiary.lastName, nationalId: beneficiary.nationalId ?? '', primaryMobile: beneficiary.primaryMobile,
-        branchUnitId, branchName: branch?.name ?? 'تعیین نشده', unitId: beneficiary.unitId,
+        branchUnitId, branchName: branch?.name ?? 'ستاد مرکزی / بدون شعبه', unitId: beneficiary.unitId,
         unitName: unit?.name ?? 'تعیین نشده', positionId: beneficiary.positionId, positionName: position?.title ?? 'تعیین نشده', bankName: beneficiary.bankName,
         cardNumber, requestDate: now.slice(0, 10), originalAmountRial: amountRial, approvedAmountRial: amountRial, internalCreditEligible: true,
         submittedOnBehalf: !ownRequest, proxyByUserId: !ownRequest ? actor.id : null, proxyByName: !ownRequest ? actor.name : null,
-        selfApprovedAt: approvedAtCreation ? now : null, workflowRouteTitle: selectedRoute.title, signedByUserId: actor.id, signedByName: actor.name, signedAt: now,
+        selfApprovedAt: approvedAtCreation ? now : null,
+        branchReviewSkipped,
+        branchReviewSkippedReason: branchReviewSkipped ? (!branchUnitId ? 'پرسنل ستادی و بدون شعبه' : branchManagerIsBeneficiary ? 'مسئول شعبه همان درخواست‌کننده است؛ جلوگیری از خودتأییدی' : 'شعبه فاقد مسئول فعال و مجاز') : null,
+        workflowRouteTitle: selectedRoute.title, signedByUserId: actor.id, signedByName: actor.name, signedAt: now,
         trail: [{id: newId('advance-trail'), stage: status, action: approvedAtCreation ? 'proxy_created_and_approved' : 'submitted', actorId: actor.id, actorName: actor.name, occurredAt: now, reason: input.note.trim() || null, previousAmountRial: null, amountRial}],
       }, createdAt: now, updatedAt: now,
     };
@@ -1974,8 +2368,9 @@ async setRoleStatus(roleId: string, expectedVersion: number, status: UserStatus)
     const record = state.operationalRecords.find((item) => item.id === recordId && item.moduleId === 'employee-advance');
     if (!record) throw new Error('درخواست مساعده پیدا نشد.');
     if (record.version !== expectedVersion) throw new Error('این درخواست در تب دیگری تغییر کرده است. تازه‌سازی کنید و دوباره تلاش کنید.');
-    if (!['branch_review', 'needs_correction'].includes(record.status)) throw new Error('ویرایش مساعده فقط پیش از تصمیم مدیر شعبه یا در وضعیت نیازمند اصلاح مجاز است.');
     const payload = readEmployeeAdvancePayload(record);
+    const editableBeforeFirstDecision = record.status === 'branch_review' || (record.status === 'accounting_review' && payload.branchReviewSkipped);
+    if (!editableBeforeFirstDecision && record.status !== 'needs_correction') throw new Error('ویرایش مساعده فقط پیش از نخستین تصمیم یا در وضعیت نیازمند اصلاح مجاز است.');
     const isOwner = payload.beneficiaryUserId === actor.id || record.createdByUserId === actor.id;
     if (!isOwner && !actor.isAdmin) throw new Error('فقط درخواست‌کننده یا ثبت‌کننده نیابتی می‌تواند این فرم را اصلاح کند.');
     if (input.beneficiaryPersonnelId !== payload.beneficiaryPersonnelId) throw new Error('پرسنل دریافت‌کننده پس از ثبت درخواست قابل تغییر نیست.');
@@ -1988,7 +2383,8 @@ async setRoleStatus(roleId: string, expectedVersion: number, status: UserStatus)
     const cardNumber = normalizeDigits(beneficiary.cardNumber).replace(/\D/g, '');
     if (cardNumber.length !== 16) throw new Error('شماره کارت ۱۶ رقمی معتبر در پرونده پرسنلی ثبت نشده است.');
 
-    const resumeStage = record.status === 'needs_correction' ? (payload.resumeStage ?? 'branch_review') : 'branch_review';
+    const initialReviewStage: AdvanceStage = payload.branchReviewSkipped ? 'accounting_review' : 'branch_review';
+    const resumeStage = record.status === 'needs_correction' ? (payload.resumeStage ?? initialReviewStage) : initialReviewStage;
     const boundWorkflow = workflowForRecord(state, module, record);
     const assigneeUserId = resolveAdvanceStageAssignee(state, boundWorkflow, record.workflowRouteId, resumeStage, {
       branchUnitId: payload.branchUnitId,
@@ -2037,11 +2433,12 @@ async setRoleStatus(roleId: string, expectedVersion: number, status: UserStatus)
     return this.loadState();
   }
 
-  async decideEmployeeAdvance(recordId: string, decision: AdvanceDecision, reason = '', amountRial?: string): Promise<FoundationState> {
+  async decideEmployeeAdvance(recordId: string, decision: AdvanceDecision, reason: string, amountRial: string | undefined, expectedVersion: number): Promise<FoundationState> {
     const module = ERP_MODULES.find((item) => item.id === 'employee-advance');
     if (!module) throw new Error('ماژول مساعده پیدا نشد.');
     const state = await this.loadState(); const actor = state.activeUser;
     const record = state.operationalRecords.find((item) => item.id === recordId && item.moduleId === 'employee-advance');
+    if (record && record.version !== expectedVersion) throw new Error('این درخواست مساعده هم‌زمان تغییر کرده است؛ پرونده را دوباره باز کنید.');
     if (!record) throw new Error('درخواست مساعده پیدا نشد.');
     const payload = readEmployeeAdvancePayload(record);
     const boundWorkflow = workflowForRecord(state, module, record);
@@ -2103,9 +2500,7 @@ async setRoleStatus(roleId: string, expectedVersion: number, status: UserStatus)
     if (!normalizedAmount || BigInt(normalizedAmount) <= 0n) throw new Error('مبلغ مساعده باید بیشتر از صفر باشد.');
     const now = new Date().toISOString();
     const updated: OperationalRecord = {...record, status: next, assigneeUserId, amountRial: normalizedAmount, updatedByActorId: actor.actorId, version: record.version + 1, updatedAt: now, payload: {...record.payload, approvedAmountRial: normalizedAmount, resumeStage: next === 'needs_correction' ? stage : null, trail: [...payload.trail, {id: newId('advance-trail'), stage: next, action: decision, actorId: actor.id, actorName: actor.name, occurredAt: now, reason: reason.trim() || null, previousAmountRial: record.amountRial ?? null, amountRial: normalizedAmount}]}};
-    const history = this.makeHistory(state, updated, actor, next === 'sent_to_treasury' ? 'handoff' : 'transitioned', {fromState: record.status, toState: next, reason: reason.trim() || actionLabel, snapshot: {decision, previousAmountRial: record.amountRial, amountRial: normalizedAmount}});
-    await this.persistOperationalChange(module.store, updated, history, actor, 'decision', `${actionLabel}: «${record.title}».`, reason.trim());
-    if (next === 'sent_to_treasury' && assigneeUserId) await this.createAdvanceTreasuryHandoff(updated, actor, assigneeUserId, reason.trim() || actionLabel);
+    await this.persistAdvanceDecision(record, updated, actor, decision, actionLabel, reason.trim(), expectedVersion);
     return this.loadState();
   }
 
@@ -2398,6 +2793,7 @@ async setRoleStatus(roleId: string, expectedVersion: number, status: UserStatus)
     const state = await this.loadState(); const effectiveUser = state.activeUser; const record = state.operationalRecords.find((item) => item.id === recordId && item.moduleId === moduleId); if (!record) throw new Error('رکورد پیدا نشد.');
     const workflow = workflowForRecord(state, module, record);
     const transition = workflow.transitions.find((item) => item.id === transitionId && item.from.includes(record.status)); if (!transition) throw new Error('این انتقال از وضعیت فعلی مجاز نیست.');
+    if (moduleId === 'purchase-request' && !['submitted','cancelled'].includes(transition.to)) throw new Error('تصمیم درخواست خرید فقط از مسیر اختصاصی بررسی و تأیید انجام می‌شود.');
     requirePermission(effectiveUser, transition.permission, 'مجوز این انتقال گردش‌کار را ندارید.'); this.assertRecordScope(effectiveUser, record, transition.makerChecker ? 'approve' : 'transition');
     if (moduleId === 'recruitment-case' && !effectiveUser.isAdmin && record.assigneeUserId !== effectiveUser.id) throw new Error('فقط مسئول ثبت‌شده مرحله فعلی پرونده جذب می‌تواند این انتقال را انجام دهد.');
     if (transition.makerChecker && record.createdByActorId === effectiveUser.actorId) throw new Error('سازنده رکورد نمی‌تواند همان رکورد را تأیید کند.');
@@ -2409,10 +2805,16 @@ async setRoleStatus(roleId: string, expectedVersion: number, status: UserStatus)
     const key = idempotencyKey || `${record.id}:${record.version}:${transition.id}`;
     if (await this.storage.get('idempotency_keys', key)) return state;
     const now = new Date().toISOString();
+    const submittedPurchaseApprover = moduleId === 'purchase-request' && transition.to === 'submitted'
+      ? state.users.find((user) => user.status === 'active' && user.roleIds.some((roleId) => roleIdsForWorkflowState(state, 'purchase-request', 'submitted', ['role-purchase-approver'], record.workflowVersion).includes(roleId)) && can(user, permissionFor('purchase-request', 'approve')))
+      : undefined;
+    if (moduleId === 'purchase-request' && transition.to === 'submitted' && typeof record.payload.returnToApproverUserId !== 'string' && !submittedPurchaseApprover) throw new Error('تأییدکننده فعال درخواست خرید برای مرحله بعد تعیین نشده است.');
     const purchaseAssignee = moduleId === 'purchase-request' && ['needs_correction', 'rejected'].includes(transition.to)
       ? record.createdByUserId
       : moduleId === 'purchase-request' && transition.to === 'submitted' && typeof record.payload.returnToApproverUserId === 'string'
         ? record.payload.returnToApproverUserId
+        : moduleId === 'purchase-request' && transition.to === 'submitted'
+          ? submittedPurchaseApprover?.id
         : record.assigneeUserId;
     const purchasePayload = moduleId === 'purchase-request' && transition.to === 'needs_correction'
       ? {...record.payload, returnToApproverUserId: effectiveUser.id}
@@ -2427,10 +2829,7 @@ async setRoleStatus(roleId: string, expectedVersion: number, status: UserStatus)
     const updated: OperationalRecord = {...record, status: transition.to, assigneeUserId: recruitmentAssignee?.id ?? purchaseAssignee, updatedByActorId: effectiveUser.actorId, version: record.version + 1, updatedAt: now, payload: {...purchasePayload, ...(moduleId === 'recruitment-case' ? {currentWaitingFor: recruitmentWaitingFor[transition.to] ?? 'مرحله بعدی'} : {}), lastTransitionReason: reason.trim() || null}};
     const history = this.makeHistory(state, updated, effectiveUser, transition.handoffModuleId ? 'handoff' : 'transitioned', {fromState: record.status, toState: transition.to, reason: reason.trim() || undefined, snapshot: {transitionId: transition.id, workflowVersion: workflow.version}});
     await this.persistOperationalChange(module.store, updated, history, effectiveUser, 'transitioned', `وضعیت «${record.title}» از ${stateLabel(workflow, record.status)} به ${stateLabel(workflow, transition.to)} تغییر کرد.`, reason, key);
-    if (transition.handoffModuleId) {
-      if (moduleId === 'purchase-request' && transition.to === 'sent_to_treasury') await this.createPurchaseTreasuryHandoffs(updated, effectiveUser, reason);
-      else await this.createHandoffRecord(transition.handoffModuleId, updated, effectiveUser, reason);
-    }
+    if (transition.handoffModuleId) await this.createHandoffRecord(transition.handoffModuleId, updated, effectiveUser, reason);
     return this.loadState();
   }
 
@@ -2450,12 +2849,14 @@ async setRoleStatus(roleId: string, expectedVersion: number, status: UserStatus)
     return candidates[0];
   }
 
-  async decidePurchaseRequest(recordId: string, decision: PurchaseRequestDecision, targetUserId: string, reason: string): Promise<FoundationState> {
+  async decidePurchaseRequest(recordId: string, decision: PurchaseRequestDecision, targetUserId: string, reason: string, expectedVersion: number): Promise<FoundationState> {
     const module = ERP_MODULES.find((item) => item.id === 'purchase-request');
     if (!module) throw new Error('ماژول درخواست خرید پیدا نشد.');
     const state = await this.loadState();
     const actor = state.activeUser;
+    if (state.session.actingAdminUserId) throw new Error('تصمیم‌گیری درخواست خرید در حالت مشاهده آزمایشی مجاز نیست.');
     const record = state.operationalRecords.find((item) => item.id === recordId && item.moduleId === 'purchase-request');
+    if (record && record.version !== expectedVersion) throw new Error('این درخواست خرید هم‌زمان تغییر کرده است؛ پرونده را دوباره باز کنید.');
     if (!record) throw new Error('درخواست خرید پیدا نشد.');
     if (!['submitted', 'purchase_review', 'purchase_approved'].includes(record.status)) throw new Error('این درخواست در وضعیت قابل تصمیم‌گیری نیست.');
     if (actor.status !== 'active') throw new Error('حساب کاربری غیرفعال اجازه تصمیم‌گیری ندارد.');
@@ -2517,83 +2918,67 @@ async setRoleStatus(roleId: string, expectedVersion: number, status: UserStatus)
         approvalTrail: [...approvalTrail, {decision, actorUserId: actor.id, targetUserId: target?.id ?? null, occurredAt: now, reason: reason.trim()}],
       },
     };
-    const history = this.makeHistory(state, updated, actor, handoffToTreasury ? 'handoff' : 'transitioned', {
-      fromState: record.status,
-      toState: targetState,
-      reason: reason.trim(),
-      snapshot: {decision, targetUserId: target?.id ?? null, workflowVersion: record.workflowVersion ?? activeWorkflowFor(state, module).version},
-    });
-    const key = `${record.id}:${record.version}:purchase-decision:${decision}:${target?.id ?? 'creator'}`;
-    await this.persistOperationalChange(module.store, updated, history, actor, 'decision', eventSummary, reason.trim(), key);
-    if (handoffToTreasury && target) await this.createPurchaseTreasuryHandoffs(updated, actor, reason.trim(), target.id);
+    await this.persistPurchaseDecision(record, updated, actor, decision, eventSummary, reason.trim(), expectedVersion, handoffToTreasury, target?.id);
     return this.loadState();
   }
 
-  async recordTreasuryPayment(recordId: string, input: TreasuryPaymentInput): Promise<FoundationState> {
+  async recordTreasuryPayment(recordId: string, input: TreasuryPaymentInput, expectedVersion: number): Promise<FoundationState> {
     const module = ERP_MODULES.find((item) => item.id === 'treasury-execution');
     if (!module) throw new Error('ماژول خزانه پیدا نشد.');
     const state = await this.loadState();
     const actor = state.activeUser;
+    if (state.session.actingAdminUserId) throw new Error('ثبت پرداخت در حالت مشاهده آزمایشی مجاز نیست.');
     const record = state.operationalRecords.find((item) => item.id === recordId && item.moduleId === 'treasury-execution');
     if (!record) throw new Error('پرونده پرداخت پیدا نشد.');
-    if (!['queued', 'claimed'].includes(record.status)) throw new Error('این پرونده در وضعیت قابل پرداخت قرار ندارد.');
+    if (record.version !== expectedVersion) throw new Error('پرونده پرداخت هم‌زمان تغییر کرده است؛ دوباره باز کنید.');
     if (record.assigneeUserId !== actor.id) throw new Error('فقط مجری خزانه تعیین‌شده می‌تواند پرداخت این پرونده را ثبت کند.');
     if (actor.status !== 'active') throw new Error('حساب کاربری غیرفعال اجازه ثبت پرداخت ندارد.');
     const transition = module.workflow.transitions.find((item) => item.from.includes(record.status) && item.to === 'payment_recorded');
     if (!transition) throw new Error('انتقال ثبت پرداخت در گردش‌کار پیدا نشد.');
     requirePermission(actor, transition.permission, 'مجوز ثبت پرداخت خزانه را ندارید.');
     this.assertRecordScope(actor, record, 'transition');
-    if (!input.paidAt) throw new Error('تاریخ پرداخت الزامی است.');
-    if (input.receipt && (!input.receipt.dataUrl || !input.receipt.fileName || input.receipt.size <= 0)) throw new Error('فایل رسید پرداخت کامل نیست؛ فایل را دوباره انتخاب کنید یا رسید را خالی بگذارید.');
-    if (input.receipt && input.receipt.size > 5 * 1024 * 1024) throw new Error('حجم رسید پرداخت نباید بیشتر از ۵ مگابایت باشد.');
-    if (input.receipt && !['image/jpeg', 'image/png', 'image/webp', 'application/pdf'].includes(input.receipt.mimeType)) throw new Error('رسید پرداخت باید تصویر JPG، PNG، WEBP یا فایل PDF باشد.');
-
-    const now = new Date().toISOString();
-    const updated: OperationalRecord = {
-      ...record,
-      status: 'payment_recorded',
-      updatedByActorId: actor.actorId,
-      version: record.version + 1,
-      updatedAt: now,
-      payload: {
-        ...record.payload,
-        payment: {
-          paidAt: input.paidAt,
-          paymentReference: input.paymentReference.trim(),
-          note: input.note.trim(),
-          amountRial: record.amountRial ?? '0',
-          receipt: input.receipt,
-          recordedByUserId: actor.id,
-          recordedAt: now,
-        },
-      },
-    };
-    const reason = input.note.trim()
-      || (input.paymentReference.trim() ? `پرداخت با شماره پیگیری ${input.paymentReference.trim()} ثبت شد.` : 'پرداخت توسط مجری خزانه ثبت شد.');
-    const history = this.makeHistory(state, updated, actor, 'transitioned', {
-      fromState: record.status,
-      toState: 'payment_recorded',
-      reason,
-      snapshot: {transitionId: transition.id, paymentReference: input.paymentReference.trim() || null, receiptFileName: input.receipt?.fileName ?? null, workflowVersion: module.workflow.version},
+    const payment=validateFinancialPayment(input);const now=new Date().toISOString(),correlationId=newId('correlation'),key=`${recordId}:${expectedVersion}:treasury-payment`;
+    await this.storage.transaction(['users','treasury_executions','employee_advances','purchase_requests','workflow_history','audit_events','domain_events','idempotency_keys','meta'],'readwrite',async(tx)=>{
+      if(await tx.get('idempotency_keys',key))return;
+      const [users,current,treasuryRecords,advances,purchases,histories,audits]=await Promise.all([
+        tx.getAll<LocalUser>('users'),tx.get<OperationalRecord>('treasury_executions',recordId),tx.getAll<OperationalRecord>('treasury_executions'),tx.getAll<OperationalRecord>('employee_advances'),tx.getAll<OperationalRecord>('purchase_requests'),tx.getAll<OperationalRecordHistory>('workflow_history'),tx.getAll<AuditEvent>('audit_events'),
+      ]);
+      const currentActor=users.find((user)=>user.id===actor.id&&user.status==='active'&&user.companyId===actor.companyId);
+      if(!currentActor||!current||current.version!==expectedVersion)throw new Error('پرونده پرداخت هم‌زمان تغییر کرده است؛ دوباره باز کنید.');
+      if(!['queued','claimed'].includes(current.status))throw new Error('این پرونده در وضعیت قابل پرداخت قرار ندارد.');
+      if(current.assigneeUserId!==currentActor.id)throw new Error('فقط مجری خزانه تعیین‌شده می‌تواند پرداخت این پرونده را ثبت کند.');
+      const referenceKey=paymentReferenceKey(current.companyId,payment.paymentReference);
+      if(referenceKey&&treasuryRecords.some((item)=>item.id!==current.id&&item.companyId===current.companyId&&item.payload.payment&&paymentReferenceKey(item.companyId,(item.payload.payment as Record<string,OperationalPayloadValue>).paymentReference)===referenceKey))throw new Error('این شماره پیگیری قبلاً برای پرداخت دیگری ثبت شده است.');
+      const existingDocumentNumbers=treasuryRecords.filter((item)=>item.companyId===current.companyId&&item.payload.payment).map((item)=>(item.payload.payment as Record<string,OperationalPayloadValue>).financialDocumentNumber).filter((value):value is string=>typeof value==='string');
+      const financialDocumentNumber=nextFinancialDocumentNumber(payment.paidAt,existingDocumentNumbers);const fiscalPeriod=fiscalPeriodForPayment(payment.paidAt);
+      const amountRial=requirePositiveRialAmount(current.amountRial??'0');const reason=payment.note||(payment.paymentReference?`پرداخت با شماره پیگیری ${payment.paymentReference} ثبت شد.`:'پرداخت توسط مجری خزانه ثبت شد.');
+      const updated:OperationalRecord={...current,status:'payment_recorded',updatedByActorId:currentActor.actorId,version:current.version+1,updatedAt:now,payload:{...current.payload,payment:{...payment,financialDocumentNumber,fiscalPeriod,amountRial,recordedByUserId:currentActor.id,recordedAt:now} as unknown as OperationalPayloadValue}};
+      await tx.put('treasury_executions',updated);
+      await tx.put('workflow_history',{id:newId('history'),recordId:updated.id,moduleId:updated.moduleId,sequence:histories.filter((item)=>item.recordId===updated.id).length+1,eventType:'transitioned',fromState:current.status,toState:'payment_recorded',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,reason,snapshot:{transitionId:transition.id,paymentReference:payment.paymentReference||null,financialDocumentNumber,fiscalPeriod,receiptFileName:payment.receipt?.fileName??null,amountRial,workflowVersion:module.workflow.version},occurredAt:now} satisfies OperationalRecordHistory);
+      const source=advances.find((item)=>item.id===current.relatedRecordId)??purchases.find((item)=>item.id===current.relatedRecordId);
+      let sourceStatus:string|undefined;
+      if(source){
+        const progress=financialPaymentProgress(source,treasuryRecords.map((item)=>item.id===updated.id?updated:item));sourceStatus=source.moduleId==='employee-advance'?'paid':progress.complete?'paid':'sent_to_treasury';
+        const updatedSource:OperationalRecord={...source,status:sourceStatus,assigneeUserId:source.moduleId==='employee-advance'?currentActor.id:source.assigneeUserId,updatedByActorId:currentActor.actorId,version:source.version+1,updatedAt:now,payload:{...source.payload,financialPaymentProgress:progress as unknown as OperationalPayloadValue,...(source.moduleId==='employee-advance'?{paidAt:payment.paidAt,treasuryRecordId:current.id,paymentReference:payment.paymentReference||null}:{})}};
+        await tx.put(source.moduleId==='employee-advance'?'employee_advances':'purchase_requests',updatedSource);
+        await tx.put('workflow_history',{id:newId('history'),recordId:source.id,moduleId:source.moduleId,sequence:histories.filter((item)=>item.recordId===source.id).length+1,eventType:source.status===sourceStatus?'edited':'transitioned',fromState:source.status,toState:sourceStatus,actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,reason,snapshot:{treasuryRecordId:current.id,paymentReference:payment.paymentReference||null,paymentProgress:progress},occurredAt:now} satisfies OperationalRecordHistory);
+      }
+      await tx.put('idempotency_keys',{id:key,recordId:current.id,createdAt:now});
+      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:current.companyId,category:'system',action:'treasury.treasury-execution.payment_recorded',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:`پرداخت «${current.title}» با سند ${financialDocumentNumber}${payment.receipt?' همراه رسید':''} ثبت شد.`,reason,outcome:'success',correlationId,metadata:{recordId:current.id,moduleId:current.moduleId,version:updated.version,sourceRecordId:current.relatedRecordId??null,sourceStatus:sourceStatus??null,paymentReference:payment.paymentReference||null,financialDocumentNumber,fiscalPeriod}} satisfies AuditEvent);
+      await tx.put('domain_events',{id:newId('event'),aggregateType:'treasury-execution',aggregateId:current.id,eventType:'payment_recorded',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{effectiveUserId:currentActor.id,status:updated.status,version:updated.version,sourceRecordId:current.relatedRecordId??null,sourceStatus:sourceStatus??null}} satisfies DomainEvent);
+      await tx.put('meta',{id:'lastPersistedAt',value:now});
     });
-    const key = `${record.id}:${record.version}:treasury-payment:${input.paymentReference.trim() || 'without-reference'}`;
-    await this.persistOperationalChange(module.store, updated, history, actor, 'payment_recorded', `پرداخت «${record.title}»${input.receipt ? ' همراه رسید' : ''} ثبت شد.`, reason, key);
-    const source = state.operationalRecords.find((item) => item.id === record.relatedRecordId && item.moduleId === 'employee-advance');
-    if (source) {
-      const paid: OperationalRecord = {...source, status: 'paid', assigneeUserId: actor.id, updatedByActorId: actor.actorId, version: source.version + 1, updatedAt: now, payload: {...source.payload, paidAt: input.paidAt, treasuryRecordId: record.id, paymentReference: input.paymentReference.trim() || null}};
-      const sourceHistory = this.makeHistory(state, paid, actor, 'transitioned', {fromState: source.status, toState: 'paid', reason, snapshot: {treasuryRecordId: record.id, paymentReference: input.paymentReference.trim() || null}});
-      await this.persistOperationalChange('employee_advances', paid, sourceHistory, actor, 'paid', `مساعده «${source.title}» پرداخت شد.`, reason);
-    }
     return this.loadState();
   }
 
-  async reviseTreasuryPayment(recordId: string, input: TreasuryPaymentInput, revisionReason: string): Promise<FoundationState> {
+  async reviseTreasuryPayment(recordId: string, input: TreasuryPaymentInput, revisionReason: string, expectedVersion: number): Promise<FoundationState> {
     const module = ERP_MODULES.find((item) => item.id === 'treasury-execution');
     if (!module) throw new Error('ماژول خزانه پیدا نشد.');
     const state = await this.loadState();
     const actor = state.activeUser;
     const record = state.operationalRecords.find((item) => item.id === recordId && item.moduleId === 'treasury-execution');
     if (!record) throw new Error('پرونده پرداخت پیدا نشد.');
+    if (record.version !== expectedVersion) throw new Error('پرونده پرداخت هم‌زمان تغییر کرده است؛ دوباره باز کنید.');
     if (record.status !== 'payment_recorded') throw new Error('اصلاح پرداخت فقط پیش از راستی‌آزمایی مجاز است.');
     if (record.assigneeUserId !== actor.id) throw new Error('فقط مجری خزانه تعیین‌شده می‌تواند اطلاعات این پرداخت را اصلاح کند.');
     if (actor.status !== 'active') throw new Error('حساب کاربری غیرفعال اجازه اصلاح پرداخت ندارد.');
@@ -2606,46 +2991,69 @@ async setRoleStatus(roleId: string, expectedVersion: number, status: UserStatus)
     if (input.receipt && !['image/jpeg', 'image/png', 'image/webp', 'application/pdf'].includes(input.receipt.mimeType)) throw new Error('رسید پرداخت باید تصویر JPG، PNG، WEBP یا فایل PDF باشد.');
     const currentPayment = record.payload.payment;
     if (!currentPayment || typeof currentPayment !== 'object' || Array.isArray(currentPayment)) throw new Error('اطلاعات پرداخت قبلی برای اصلاح پیدا نشد.');
-
+    const payment = validateFinancialPayment(input);
     const now = new Date().toISOString();
-    const paymentHistory = Array.isArray(record.payload.paymentHistory) ? record.payload.paymentHistory : [];
-    const updated: OperationalRecord = {
-      ...record,
-      updatedByActorId: actor.actorId,
-      updatedAt: now,
-      version: record.version + 1,
-      payload: {
-        ...record.payload,
-        paymentHistory: [...paymentHistory, {...currentPayment, archivedAt: now, archivedByUserId: actor.id, archiveAction: 'revised', archiveReason: revisionReason.trim()}],
-        payment: {
-          paidAt: input.paidAt,
-          paymentReference: input.paymentReference.trim(),
-          note: input.note.trim(),
-          amountRial: record.amountRial ?? '0',
-          receipt: input.receipt,
-          recordedByUserId: actor.id,
-          recordedAt: now,
+    const correlationId = newId('correlation');
+    const key = `${record.id}:${expectedVersion}:treasury-payment-revision`;
+    await this.storage.transaction(['users','treasury_executions','employee_advances','workflow_history','audit_events','domain_events','idempotency_keys','meta'], 'readwrite', async (tx) => {
+      if (await tx.get('idempotency_keys', key)) return;
+      const [users, current, treasuryRecords, histories, audits] = await Promise.all([
+        tx.getAll<LocalUser>('users'),
+        tx.get<OperationalRecord>('treasury_executions', recordId),
+        tx.getAll<OperationalRecord>('treasury_executions'),
+        tx.getAll<OperationalRecordHistory>('workflow_history'),
+        tx.getAll<AuditEvent>('audit_events'),
+      ]);
+      const currentActor = users.find((user) => user.id === actor.id && user.status === 'active' && user.companyId === actor.companyId);
+      if (!currentActor || !current || current.version !== expectedVersion) throw new Error('پرونده پرداخت هم‌زمان تغییر کرده است؛ دوباره باز کنید.');
+      requirePermission(currentActor, permissionFor('treasury-execution', 'edit'), 'مجوز اصلاح اطلاعات پرداخت را ندارید.');
+      if (current.status !== 'payment_recorded' || current.assigneeUserId !== currentActor.id) throw new Error('این پرداخت دیگر برای اصلاح در اختیار شما نیست.');
+      const referenceKey = paymentReferenceKey(current.companyId, payment.paymentReference);
+      if (referenceKey && treasuryRecords.some((item) => item.id !== current.id && item.companyId === current.companyId && item.payload.payment && paymentReferenceKey(item.companyId, (item.payload.payment as Record<string, OperationalPayloadValue>).paymentReference) === referenceKey)) throw new Error('این شماره پیگیری قبلاً برای پرداخت دیگری ثبت شده است.');
+      const previousPayment = current.payload.payment;
+      if (!previousPayment || typeof previousPayment !== 'object' || Array.isArray(previousPayment)) throw new Error('اطلاعات پرداخت قبلی برای اصلاح پیدا نشد.');
+      const previousReceipt = previousPayment.receipt && typeof previousPayment.receipt === 'object' && !Array.isArray(previousPayment.receipt) ? previousPayment.receipt : undefined;
+      const paymentHistory = Array.isArray(current.payload.paymentHistory) ? current.payload.paymentHistory : [];
+      const amountRial = requirePositiveRialAmount(current.amountRial ?? '0');
+      const financialDocumentNumber = typeof previousPayment.financialDocumentNumber === 'string' ? previousPayment.financialDocumentNumber : nextFinancialDocumentNumber(payment.paidAt, treasuryRecords.filter((item) => item.id !== current.id && item.companyId === current.companyId && item.payload.payment).map((item) => (item.payload.payment as Record<string, OperationalPayloadValue>).financialDocumentNumber).filter((value): value is string => typeof value === 'string'));
+      const fiscalPeriod = fiscalPeriodForPayment(payment.paidAt);
+      const updated: OperationalRecord = {
+        ...current,
+        updatedByActorId: currentActor.actorId,
+        updatedAt: now,
+        version: current.version + 1,
+        payload: {
+          ...current.payload,
+          paymentHistory: [...paymentHistory, {...previousPayment, archivedAt: now, archivedByUserId: currentActor.id, archiveAction: 'revised', archiveReason: revisionReason.trim()}],
+          payment: {...payment, financialDocumentNumber, fiscalPeriod, amountRial, recordedByUserId: currentActor.id, recordedAt: now} as unknown as OperationalPayloadValue,
         },
-      },
-    };
-    const history = this.makeHistory(state, updated, actor, 'corrected', {
-      fromState: record.status,
-      toState: record.status,
-      reason: revisionReason.trim(),
-      snapshot: {previousPayment: currentPayment, paymentReference: input.paymentReference.trim() || null, receiptFileName: input.receipt?.fileName ?? null, workflowVersion: module.workflow.version},
+      };
+      await tx.put('treasury_executions', updated);
+      await tx.put('workflow_history', {id:newId('history'),recordId:updated.id,moduleId:updated.moduleId,sequence:histories.filter((item)=>item.recordId===updated.id).length+1,eventType:'corrected',fromState:current.status,toState:current.status,actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,reason:revisionReason.trim(),snapshot:{previousPayment:{paidAt:previousPayment.paidAt??null,paymentReference:previousPayment.paymentReference??null,note:previousPayment.note??null,receiptFileName:previousReceipt?.fileName??null},paymentReference:payment.paymentReference||null,receiptFileName:payment.receipt?.fileName??null,workflowVersion:module.workflow.version},occurredAt:now} satisfies OperationalRecordHistory);
+      if (current.relatedRecordId) {
+        const source = await tx.get<OperationalRecord>('employee_advances', current.relatedRecordId);
+        if (source) {
+          const updatedSource: OperationalRecord = {...source,updatedByActorId:currentActor.actorId,updatedAt:now,version:source.version+1,payload:{...source.payload,paidAt:payment.paidAt,paymentReference:payment.paymentReference||null,treasuryRecordId:current.id}};
+          await tx.put('employee_advances', updatedSource);
+          await tx.put('workflow_history', {id:newId('history'),recordId:source.id,moduleId:source.moduleId,sequence:histories.filter((item)=>item.recordId===source.id).length+1,eventType:'corrected',fromState:source.status,toState:source.status,actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,reason:revisionReason.trim(),snapshot:{treasuryRecordId:current.id,paymentReference:payment.paymentReference||null},occurredAt:now} satisfies OperationalRecordHistory);
+        }
+      }
+      await tx.put('idempotency_keys', {id:key,recordId:current.id,createdAt:now});
+      await tx.put('audit_events', {id:newId('audit'),sequence:nextSequence(audits),companyId:current.companyId,category:'system',action:'treasury.treasury-execution.payment_corrected',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:`اطلاعات پرداخت «${current.title}» با حفظ نسخه قبلی اصلاح شد.`,reason:revisionReason.trim(),outcome:'success',correlationId,metadata:{recordId:current.id,moduleId:current.moduleId,version:updated.version,paymentReference:payment.paymentReference||null}} satisfies AuditEvent);
+      await tx.put('domain_events', {id:newId('event'),aggregateType:'treasury-execution',aggregateId:current.id,eventType:'payment_corrected',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{effectiveUserId:currentActor.id,status:updated.status,version:updated.version}} satisfies DomainEvent);
+      await tx.put('meta', {id:'lastPersistedAt',value:now});
     });
-    const key = `${record.id}:${record.version}:treasury-payment-revision`;
-    await this.persistOperationalChange(module.store, updated, history, actor, 'payment_corrected', `اطلاعات پرداخت «${record.title}» با حفظ نسخه قبلی اصلاح شد.`, revisionReason.trim(), key);
     return this.loadState();
   }
 
-  async revertTreasuryPayment(recordId: string, reason: string): Promise<FoundationState> {
+  async revertTreasuryPayment(recordId: string, reason: string, expectedVersion: number): Promise<FoundationState> {
     const module = ERP_MODULES.find((item) => item.id === 'treasury-execution');
     if (!module) throw new Error('ماژول خزانه پیدا نشد.');
     const state = await this.loadState();
     const actor = state.activeUser;
     const record = state.operationalRecords.find((item) => item.id === recordId && item.moduleId === 'treasury-execution');
     if (!record) throw new Error('پرونده پرداخت پیدا نشد.');
+    if (record.version !== expectedVersion) throw new Error('پرونده پرداخت هم‌زمان تغییر کرده است؛ دوباره باز کنید.');
     if (record.status !== 'payment_recorded') throw new Error('بازگشت از پرداخت فقط پیش از راستی‌آزمایی مجاز است.');
     if (record.assigneeUserId !== actor.id) throw new Error('فقط مجری خزانه تعیین‌شده می‌تواند از ثبت این پرداخت بازگردد.');
     if (actor.status !== 'active') throw new Error('حساب کاربری غیرفعال اجازه بازگشت از پرداخت ندارد.');
@@ -2656,29 +3064,41 @@ async setRoleStatus(roleId: string, expectedVersion: number, status: UserStatus)
     if (reason.trim().length < 3) throw new Error('دلیل بازگشت از پرداخت را وارد کنید.');
     const currentPayment = record.payload.payment;
     if (!currentPayment || typeof currentPayment !== 'object' || Array.isArray(currentPayment)) throw new Error('اطلاعات پرداخت ثبت‌شده پیدا نشد.');
-
     const now = new Date().toISOString();
-    const paymentHistory = Array.isArray(record.payload.paymentHistory) ? record.payload.paymentHistory : [];
-    const {payment: _removedPayment, ...payloadWithoutCurrentPayment} = record.payload;
-    const updated: OperationalRecord = {
-      ...record,
-      status: 'queued',
-      updatedByActorId: actor.actorId,
-      updatedAt: now,
-      version: record.version + 1,
-      payload: {
-        ...payloadWithoutCurrentPayment,
-        paymentHistory: [...paymentHistory, {...currentPayment, archivedAt: now, archivedByUserId: actor.id, archiveAction: 'reverted', archiveReason: reason.trim()}],
-      },
-    };
-    const history = this.makeHistory(state, updated, actor, 'transitioned', {
-      fromState: record.status,
-      toState: 'queued',
-      reason: reason.trim(),
-      snapshot: {transitionId: transition.id, previousPayment: currentPayment, workflowVersion: module.workflow.version},
+    const correlationId = newId('correlation');
+    const key = `${record.id}:${expectedVersion}:treasury-payment-revert`;
+    await this.storage.transaction(['users','treasury_executions','employee_advances','purchase_requests','workflow_history','audit_events','domain_events','idempotency_keys','meta'], 'readwrite', async (tx) => {
+      if (await tx.get('idempotency_keys', key)) return;
+      const [users,current,treasuryRecords,advances,purchases,histories,audits] = await Promise.all([
+        tx.getAll<LocalUser>('users'),tx.get<OperationalRecord>('treasury_executions',recordId),tx.getAll<OperationalRecord>('treasury_executions'),tx.getAll<OperationalRecord>('employee_advances'),tx.getAll<OperationalRecord>('purchase_requests'),tx.getAll<OperationalRecordHistory>('workflow_history'),tx.getAll<AuditEvent>('audit_events'),
+      ]);
+      const currentActor = users.find((user) => user.id === actor.id && user.status === 'active' && user.companyId === actor.companyId);
+      if (!currentActor || !current || current.version !== expectedVersion) throw new Error('پرونده پرداخت هم‌زمان تغییر کرده است؛ دوباره باز کنید.');
+      requirePermission(currentActor, transition.permission, 'مجوز بازگشت از پرداخت را ندارید.');
+      if (current.status !== 'payment_recorded' || current.assigneeUserId !== currentActor.id) throw new Error('این پرداخت دیگر برای بازگشت در اختیار شما نیست.');
+      const previousPayment = current.payload.payment;
+      if (!previousPayment || typeof previousPayment !== 'object' || Array.isArray(previousPayment)) throw new Error('اطلاعات پرداخت ثبت‌شده پیدا نشد.');
+      const previousReceipt = previousPayment.receipt && typeof previousPayment.receipt === 'object' && !Array.isArray(previousPayment.receipt) ? previousPayment.receipt : undefined;
+      const paymentHistory = Array.isArray(current.payload.paymentHistory) ? current.payload.paymentHistory : [];
+      const {payment: _removedPayment, ...payloadWithoutCurrentPayment} = current.payload;
+      const updated: OperationalRecord = {...current,status:'queued',updatedByActorId:currentActor.actorId,updatedAt:now,version:current.version+1,payload:{...payloadWithoutCurrentPayment,paymentHistory:[...paymentHistory,{...previousPayment,archivedAt:now,archivedByUserId:currentActor.id,archiveAction:'reverted',archiveReason:reason.trim()}]}};
+      await tx.put('treasury_executions', updated);
+      await tx.put('workflow_history', {id:newId('history'),recordId:updated.id,moduleId:updated.moduleId,sequence:histories.filter((item)=>item.recordId===updated.id).length+1,eventType:'transitioned',fromState:current.status,toState:'queued',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,reason:reason.trim(),snapshot:{transitionId:transition.id,previousPayment:{paidAt:previousPayment.paidAt??null,paymentReference:previousPayment.paymentReference??null,note:previousPayment.note??null,receiptFileName:previousReceipt?.fileName??null},workflowVersion:module.workflow.version},occurredAt:now} satisfies OperationalRecordHistory);
+      const source = advances.find((item)=>item.id===current.relatedRecordId) ?? purchases.find((item)=>item.id===current.relatedRecordId);
+      let sourceStatus: string | undefined;
+      if (source) {
+        const progress = financialPaymentProgress(source, treasuryRecords.map((item)=>item.id===updated.id?updated:item));
+        sourceStatus = 'sent_to_treasury';
+        const {paidAt: _sourcePaidAt, paymentReference: _sourceReference, ...sourcePayload} = source.payload;
+        const updatedSource: OperationalRecord = {...source,status:sourceStatus,updatedByActorId:currentActor.actorId,updatedAt:now,version:source.version+1,payload:{...sourcePayload,financialPaymentProgress:progress as unknown as OperationalPayloadValue}};
+        await tx.put(source.moduleId==='employee-advance'?'employee_advances':'purchase_requests', updatedSource);
+        await tx.put('workflow_history', {id:newId('history'),recordId:source.id,moduleId:source.moduleId,sequence:histories.filter((item)=>item.recordId===source.id).length+1,eventType:'transitioned',fromState:source.status,toState:sourceStatus,actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,reason:reason.trim(),snapshot:{treasuryRecordId:current.id,paymentProgress:progress},occurredAt:now} satisfies OperationalRecordHistory);
+      }
+      await tx.put('idempotency_keys', {id:key,recordId:current.id,createdAt:now});
+      await tx.put('audit_events', {id:newId('audit'),sequence:nextSequence(audits),companyId:current.companyId,category:'system',action:'treasury.treasury-execution.payment_reverted',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:`ثبت پرداخت «${current.title}» با حفظ سابقه به مجری بازگردانده شد.`,reason:reason.trim(),outcome:'success',correlationId,metadata:{recordId:current.id,moduleId:current.moduleId,version:updated.version,sourceRecordId:current.relatedRecordId??null,sourceStatus:sourceStatus??null}} satisfies AuditEvent);
+      await tx.put('domain_events', {id:newId('event'),aggregateType:'treasury-execution',aggregateId:current.id,eventType:'payment_reverted',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{effectiveUserId:currentActor.id,status:updated.status,version:updated.version,sourceRecordId:current.relatedRecordId??null,sourceStatus:sourceStatus??null}} satisfies DomainEvent);
+      await tx.put('meta', {id:'lastPersistedAt',value:now});
     });
-    const key = `${record.id}:${record.version}:treasury-payment-revert`;
-    await this.persistOperationalChange(module.store, updated, history, actor, 'payment_reverted', `ثبت پرداخت «${record.title}» با حفظ سابقه به مجری بازگردانده شد.`, reason.trim(), key);
     return this.loadState();
   }
 
@@ -2838,6 +3258,7 @@ async setRoleStatus(roleId: string, expectedVersion: number, status: UserStatus)
 
   async activateRegistration(registrationId: string, expectedVersion: number, initialPassword: string): Promise<FoundationState> {
     const state = await this.loadState(); const actor = state.activeUser;
+    if (state.session.actingAdminUserId) throw new Error('تصمیم‌گیری مساعده در حالت مشاهده آزمایشی مجاز نیست.');
     requirePermission(actor, 'organization.registrations.activate', 'مجوز فعال‌سازی نهایی حساب ثبت‌نام را ندارید.');
     if (state.session.actingAdminUserId) throw new Error('فعال‌سازی حساب در حالت مشاهده آزمایشی مجاز نیست.');
     if (initialPassword.length < 8) throw new Error('رمز عبور اولیه باید حداقل ۸ نویسه باشد.');
@@ -2995,61 +3416,140 @@ async setRoleStatus(roleId: string, expectedVersion: number, status: UserStatus)
     if(record.moduleId==='shipment'&&record.payload.splitShipment===true){if(!can(user,permissionFor('shipment','manage')))throw new Error('ارسال تفکیکی به مجوز مستقل مدیریت Shipment نیاز دارد.');if(reason.trim().length<3)throw new Error('دلیل ارسال تفکیکی الزامی است.');}
   }
   private makeHistory(state: FoundationState, record: OperationalRecord, actor: LocalUser, eventType: OperationalRecordHistory['eventType'], rest: Partial<OperationalRecordHistory>): OperationalRecordHistory {return {id: newId('history'), recordId: record.id, moduleId: record.moduleId, sequence: state.operationalHistory.filter((item) => item.recordId === record.id).length + 1, eventType, actorId: actor.actorId, actorName: actor.name, effectiveUserId: actor.id, snapshot: {}, occurredAt: new Date().toISOString(), ...rest};}
-  private async persistOperationalChange(store: FoundationStoreName, record: OperationalRecord, history: OperationalRecordHistory, effectiveUser: LocalUser, action: string, summary: string, reason = '', idempotencyKey?: string) {const now = new Date().toISOString(); const auditActor = await this.resolveAuditActor(effectiveUser); const correlationId = newId('correlation'); await this.storage.transaction([store,'workflow_history','audit_events','domain_events','meta','idempotency_keys'], 'readwrite', async (tx) => {if (idempotencyKey && await tx.get('idempotency_keys', idempotencyKey)) return; const audits = await tx.getAll<AuditEvent>('audit_events'); await tx.put(store, record); await tx.put('workflow_history', history); if (idempotencyKey) await tx.put('idempotency_keys', {id: idempotencyKey, recordId: record.id, createdAt: now}); await tx.put('audit_events', {id: newId('audit'), sequence: nextSequence(audits), companyId: record.companyId, category: 'system', action: `${record.domain}.${record.moduleId}.${action}`, actorId: auditActor.actorId, actorName: auditActor.name, effectiveUserId: effectiveUser.id, occurredAt: now, summary, reason: reason || undefined, outcome: 'success', correlationId, metadata: {recordId: record.id, moduleId: record.moduleId, version: record.version, actingAdminUserId: auditActor.id === effectiveUser.id ? null : auditActor.id}} satisfies AuditEvent); await tx.put('domain_events', {id: newId('event'), aggregateType: record.moduleId, aggregateId: record.id, eventType: action, actorId: auditActor.actorId, occurredAt: now, correlationId, payload: {effectiveUserId: effectiveUser.id, status: record.status, version: record.version}} satisfies DomainEvent); await tx.put('meta', {id: 'lastPersistedAt', value: now});});}
+  private async persistOperationalChange(store: FoundationStoreName, record: OperationalRecord, history: OperationalRecordHistory, effectiveUser: LocalUser, action: string, summary: string, reason = '', idempotencyKey?: string) {const now = new Date().toISOString(); const auditActor = await this.resolveAuditActor(effectiveUser); const correlationId = newId('correlation'); const creatingAdvance=store==='employee_advances'&&record.version===1&&['submitted','proxy_created_and_approved'].includes(action);const stores:FoundationStoreName[]=creatingAdvance?[store,'personnel','workflow_history','audit_events','domain_events','meta','idempotency_keys']:[store,'workflow_history','audit_events','domain_events','meta','idempotency_keys'];await this.storage.transaction(stores, 'readwrite', async (tx) => {if (idempotencyKey && await tx.get('idempotency_keys', idempotencyKey)) return; const audits = await tx.getAll<AuditEvent>('audit_events'); let persistedRecord=record; if(creatingAdvance){const current=await tx.getAll<OperationalRecord>('employee_advances');const currentPersonnel=record.ownerPersonnelId?await tx.get<PersonnelRecord>('personnel',record.ownerPersonnelId):undefined;if(!currentPersonnel||currentPersonnel.employmentStatus!=='active')throw new Error('پرونده فعال پرسنل دریافت‌کننده پیدا نشد.');const eligibility=personnelAdvanceEligibility(currentPersonnel);if(!eligibility.allowed)throw new Error(`ثبت درخواست مساعده برای این پرسنل ${advanceEligibilityStatusLabel(eligibility.status)} است${eligibility.reason?`: ${eligibility.reason}`:'.'}`);if(current.some((item)=>item.ownerPersonnelId===record.ownerPersonnelId&&!['paid','rejected','cancelled'].includes(item.status)))throw new Error('برای این پرسنل یک درخواست مساعده باز وجود دارد؛ ابتدا همان پرونده را تعیین تکلیف کنید.');const year=new Date(now).getFullYear();const max=current.reduce((value,item)=>{const match=new RegExp(`^ADV-${year}-(\\d+)$`).exec(item.trackingCode);return Math.max(value,match?Number(match[1]):0);},0);persistedRecord={...record,trackingCode:`ADV-${year}-${String(max+1).padStart(4,'0')}`};} await tx.put(store, persistedRecord); await tx.put('workflow_history', history); if (idempotencyKey) await tx.put('idempotency_keys', {id: idempotencyKey, recordId: persistedRecord.id, createdAt: now}); await tx.put('audit_events', {id: newId('audit'), sequence: nextSequence(audits), companyId: persistedRecord.companyId, category: 'system', action: `${persistedRecord.domain}.${persistedRecord.moduleId}.${action}`, actorId: auditActor.actorId, actorName: auditActor.name, effectiveUserId: effectiveUser.id, occurredAt: now, summary, reason: reason || undefined, outcome: 'success', correlationId, metadata: {recordId: persistedRecord.id, moduleId: persistedRecord.moduleId, version: persistedRecord.version, actingAdminUserId: auditActor.id === effectiveUser.id ? null : auditActor.id}} satisfies AuditEvent); await tx.put('domain_events', {id: newId('event'), aggregateType: persistedRecord.moduleId, aggregateId: persistedRecord.id, eventType: action, actorId: auditActor.actorId, occurredAt: now, correlationId, payload: {effectiveUserId: effectiveUser.id, status: persistedRecord.status, version: persistedRecord.version}} satisfies DomainEvent); await tx.put('meta', {id: 'lastPersistedAt', value: now});});}
   private async createHandoffRecord(targetModuleId: string, source: OperationalRecord, actor: LocalUser, reason: string) {const target = ERP_MODULES.find((item) => item.id === targetModuleId); if (!target) return; const now = new Date().toISOString(); const record: OperationalRecord = {id: newId(targetModuleId), moduleId: targetModuleId, domain: target.domain, trackingCode: `${target.prefix}-${source.trackingCode}`, title: `${target.singular} برای ${source.title}`, description: `تحویل خودکار از ${source.trackingCode}`, status: target.workflow.initialState, priority: source.priority, companyId: source.companyId, unitId: source.unitId, branchUnitId: source.branchUnitId, ownerPersonnelId: source.ownerPersonnelId, assigneeUserId: source.assigneeUserId, customerId: source.customerId, relatedRecordId: source.id, amountRial: source.amountRial, quantity: source.quantity, createdByActorId: actor.actorId, createdByUserId: actor.id, updatedByActorId: actor.actorId, version: 1, payload: {handoffReason: reason || 'گردش‌کار خودکار', sourceModuleId: source.moduleId}, createdAt: now, updatedAt: now}; const state = await this.loadState(); const history = this.makeHistory(state, record, actor, 'handoff', {reason, snapshot: {sourceRecordId: source.id, sourceModuleId: source.moduleId}}); await this.persistOperationalChange(target.store, record, history, actor, 'handoff', `از ${source.trackingCode} به ${target.title} تحویل شد.`, reason);}
 
-  private async createAdvanceTreasuryHandoff(source: OperationalRecord, actor: LocalUser, targetUserId: string, reason: string) {
-    const target = ERP_MODULES.find((item) => item.id === 'treasury-execution');
-    if (!target) return;
-    const current = await this.loadState();
-    if (current.operationalRecords.some((item) => item.moduleId === 'treasury-execution' && item.relatedRecordId === source.id)) return;
-    const payload = readEmployeeAdvancePayload(source);
-    const now = new Date().toISOString();
-    const record: OperationalRecord = {
-      id: newId('treasury-execution'), moduleId: target.id, domain: target.domain, trackingCode: `${target.prefix}-${source.trackingCode}-1`,
-      title: `پرداخت مساعده ${payload.firstName} ${payload.lastName}`, description: `پرداخت مساعده پرسنلی از درخواست ${source.trackingCode}`,
-      status: target.workflow.initialState, priority: source.priority, companyId: source.companyId, unitId: source.unitId, branchUnitId: source.branchUnitId,
-      ownerPersonnelId: source.ownerPersonnelId, assigneeUserId: targetUserId, relatedRecordId: source.id, amountRial: source.amountRial, quantity: '1',
-      createdByActorId: actor.actorId, createdByUserId: actor.id, updatedByActorId: actor.actorId, version: 1,
-      payload: {handoffReason: reason, sourceModuleId: 'employee-advance', initialRequesterUserId: source.createdByUserId, initialRequesterName: payload.signedByName, beneficiaryPersonnelId: payload.beneficiaryPersonnelId, beneficiaryName: `${payload.firstName} ${payload.lastName}`, beneficiaryCardNumber: payload.cardNumber, bankName: payload.bankName, branchName: payload.branchName, unitName: payload.unitName, positionName: payload.positionName},
-      createdAt: now, updatedAt: now,
-    };
-    const history = this.makeHistory(current, record, actor, 'handoff', {reason, snapshot: {sourceRecordId: source.id, sourceModuleId: source.moduleId}});
-    await this.persistOperationalChange(target.store, record, history, actor, 'handoff', `مساعده ${source.trackingCode} برای پرداخت به خزانه تحویل شد.`, reason);
+  private async persistAdvanceDecision(original: OperationalRecord, updated: OperationalRecord, actor: LocalUser, decision: AdvanceDecision, actionLabel: string, reason: string, expectedVersion: number) {
+    const targetModule = ERP_MODULES.find((item) => item.id === 'treasury-execution');
+    const now = updated.updatedAt;
+    const correlationId = newId('correlation');
+    const key = `${original.id}:${expectedVersion}:advance-decision:${decision}`;
+    await this.storage.transaction(['users','security_roles','organizational_units','workflow_definitions','workflow_versions','employee_advances','treasury_executions','workflow_history','audit_events','domain_events','idempotency_keys','meta'], 'readwrite', async (tx) => {
+      if (await tx.get('idempotency_keys', key)) return;
+      const [rawUsers, roles, units, workflows, workflowVersions, current, treasuryRecords, histories, audits] = await Promise.all([
+        tx.getAll<LocalUser>('users'),
+        tx.getAll<SecurityRole>('security_roles'),
+        tx.getAll<OrganizationalUnit>('organizational_units'),
+        tx.getAll<WorkflowDefinition>('workflow_definitions'),
+        tx.getAll<WorkflowDefinition>('workflow_versions'),
+        tx.get<OperationalRecord>('employee_advances', original.id),
+        tx.getAll<OperationalRecord>('treasury_executions'),
+        tx.getAll<OperationalRecordHistory>('workflow_history'),
+        tx.getAll<AuditEvent>('audit_events'),
+      ]);
+      const users = rawUsers.map((user) => resolveUserAccess(user, roles));
+      const currentActor = users.find((user) => user.id === actor.id && user.status === 'active' && user.companyId === actor.companyId);
+      if (!currentActor || !current || current.version !== expectedVersion || current.status !== original.status) throw new Error('این درخواست مساعده هم‌زمان تغییر کرده است؛ پرونده را دوباره باز کنید.');
+      const currentState = {activeUser: currentActor, users, roles, units, workflows, workflowVersions} as FoundationState;
+      const permissionDecision = authorize({persona:currentActor,permission:permissionFor('employee-advance','approve'),action:'approve',resource:operationalRecordResource(currentActor,current)});
+      if (!permissionDecision.allowed || !canEmployeeAdvanceReviewerDecide(current, currentState)) throw new Error('دسترسی، نقش یا محدوده شما برای این مرحله مساعده هم‌زمان تغییر کرده است.');
+      const configuredDecision = decision === 'reject' ? 'reject' : decision === 'needs_correction' ? 'needs_correction' : decision === 'accounting_recheck' ? 'return_previous' : 'approve';
+      if (!workflowStageAllows(currentState, 'employee-advance', current.status, configuredDecision, ['approve','reject','needs_correction'], current.workflowVersion, current.workflowRouteId)) throw new Error('مجوز تصمیم این مرحله در نسخه جاری گردش‌کار تغییر کرده است.');
+      if (updated.assigneeUserId && !['rejected','needs_correction'].includes(updated.status)) {
+        const payload = readEmployeeAdvancePayload(current);
+        const advanceModule = ERP_MODULES.find((item) => item.id === 'employee-advance');
+        if (!advanceModule) throw new Error('ماژول مساعده پیدا نشد.');
+        const boundWorkflow = workflowForRecord(currentState, advanceModule, current);
+        const expectedAssignee = resolveAdvanceStageAssignee(currentState, boundWorkflow, current.workflowRouteId, updated.status, {branchUnitId:payload.branchUnitId,unitId:payload.unitId,beneficiaryUserId:payload.beneficiaryUserId});
+        if (!expectedAssignee || expectedAssignee.id !== updated.assigneeUserId) throw new Error('مسئول مرحله بعد مساعده هم‌زمان تغییر کرده است؛ پرونده را تازه کنید.');
+      }
+      const persisted: OperationalRecord = {...updated, updatedByActorId: currentActor.actorId};
+      await tx.put('employee_advances', persisted);
+      await tx.put('workflow_history', {id:newId('history'),recordId:persisted.id,moduleId:persisted.moduleId,sequence:histories.filter((item)=>item.recordId===persisted.id).length+1,eventType:persisted.status==='sent_to_treasury'?'handoff':'transitioned',fromState:current.status,toState:persisted.status,actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,reason:reason||actionLabel,snapshot:{decision,previousAmountRial:current.amountRial,amountRial:persisted.amountRial},occurredAt:now} satisfies OperationalRecordHistory);
+      if (persisted.status === 'sent_to_treasury') {
+        if (!targetModule || !persisted.assigneeUserId) throw new Error('مجری فعال خزانه برای پرداخت مساعده تعیین نشده است.');
+        const treasuryActor = users.find((user) => user.id === persisted.assigneeUserId && user.status === 'active' && user.companyId === persisted.companyId);
+        if (!treasuryActor) throw new Error('مجری فعال خزانه برای پرداخت مساعده تعیین نشده است.');
+        if (treasuryRecords.some((item) => item.moduleId === 'treasury-execution' && item.relatedRecordId === persisted.id)) throw new Error('برای این مساعده قبلاً پرونده پرداخت خزانه ساخته شده است.');
+        const payload = readEmployeeAdvancePayload(persisted);
+        const treasuryRecord: OperationalRecord = {
+          id:newId('treasury-execution'),moduleId:'treasury-execution',domain:targetModule.domain,trackingCode:`${targetModule.prefix}-${persisted.trackingCode}-1`,
+          title:`پرداخت مساعده ${payload.firstName} ${payload.lastName}`,description:`پرداخت مساعده پرسنلی از درخواست ${persisted.trackingCode}`,
+          status:targetModule.workflow.initialState,priority:persisted.priority,companyId:persisted.companyId,unitId:persisted.unitId,branchUnitId:persisted.branchUnitId,
+          ownerPersonnelId:persisted.ownerPersonnelId,assigneeUserId:treasuryActor.id,relatedRecordId:persisted.id,amountRial:persisted.amountRial,quantity:'1',
+          createdByActorId:currentActor.actorId,createdByUserId:currentActor.id,updatedByActorId:currentActor.actorId,version:1,
+          payload:{handoffReason:reason||actionLabel,sourceModuleId:'employee-advance',initialRequesterUserId:persisted.createdByUserId,initialRequesterName:payload.signedByName,beneficiaryPersonnelId:payload.beneficiaryPersonnelId,beneficiaryName:`${payload.firstName} ${payload.lastName}`,beneficiaryCardNumber:payload.cardNumber,bankName:payload.bankName,branchName:payload.branchName,unitName:payload.unitName,positionName:payload.positionName,financialObligation:{schemaVersion:1,currency:'IRR',obligationId:`${persisted.id}:advance`,sourceModuleId:'employee-advance',sourceRecordId:persisted.id,amountRial:requirePositiveRialAmount(persisted.amountRial??'0'),beneficiaryUserId:payload.beneficiaryUserId??null,beneficiaryPersonnelId:payload.beneficiaryPersonnelId,beneficiaryName:`${payload.firstName} ${payload.lastName}`.trim(),beneficiaryCardNumber:payload.cardNumber,branchUnitId:persisted.branchUnitId??null,costCenterUnitId:persisted.unitId??null} satisfies FinancialObligation as unknown as OperationalPayloadValue},
+          createdAt:now,updatedAt:now,
+        };
+        await tx.put('treasury_executions', treasuryRecord);
+        await tx.put('workflow_history', {id:newId('history'),recordId:treasuryRecord.id,moduleId:treasuryRecord.moduleId,sequence:1,eventType:'handoff',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,reason:reason||actionLabel,snapshot:{sourceRecordId:persisted.id,sourceModuleId:persisted.moduleId},occurredAt:now} satisfies OperationalRecordHistory);
+        await tx.put('domain_events', {id:newId('event'),aggregateType:'treasury-execution',aggregateId:treasuryRecord.id,eventType:'handoff',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{effectiveUserId:currentActor.id,status:treasuryRecord.status,version:treasuryRecord.version,sourceRecordId:persisted.id}} satisfies DomainEvent);
+      }
+      await tx.put('idempotency_keys', {id:key,recordId:persisted.id,createdAt:now});
+      await tx.put('audit_events', {id:newId('audit'),sequence:nextSequence(audits),companyId:persisted.companyId,category:'system',action:`${persisted.domain}.employee-advance.decision`,actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:`${actionLabel}: «${persisted.title}».`,reason:reason||undefined,outcome:'success',correlationId,metadata:{recordId:persisted.id,moduleId:persisted.moduleId,version:persisted.version,decision,targetState:persisted.status,treasuryHandoff:persisted.status==='sent_to_treasury'}} satisfies AuditEvent);
+      await tx.put('domain_events', {id:newId('event'),aggregateType:'employee-advance',aggregateId:persisted.id,eventType:'decision',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{effectiveUserId:currentActor.id,status:persisted.status,version:persisted.version,decision}} satisfies DomainEvent);
+      await tx.put('meta', {id:'lastPersistedAt',value:now});
+    });
   }
 
-  private async createPurchaseTreasuryHandoffs(source: OperationalRecord, actor: LocalUser, reason: string, targetUserId?: string) {
-    const target = ERP_MODULES.find((item) => item.id === 'treasury-execution');
-    if (!target) return;
-    const sourcePayload = readPurchaseRequestPayload(source.payload);
-    const current = await this.loadState();
-    const initialRequester = current.users.find((user) => user.id === source.createdByUserId);
-    const treasuryUser = current.users.find((user) => user.id === targetUserId && user.status === 'active' && can(user, permissionFor('treasury-execution', 'transition')))
-      ?? current.users.find((user) => user.status === 'active' && user.roleIds.includes('role-treasury-executor-v1'))
-      ?? current.users.find((user) => user.status === 'active' && !user.isAdmin && can(user, permissionFor('treasury-execution', 'transition')));
-    for (const [index, allocation] of sourcePayload.allocations.entries()) {
-      const now = new Date().toISOString();
-      const branch = current.units.find((unit) => unit.id === allocation.branchUnitId);
-      const costCenter = current.units.find((unit) => unit.id === allocation.costCenterUnitId);
-      const record: OperationalRecord = {
-        id: newId('treasury-execution'), moduleId: target.id, domain: target.domain,
-        trackingCode: `${target.prefix}-${source.trackingCode}-${index + 1}`,
-        title: `پرداخت سهم ${branch?.name ?? 'شعبه'} — ${source.title}`,
-        description: `سهم مالی ${branch?.name ?? 'شعبه'} / ${costCenter?.name ?? 'مرکز هزینه'} از درخواست ${source.trackingCode}`,
-        status: target.workflow.initialState, priority: source.priority, companyId: source.companyId,
-        unitId: allocation.costCenterUnitId, branchUnitId: allocation.branchUnitId,
-        ownerPersonnelId: source.ownerPersonnelId, assigneeUserId: treasuryUser?.id,
-        relatedRecordId: source.id, amountRial: allocation.amountRial, quantity: '1', dueAt: source.dueAt,
-        createdByActorId: actor.actorId, createdByUserId: actor.id, updatedByActorId: actor.actorId,
-        version: 1,
-        payload: {handoffReason: reason, sourceModuleId: source.moduleId, sourceAllocationId: allocation.id, branchName: branch?.name ?? null, costCenterName: costCenter?.name ?? null, allocationNote: allocation.note || null, initialRequesterUserId: source.createdByUserId, initialRequesterName: initialRequester?.name ?? null},
-        createdAt: now, updatedAt: now,
-      };
-      const refreshed = await this.loadState();
-      const history = this.makeHistory(refreshed, record, actor, 'handoff', {reason, snapshot: {sourceRecordId: source.id, sourceAllocationId: allocation.id}});
-      await this.persistOperationalChange(target.store, record, history, actor, 'handoff', `سهم ${branch?.name ?? 'شعبه'} از ${source.trackingCode} به خزانه تحویل شد.`, reason);
-    }
+  private async persistPurchaseDecision(original: OperationalRecord, updated: OperationalRecord, actor: LocalUser, decision: PurchaseRequestDecision, eventSummary: string, reason: string, expectedVersion: number, handoffToTreasury: boolean, targetUserId?: string) {
+    const targetModule = ERP_MODULES.find((item) => item.id === 'treasury-execution');
+    const now = updated.updatedAt;
+    const correlationId = newId('correlation');
+    const key = `${original.id}:${expectedVersion}:purchase-decision:${decision}:${targetUserId ?? 'creator'}`;
+    await this.storage.transaction(['users','security_roles','organizational_units','workflow_definitions','workflow_versions','purchase_requests','treasury_executions','workflow_history','audit_events','domain_events','idempotency_keys','meta'], 'readwrite', async (tx) => {
+      if (await tx.get('idempotency_keys', key)) return;
+      const [rawUsers, roles, units, workflows, workflowVersions, current, treasuryRecords, histories, audits] = await Promise.all([
+        tx.getAll<LocalUser>('users'),tx.getAll<SecurityRole>('security_roles'),tx.getAll<OrganizationalUnit>('organizational_units'),tx.getAll<WorkflowDefinition>('workflow_definitions'),tx.getAll<WorkflowDefinition>('workflow_versions'),tx.get<OperationalRecord>('purchase_requests',original.id),tx.getAll<OperationalRecord>('treasury_executions'),tx.getAll<OperationalRecordHistory>('workflow_history'),tx.getAll<AuditEvent>('audit_events'),
+      ]);
+      const users = rawUsers.map((user) => resolveUserAccess(user, roles));
+      const currentActor = users.find((user) => user.id === actor.id && user.status === 'active' && user.companyId === actor.companyId);
+      if (!currentActor || !current || current.version !== expectedVersion || current.status !== original.status) throw new Error('این درخواست خرید هم‌زمان تغییر کرده است؛ پرونده را دوباره باز کنید.');
+      const currentState = {activeUser:currentActor,users,roles,units,workflows,workflowVersions} as FoundationState;
+      const permissionDecision = authorize({persona:currentActor,permission:permissionFor('purchase-request','approve'),action:'approve',resource:operationalRecordResource(currentActor,current)});
+      if (!permissionDecision.allowed) throw new Error('دسترسی یا محدوده تأیید درخواست خرید هم‌زمان تغییر کرده است.');
+      const decisionRoleIds = roleIdsForWorkflowState(currentState,'purchase-request',current.status==='submitted'?'submitted':'purchase_review',['role-purchase-approver'],current.workflowVersion);
+      if (!currentActor.isAdmin && (!currentActor.roleIds.some((roleId)=>decisionRoleIds.includes(roleId)) || (current.assigneeUserId && current.assigneeUserId !== currentActor.id))) throw new Error('نقش، مرحله یا مسئول جاری درخواست خرید هم‌زمان تغییر کرده است.');
+      const configuredDecision = decision === 'approve_and_forward' ? 'approve' : decision === 'rejected' ? 'reject' : 'needs_correction';
+      const configuredState = current.status === 'submitted' ? 'submitted' : 'purchase_review';
+      if (!workflowStageAllows(currentState,'purchase-request',configuredState,configuredDecision,['approve','reject','needs_correction'],current.workflowVersion)) throw new Error('مجوز تصمیم در نسخه جاری گردش‌کار درخواست خرید تغییر کرده است.');
+      if (current.createdByActorId === currentActor.actorId) throw new Error('درخواست‌کننده نمی‌تواند درخواست خرید خودش را تأیید کند.');
+      if (decision === 'approve_and_forward' && targetUserId && !handoffToTreasury) {
+        const nextApproverRoleIds = roleIdsForWorkflowState(currentState,'purchase-request','purchase_review',['role-purchase-approver'],current.workflowVersion);
+        const nextApprover = users.find((user) => user.id === targetUserId && user.status === 'active' && user.companyId === current.companyId);
+        const nextDecision = nextApprover && authorize({persona:nextApprover,permission:permissionFor('purchase-request','approve'),action:'approve',resource:operationalRecordResource(nextApprover,current)});
+        if (!nextApprover || !nextApprover.roleIds.some((roleId)=>nextApproverRoleIds.includes(roleId)) || !nextDecision?.allowed) throw new Error('تأییدکننده مرحله بعد دیگر فعال، مجاز یا در محدوده این درخواست نیست.');
+      }
+      if (decision !== 'approve_and_forward') {
+        const creator = users.find((user) => user.id === current.createdByUserId && user.status === 'active' && user.companyId === current.companyId);
+        if (!creator) throw new Error('درخواست‌کننده فعال برای بازگشت یا اعلام نتیجه پیدا نشد.');
+      }
+      const persisted: OperationalRecord = {...updated,updatedByActorId:currentActor.actorId};
+      await tx.put('purchase_requests',persisted);
+      await tx.put('workflow_history',{id:newId('history'),recordId:persisted.id,moduleId:persisted.moduleId,sequence:histories.filter((item)=>item.recordId===persisted.id).length+1,eventType:handoffToTreasury?'handoff':'transitioned',fromState:current.status,toState:persisted.status,actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,reason,snapshot:{decision,targetUserId:targetUserId??null,workflowVersion:current.workflowVersion??null},occurredAt:now} satisfies OperationalRecordHistory);
+      let handoffCount = 0;
+      if (handoffToTreasury) {
+        if (!targetModule || !targetUserId) throw new Error('مجری خزانه برای سهم‌های درخواست خرید تعیین نشده است.');
+        const treasuryUser = users.find((user) => user.id === targetUserId && user.status === 'active' && user.companyId === persisted.companyId && can(user,permissionFor('treasury-execution','transition')));
+        if (!treasuryUser) throw new Error('مجری خزانه انتخاب‌شده دیگر فعال یا مجاز نیست.');
+        if (treasuryRecords.some((item) => item.moduleId === 'treasury-execution' && item.relatedRecordId === persisted.id)) throw new Error('برای این درخواست خرید قبلاً سهم‌های خزانه ساخته شده است.');
+        const payload = readPurchaseRequestPayload(persisted.payload);
+        const requester = users.find((user) => user.id === persisted.createdByUserId);
+        for (const [index, allocation] of payload.allocations.entries()) {
+          const branch = units.find((unit) => unit.id === allocation.branchUnitId);
+          const costCenter = units.find((unit) => unit.id === allocation.costCenterUnitId);
+          const treasuryRecord: OperationalRecord = {
+            id:newId('treasury-execution'),moduleId:'treasury-execution',domain:targetModule.domain,trackingCode:`${targetModule.prefix}-${persisted.trackingCode}-${index+1}`,
+            title:`پرداخت سهم ${branch?.name??'شعبه'} — ${persisted.title}`,description:`سهم مالی ${branch?.name??'شعبه'} / ${costCenter?.name??'مرکز هزینه'} از درخواست ${persisted.trackingCode}`,
+            status:targetModule.workflow.initialState,priority:persisted.priority,companyId:persisted.companyId,unitId:allocation.costCenterUnitId,branchUnitId:allocation.branchUnitId,
+            ownerPersonnelId:persisted.ownerPersonnelId,assigneeUserId:treasuryUser.id,relatedRecordId:persisted.id,amountRial:allocation.amountRial,quantity:'1',dueAt:persisted.dueAt,
+            createdByActorId:currentActor.actorId,createdByUserId:currentActor.id,updatedByActorId:currentActor.actorId,version:1,
+            payload:{handoffReason:reason,sourceModuleId:'purchase-request',sourceAllocationId:allocation.id,branchName:branch?.name??null,costCenterName:costCenter?.name??null,allocationNote:allocation.note||null,initialRequesterUserId:persisted.createdByUserId,initialRequesterName:requester?.name??null,beneficiaryCardNumber:payload.beneficiaryCardNumber,beneficiaryName:payload.beneficiaryLastName,financialObligation:{schemaVersion:1,currency:'IRR',obligationId:`${persisted.id}:${allocation.id}`,sourceModuleId:'purchase-request',sourceRecordId:persisted.id,amountRial:requirePositiveRialAmount(allocation.amountRial),beneficiaryName:payload.beneficiaryLastName,beneficiaryCardNumber:payload.beneficiaryCardNumber,branchUnitId:allocation.branchUnitId,costCenterUnitId:allocation.costCenterUnitId} satisfies FinancialObligation as unknown as OperationalPayloadValue},
+            createdAt:now,updatedAt:now,
+          };
+          await tx.put('treasury_executions',treasuryRecord);
+          await tx.put('workflow_history',{id:newId('history'),recordId:treasuryRecord.id,moduleId:treasuryRecord.moduleId,sequence:1,eventType:'handoff',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,reason,snapshot:{sourceRecordId:persisted.id,sourceAllocationId:allocation.id},occurredAt:now} satisfies OperationalRecordHistory);
+          await tx.put('domain_events',{id:newId('event'),aggregateType:'treasury-execution',aggregateId:treasuryRecord.id,eventType:'handoff',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{effectiveUserId:currentActor.id,status:treasuryRecord.status,version:treasuryRecord.version,sourceRecordId:persisted.id,sourceAllocationId:allocation.id}} satisfies DomainEvent);
+          handoffCount += 1;
+        }
+      }
+      await tx.put('idempotency_keys',{id:key,recordId:persisted.id,createdAt:now});
+      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:persisted.companyId,category:'system',action:'procurement.purchase-request.decision',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:eventSummary,reason,outcome:'success',correlationId,metadata:{recordId:persisted.id,moduleId:persisted.moduleId,version:persisted.version,decision,targetState:persisted.status,handoffCount}} satisfies AuditEvent);
+      await tx.put('domain_events',{id:newId('event'),aggregateType:'purchase-request',aggregateId:persisted.id,eventType:'decision',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{effectiveUserId:currentActor.id,status:persisted.status,version:persisted.version,decision,handoffCount}} satisfies DomainEvent);
+      await tx.put('meta',{id:'lastPersistedAt',value:now});
+    });
   }
+
   private async resolveAuditActor(effectiveUser: LocalUser) {const session = await this.storage.get<FoundationSession>('sessions', 'active-session'); if (!session?.actingAdminUserId) return effectiveUser; return await this.storage.get<LocalUser>('users', session.actingAdminUserId) ?? effectiveUser;}
   private async appendSystemAudit(action: string, summary: string, effectiveUserId: string, metadata?: AuditEvent['metadata']) {const effective = await this.storage.get<LocalUser>('users', effectiveUserId) ?? LOCAL_USERS[0]; await this.appendAudit({actor: effective, effectiveUser: effective, category: 'system', action, summary, outcome: 'success', metadata});}
 
@@ -3083,7 +3583,8 @@ function synchronizeSalesPersonnelInput(input: PersonnelInput, state: Foundation
 }
 
 function normalizePersonnelInput(input: PersonnelInput): PersonnelInput {
-  return {...input, personnelCode: normalizeDigits(input.personnelCode).trim(), firstName: input.firstName.trim(), lastName: input.lastName.trim(), fatherName: input.fatherName?.trim(), nationalId: normalizeNationalId(input.nationalId), identityNumber: normalizeDigits(input.identityNumber).trim(), primaryMobile: normalizePhone(input.primaryMobile), secondaryMobile: normalizePhone(input.secondaryMobile), phone: normalizePhone(input.phone), personalEmail: input.personalEmail?.trim().toLowerCase(), province: input.province?.trim(), city: input.city?.trim(), address: input.address?.trim(), postalCode: normalizeDigits(input.postalCode).replace(/\D/g, ''), employmentType: input.employmentType.trim(), workLocation: input.workLocation?.trim(), bankName: input.bankName?.trim(), accountNumber: normalizeDigits(input.accountNumber).replace(/\s|-/g, ''), cardNumber: normalizeDigits(input.cardNumber).replace(/\s|-/g, ''), iban: normalizeIban(input.iban), emergencyName: input.emergencyName?.trim(), emergencyRelation: input.emergencyRelation?.trim(), emergencyPhone: normalizePhone(input.emergencyPhone)};
+  const advanceEligibilityStatus = input.advanceEligibilityStatus ?? 'eligible';
+  return {...input, personnelCode: normalizeDigits(input.personnelCode).trim(), firstName: input.firstName.trim(), lastName: input.lastName.trim(), fatherName: input.fatherName?.trim(), nationalId: normalizeNationalId(input.nationalId), identityNumber: normalizeDigits(input.identityNumber).trim(), primaryMobile: normalizePhone(input.primaryMobile), secondaryMobile: normalizePhone(input.secondaryMobile), phone: normalizePhone(input.phone), personalEmail: input.personalEmail?.trim().toLowerCase(), province: input.province?.trim(), city: input.city?.trim(), address: input.address?.trim(), postalCode: normalizeDigits(input.postalCode).replace(/\D/g, ''), employmentType: input.employmentType.trim(), workLocation: input.workLocation?.trim(), bankName: input.bankName?.trim(), accountNumber: normalizeDigits(input.accountNumber).replace(/\s|-/g, ''), cardNumber: normalizeDigits(input.cardNumber).replace(/\s|-/g, ''), iban: normalizeIban(input.iban), advanceEligibilityStatus, advanceEligibilityReason: advanceEligibilityStatus === 'eligible' ? undefined : input.advanceEligibilityReason?.trim(), advanceEligibilityEffectiveFrom: advanceEligibilityStatus === 'eligible' ? undefined : input.advanceEligibilityEffectiveFrom, advanceEligibilityEffectiveUntil: advanceEligibilityStatus === 'suspended' ? input.advanceEligibilityEffectiveUntil : undefined, emergencyName: input.emergencyName?.trim(), emergencyRelation: input.emergencyRelation?.trim(), emergencyPhone: normalizePhone(input.emergencyPhone)};
 }
 function validatePersonnelInput(input: PersonnelInput, state: FoundationState, excludeId?: string) {
   if (input.firstName.trim().length < 2 || input.lastName.trim().length < 2) throw new Error('نام و نام خانوادگی پرسنل را کامل وارد کنید.');
@@ -3097,14 +3598,26 @@ function validatePersonnelInput(input: PersonnelInput, state: FoundationState, e
   if (profileErrors.length) throw new Error(profileErrors[0]);
   if (input.phone && !isValidIranianLandline(normalizePhone(input.phone))) throw new Error('تلفن ثابت باید همراه پیش‌شماره و ۱۱ رقم باشد؛ مانند 02156174680.');
   if (input.emergencyPhone && !isValidIranianMobile(normalizePhone(input.emergencyPhone)) && !isValidIranianLandline(normalizePhone(input.emergencyPhone))) throw new Error('شماره تماس اضطراری باید همراه ۱۱ رقمی یا تلفن ثابت همراه پیش‌شماره باشد.');
-  if (!state.units.some((item) => item.id === input.unitId && item.type !== 'شعبه')) throw new Error('واحد سازمانی معتبر انتخاب کنید؛ شعبه باید در فیلد جداگانه ثبت شود.');
+  const advanceStatus = input.advanceEligibilityStatus ?? 'eligible';
+  if (!['eligible','suspended','ineligible'].includes(advanceStatus)) throw new Error('وضعیت استحقاق مساعده معتبر نیست.');
+  if (advanceStatus !== 'eligible' && (input.advanceEligibilityReason?.trim().length ?? 0) < 3) throw new Error('دلیل تعلیق یا عدم استحقاق مساعده الزامی است.');
+  if (advanceStatus === 'suspended' && !input.advanceEligibilityEffectiveUntil) throw new Error('برای تعلیق موقت مساعده، تاریخ پایان تعلیق الزامی است.');
+  if (input.advanceEligibilityEffectiveFrom && input.advanceEligibilityEffectiveUntil && input.advanceEligibilityEffectiveUntil < input.advanceEligibilityEffectiveFrom) throw new Error('تاریخ پایان تعلیق مساعده نمی‌تواند قبل از تاریخ شروع آن باشد.');
+  if (!state.units.some((item) => item.id === input.unitId && item.type !== 'شعبه' && (input.employmentStatus !== 'active' || item.status === 'active'))) throw new Error('برای پرسنل فعال، واحد سازمانی فعال انتخاب کنید؛ شعبه باید در فیلد جداگانه ثبت شود.');
   if (input.branchUnitId && !state.units.some((item) => item.id === input.branchUnitId && item.type === 'شعبه' && item.status === 'active')) throw new Error('شعبه محل استقرار معتبر انتخاب کنید.');
-  if (!state.positions.some((item) => item.id === input.positionId)) throw new Error('سمت سازمانی معتبر انتخاب کنید.');
+  if (!state.positions.some((item) => item.id === input.positionId && (input.employmentStatus !== 'active' || item.status === 'active'))) throw new Error('برای پرسنل فعال، سمت سازمانی فعال انتخاب کنید.');
   const selectedPosition = state.positions.find((item) => item.id === input.positionId);
   if (!selectedPosition || !positionSupportsUnit(selectedPosition, input.unitId)) throw new Error('سمت انتخاب‌شده برای واحد سازمانی مجاز نیست.');
   if (!input.startDate) throw new Error('تاریخ شروع همکاری الزامی است.');
   if (input.employmentStatus === 'ended' && !input.endDate) throw new Error('برای همکاری خاتمه‌یافته، تاریخ پایان را وارد کنید.');
-  if (input.managerPersonnelId === excludeId) throw new Error('پرسنل نمی‌تواند مدیر مستقیم خودش باشد.');
+  if (excludeId && input.managerPersonnelId === excludeId) throw new Error('پرسنل نمی‌تواند مدیر مستقیم خودش باشد.');
+  if (input.managerPersonnelId) {
+    const manager = state.personnel.find((item) => item.id === input.managerPersonnelId);
+    const targetCompanyId = (excludeId ? state.personnel.find((item) => item.id === excludeId)?.companyId : undefined) ?? state.activeUser.companyId;
+    if (!manager || manager.employmentStatus !== 'active') throw new Error('مدیر مستقیم باید یک پرسنل فعال باشد.');
+    if (manager.companyId && manager.companyId !== targetCompanyId) throw new Error('مدیر مستقیم باید از همان شرکت انتخاب شود.');
+    if (excludeId && personnelManagerWouldCreateCycle(excludeId, manager.id, state.personnel)) throw new Error('انتخاب این مدیر، چرخه نامعتبر در زنجیره مدیران مستقیم ایجاد می‌کند.');
+  }
   const primaryUnitIsSales = state.units.find((item) => item.id === input.unitId)?.name.includes('فروش') ?? false;
   if (primaryUnitIsSales && !input.salesHierarchyLevel) throw new Error('رده این پرسنل در سلسله‌مراتب فروش را مشخص کنید.');
   if (primaryUnitIsSales && input.salesHierarchyLevel && input.positionId !== positionIdForSalesHierarchy(input.salesHierarchyLevel)) throw new Error('برای پرسنل واحد فروش، سمت سازمانی باید با رده او در سلسله‌مراتب فروش یکسان باشد.');
@@ -3122,7 +3635,7 @@ function validatePersonnelInput(input: PersonnelInput, state: FoundationState, e
     if (structure.branchUnitId !== input.branchUnitId) throw new Error('شعبه محل استقرار فروشنده باید با شعبه مسیر سرپرست کال‌سنتر یکسان باشد.');
     if (structure.callCenterSupervisorPersonnelId !== input.salesSupervisorPersonnelId) throw new Error('سرپرست مستقیم فروش باید از ساختار کال‌سنتر محاسبه شود.');
   }
-  if (input.salesSupervisorPersonnelId === excludeId) throw new Error('پرسنل نمی‌تواند سرپرست فروش خودش باشد.');
+  if (excludeId && input.salesSupervisorPersonnelId === excludeId) throw new Error('پرسنل نمی‌تواند سرپرست فروش خودش باشد.');
   if (input.salesSupervisorPersonnelId) {
     const supervisor = state.personnel.find((item) => item.id === input.salesSupervisorPersonnelId && item.employmentStatus === 'active');
     if (!supervisor?.salesHierarchyLevel) throw new Error('سرپرست انتخاب‌شده باید عضو فعال سلسله‌مراتب فروش باشد.');
@@ -3131,8 +3644,8 @@ function validatePersonnelInput(input: PersonnelInput, state: FoundationState, e
   const iban = normalizeIban(input.iban); if (iban && !/^IR\d{24}$/.test(iban)) throw new Error('شماره شبا باید با IR و ۲۴ رقم وارد شود.');
   const card = normalizeDigits(input.cardNumber).replace(/\D/g, ''); if (card && !isValidBankCard(card)) throw new Error('شماره کارت باید ۱۶ رقم باشد.');
 }
-function personnelChangeAreas(before: PersonnelRecord, after: PersonnelRecord) { const areas: string[] = []; if (before.unitId !== after.unitId) areas.push('unit'); if (before.positionId !== after.positionId) areas.push('position'); if (before.managerPersonnelId !== after.managerPersonnelId) areas.push('manager'); if (before.salesHierarchyLevel !== after.salesHierarchyLevel || before.salesAssignmentStartDate !== after.salesAssignmentStartDate || before.salesChannel !== after.salesChannel || before.salesSupervisorPersonnelId !== after.salesSupervisorPersonnelId || before.salesBranchUnitId !== after.salesBranchUnitId || before.salesStructureId !== after.salesStructureId) areas.push('sales_hierarchy'); if (before.employmentStatus !== after.employmentStatus || before.employmentType !== after.employmentType || before.endDate !== after.endDate) areas.push('employment'); if (before.primaryMobile !== after.primaryMobile || before.personalEmail !== after.personalEmail || before.address !== after.address) areas.push('contact'); if (!areas.length) areas.push('profile'); return areas; }
-function personnelAreaLabel(area: string) { return ({unit: 'واحد سازمانی', position: 'سمت سازمانی', manager: 'مدیر مستقیم', sales_hierarchy: 'جایگاه در شبکه فروش', employment: 'وضعیت همکاری'} as Record<string, string>)[area] ?? 'اطلاعات پرونده'; }
+function personnelChangeAreas(before: PersonnelRecord, after: PersonnelRecord) { const areas: string[] = []; if (before.unitId !== after.unitId) areas.push('unit'); if (before.positionId !== after.positionId) areas.push('position'); if (before.managerPersonnelId !== after.managerPersonnelId) areas.push('manager'); if (before.salesHierarchyLevel !== after.salesHierarchyLevel || before.salesAssignmentStartDate !== after.salesAssignmentStartDate || before.salesChannel !== after.salesChannel || before.salesSupervisorPersonnelId !== after.salesSupervisorPersonnelId || before.salesBranchUnitId !== after.salesBranchUnitId || before.salesStructureId !== after.salesStructureId) areas.push('sales_hierarchy'); if (before.employmentStatus !== after.employmentStatus || before.employmentType !== after.employmentType || before.endDate !== after.endDate) areas.push('employment'); if ((before.advanceEligibilityStatus ?? 'eligible') !== (after.advanceEligibilityStatus ?? 'eligible') || before.advanceEligibilityReason !== after.advanceEligibilityReason || before.advanceEligibilityEffectiveFrom !== after.advanceEligibilityEffectiveFrom || before.advanceEligibilityEffectiveUntil !== after.advanceEligibilityEffectiveUntil) areas.push('advance_eligibility'); if (before.primaryMobile !== after.primaryMobile || before.personalEmail !== after.personalEmail || before.address !== after.address) areas.push('contact'); if (!areas.length) areas.push('profile'); return areas; }
+function personnelAreaLabel(area: string) { return ({unit: 'واحد سازمانی', position: 'سمت سازمانی', manager: 'مدیر مستقیم', sales_hierarchy: 'جایگاه در شبکه فروش', employment: 'وضعیت همکاری', advance_eligibility: 'استحقاق مساعده'} as Record<string, string>)[area] ?? 'اطلاعات پرونده'; }
 function salesHierarchyRank(level?: PersonnelRecord['salesHierarchyLevel']) { return ({sales_vice: 1, sales_manager: 2, senior_supervisor: 3, sales_supervisor: 4, seller: 5} as Record<string, number>)[level ?? ''] ?? 99; }
 function assignmentName(state: FoundationState, kind: PersonnelMovementKind, id?: string) { if (!id) return 'تعیین نشده'; if (kind === 'sales_transfer') {const structure = state.salesStructures.find((item) => item.id === id); const branch = state.units.find((item) => item.id === structure?.branchUnitId)?.name; return structure ? `${salesStructureSupervisorName(structure, state.personnel)}${branch ? ` ـ ${branch}` : ''}` : 'ساختار فروش نامشخص';} return kind === 'position_change' ? state.positions.find((item) => item.id === id)?.title ?? 'سمت نامشخص' : state.units.find((item) => item.id === id)?.name ?? (kind === 'branch_transfer' ? 'شعبه نامشخص' : 'واحد نامشخص'); }
 
@@ -3191,14 +3704,73 @@ function validateUnitInput(input: UnitInput, state: Pick<FoundationState, 'units
   const actingPersonnel = actingUser && personnel.find((person) => person.id === actingUser.personnelId || person.linkedUserId === actingUser.id);
   if (!actingUser || !actingPersonnel || actingPersonnel.employmentStatus !== 'active' || actingPersonnel.unitId !== input.parentId) throw new Error('جانشین موقت باید فرد فعالِ واحد بالادست مستقیم باشد.');
 }
+
+const SECONDARY_PASSWORD_MAX_ATTEMPTS=5;
+const SECONDARY_PASSWORD_LOCK_MS=15*60*1000;
+const SECONDARY_PASSWORD_OTP_TTL_MS=5*60*1000;
 function validatePositionInput(input: PositionInput, state: FoundationState, excludeId?: string) { if (input.title.trim().length < 2) throw new Error('عنوان سمت باید حداقل ۲ نویسه باشد.'); if (state.positions.some((position) => position.id !== excludeId && position.title.trim().toLocaleLowerCase('fa') === input.title.trim().toLocaleLowerCase('fa'))) throw new Error('سمتی با این عنوان وجود دارد؛ همان سمت را ویرایش و واحد مجاز را به آن اضافه کنید.'); const unitIds = normalizePositionUnitIds(input.unitIds ?? []); if (!unitIds.length) throw new Error('حداقل یک واحد سازمانی مجاز برای سمت انتخاب کنید.'); if (unitIds.some((id) => !state.units.some((unit) => unit.id === id && unit.status === 'active' && unit.type !== 'شعبه'))) throw new Error('یکی از واحدهای مجاز سمت، غیرفعال یا نامعتبر است.'); }
-function validateUserInput(input: UserInput, state: FoundationState, excludeId?: string) { if (input.name.trim().length < 3) throw new Error('نام کاربر باید حداقل ۳ نویسه باشد.'); if (!/^[a-zA-Z0-9._-]{3,32}$/.test(input.username.trim())) throw new Error('نام کاربری باید ۳ تا ۳۲ نویسه لاتین، عدد، نقطه، خط تیره یا زیرخط باشد.'); if (state.users.some((user) => user.id !== excludeId && user.username.toLowerCase() === input.username.trim().toLowerCase()) || state.registrationRequests.some((request) => request.linkedUserId !== excludeId && request.requestedUsername.toLowerCase() === input.username.trim().toLowerCase())) throw new Error('این نام کاربری قبلاً استفاده شده یا برای یک درخواست ثبت‌نام رزرو شده است.'); if (!state.units.some((unit) => unit.id === input.unitId && unit.status === 'active' && unit.type !== 'شعبه')) throw new Error('واحد سازمانی فعال انتخاب کنید؛ شعبه در فیلد مستقلی نگهداری می‌شود.'); if (input.branchUnitId && !state.units.some((unit) => unit.id === input.branchUnitId && unit.status === 'active' && unit.type === 'شعبه')) throw new Error('شعبه محل استقرار معتبر انتخاب کنید.'); const selectedPosition = state.positions.find((position) => position.id === input.positionId && position.status === 'active'); if (!selectedPosition) throw new Error('سمت سازمانی فعال انتخاب کنید.'); if (!positionSupportsUnit(selectedPosition, input.unitId)) throw new Error('سمت انتخاب‌شده برای این واحد سازمانی مجاز نیست.'); if (!input.roleIds.length || input.roleIds.some((id) => !state.roles.some((role) => role.id === id && role.status === 'active'))) throw new Error('حداقل یک نقش دسترسی فعال انتخاب کنید.'); if (input.managerUserId && input.managerUserId === excludeId) throw new Error('کاربر نمی‌تواند مدیر مستقیم خودش باشد.'); const validPermissions = new Set([...PERMISSION_CATALOG.filter((item) => item.available).map((item) => item.code), ...state.roles.flatMap((role) => role.permissions)]); const grants = input.permissionGrants ?? []; const denials = input.permissionDenials ?? []; if ([...grants, ...denials].some((code) => !validPermissions.has(code))) throw new Error('یکی از مجوزهای انتخاب‌شده در کاتالوگ فعال دسترسی وجود ندارد.'); if (grants.some((code) => denials.includes(code))) throw new Error('یک مجوز نمی‌تواند هم‌زمان برای کاربر افزوده و مستثنا شود.'); }
+function validateUserInput(input: UserInput, state: FoundationState, excludeId?: string) { if (input.name.trim().length < 3) throw new Error('نام کاربر باید حداقل ۳ نویسه باشد.'); if (!/^[a-zA-Z0-9._-]{3,32}$/.test(input.username.trim())) throw new Error('نام کاربری باید ۳ تا ۳۲ نویسه لاتین، عدد، نقطه، خط تیره یا زیرخط باشد.'); if (state.users.some((user) => user.id !== excludeId && user.username.toLowerCase() === input.username.trim().toLowerCase()) || state.registrationRequests.some((request) => request.linkedUserId !== excludeId && request.requestedUsername.toLowerCase() === input.username.trim().toLowerCase())) throw new Error('این نام کاربری قبلاً استفاده شده یا برای یک درخواست ثبت‌نام رزرو شده است.'); if (!state.units.some((unit) => unit.id === input.unitId && unit.status === 'active' && unit.type !== 'شعبه')) throw new Error('واحد سازمانی فعال انتخاب کنید؛ شعبه در فیلد مستقلی نگهداری می‌شود.'); if (input.branchUnitId && !state.units.some((unit) => unit.id === input.branchUnitId && unit.status === 'active' && unit.type === 'شعبه')) throw new Error('شعبه محل استقرار معتبر انتخاب کنید.'); const selectedPosition = state.positions.find((position) => position.id === input.positionId && position.status === 'active'); if (!selectedPosition) throw new Error('سمت سازمانی فعال انتخاب کنید.'); if (!positionSupportsUnit(selectedPosition, input.unitId)) throw new Error('سمت انتخاب‌شده برای این واحد سازمانی مجاز نیست.'); if (!input.roleIds.length || input.roleIds.some((id) => !state.roles.some((role) => role.id === id && role.status === 'active'))) throw new Error('حداقل یک نقش دسترسی فعال انتخاب کنید.'); if (input.managerUserId && input.managerUserId === excludeId) throw new Error('کاربر نمی‌تواند مدیر مستقیم خودش باشد.'); if (input.managerUserId) {const manager=state.users.find((user)=>user.id===input.managerUserId);if(!manager||manager.status!=='active')throw new Error('مدیر مستقیم باید یک حساب کاربری فعال باشد.');if(manager.companyId!==state.activeUser.companyId)throw new Error('مدیر مستقیم باید از همان شرکت انتخاب شود.');if(excludeId&&userManagerWouldCreateCycle(excludeId,manager.id,state.users))throw new Error('انتخاب این مدیر، چرخه نامعتبر در زنجیره مدیران مستقیم ایجاد می‌کند.');} const validPermissions = new Set([...PERMISSION_CATALOG.filter((item) => item.available).map((item) => item.code), ...state.roles.flatMap((role) => role.permissions)]); const grants = input.permissionGrants ?? []; const denials = input.permissionDenials ?? []; if ([...grants, ...denials].some((code) => !validPermissions.has(code))) throw new Error('یکی از مجوزهای انتخاب‌شده در کاتالوگ فعال دسترسی وجود ندارد.'); if (grants.some((code) => denials.includes(code))) throw new Error('یک مجوز نمی‌تواند هم‌زمان برای کاربر افزوده و مستثنا شود.'); }
 function normalizeUserPermissionOverrides(input: Pick<UserInput, 'roleIds'|'permissionGrants'|'permissionDenials'>, state: FoundationState) { const available = new Set([...PERMISSION_CATALOG.filter((item) => item.available).map((item) => item.code), ...state.roles.flatMap((role) => role.permissions)]); const base = new Set(state.roles.filter((role) => input.roleIds.includes(role.id) && role.status === 'active').flatMap((role) => role.permissions)); const grants = [...new Set(input.permissionGrants ?? [])].filter((permission) => available.has(permission) && !base.has(permission)); const denials = [...new Set(input.permissionDenials ?? [])].filter((permission) => available.has(permission) && base.has(permission)); return {grants, denials}; }
 function validateRoleInput(input: RoleInput, roles: SecurityRole[], excludeId?: string) { if (input.name.trim().length < 2) throw new Error('نام نقش باید حداقل ۲ نویسه باشد.'); if (roles.some((role) => role.id !== excludeId && role.name.trim().toLocaleLowerCase('fa') === input.name.trim().toLocaleLowerCase('fa'))) throw new Error('نقشی با این نام وجود دارد.'); }
 function wouldCreateCycle(unitId: string, parentId: string, units: OrganizationalUnit[]) { let cursor: string | undefined = parentId; const seen = new Set<string>(); while (cursor) {if (cursor === unitId || seen.has(cursor)) return true; seen.add(cursor); cursor = units.find((unit) => unit.id === cursor)?.parentId;} return false; }
+function personnelManagerWouldCreateCycle(personnelId: string, managerPersonnelId: string, personnel: PersonnelRecord[]) {let cursor: string|undefined=managerPersonnelId;const seen=new Set<string>();while(cursor){if(cursor===personnelId||seen.has(cursor))return true;seen.add(cursor);cursor=personnel.find((item)=>item.id===cursor)?.managerPersonnelId;}return false;}
+function userManagerWouldCreateCycle(userId: string, managerUserId: string, users: LocalUser[]) {let cursor: string|undefined=managerUserId;const seen=new Set<string>();while(cursor){if(cursor===userId||seen.has(cursor))return true;seen.add(cursor);cursor=users.find((item)=>item.id===cursor)?.managerUserId;}return false;}
 function sameStrings(a: string[], b: string[]) { return a.length === b.length && [...a].sort().every((value, index) => value === [...b].sort()[index]); }
 export function userConcurrencyToken(user: LocalUser) {
-  return JSON.stringify({name:user.name,username:user.username,status:user.status,passwordHash:user.passwordHash,passwordUpdatedAt:user.passwordUpdatedAt,unitId:user.unitId,positionId:user.positionId,branchUnitId:user.branchUnitId,managerUserId:user.managerUserId,personnelId:user.personnelId,roleId:user.roleId,roleIds:[...user.roleIds].sort(),permissionGrants:[...(user.permissionGrants??[])].sort(),permissionDenials:[...(user.permissionDenials??[])].sort()});
+  return JSON.stringify({name:user.name,username:user.username,status:user.status,passwordHash:user.passwordHash,passwordUpdatedAt:user.passwordUpdatedAt,secondaryPasswordUpdatedAt:user.secondaryPasswordUpdatedAt,unitId:user.unitId,positionId:user.positionId,branchUnitId:user.branchUnitId,managerUserId:user.managerUserId,personnelId:user.personnelId,roleId:user.roleId,roleIds:[...user.roleIds].sort(),permissionGrants:[...(user.permissionGrants??[])].sort(),permissionDenials:[...(user.permissionDenials??[])].sort()});
+}
+
+function projectUserSecurityState(user:LocalUser):LocalUser {
+  return {...user,secondaryPasswordHash:undefined,secondaryPasswordOtpHash:undefined,secondaryPasswordOtpExpiresAt:undefined,secondaryPasswordOtpRequestedAt:undefined,secondaryPasswordOtpAttempts:undefined,secondaryPasswordFailedAttempts:undefined,secondaryPasswordLockedUntil:undefined,hasSecondaryPassword:Boolean(user.secondaryPasswordHash)};
+}
+
+const PROTECTED_FINANCIAL_DOMAINS = new Set(['finance', 'treasury', 'accounting']);
+const PROTECTED_FINANCIAL_MODULES = new Set(['payment', 'support-transaction', 'employee-advance', 'purchase-request']);
+const PROTECTED_FINANCIAL_KEYS = new Set([
+  'dataurl', 'filedataurl', 'beneficiarycardnumber', 'cardnumber', 'bankname', 'accountnumber', 'iban', 'sheba',
+  'paymentreference', 'transactionreference', 'bankreference', 'amountrial', 'originalamountrial', 'approvedamountrial', 'previousamountrial',
+]);
+
+function isProtectedFinancialRecord(record: OperationalRecord): boolean {
+  return PROTECTED_FINANCIAL_DOMAINS.has(record.domain) || PROTECTED_FINANCIAL_MODULES.has(record.moduleId);
+}
+
+function canViewProtectedFinancialRecord(actor: LocalUser, record: OperationalRecord): boolean {
+  return authorize({
+    persona: actor,
+    permission: permissionFor(record.moduleId, 'view'),
+    action: 'view',
+    resource: operationalRecordResource(actor, record),
+  }).allowed;
+}
+
+function canViewProtectedFinancialDetails(actor: LocalUser, record: OperationalRecord): boolean {
+  return (['edit', 'transition', 'approve', 'manage'] as const).some((action) => authorize({
+    persona: actor,
+    permission: permissionFor(record.moduleId, action),
+    action: action === 'manage' ? 'view' : action,
+    resource: operationalRecordResource(actor, record),
+  }).allowed);
+}
+
+function redactProtectedFinancialValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(redactProtectedFinancialValue);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .filter(([key]) => !PROTECTED_FINANCIAL_KEYS.has(key.toLocaleLowerCase('en-US')))
+    .map(([key, nested]) => [key, redactProtectedFinancialValue(nested)]));
+}
+
+function redactProtectedFinancialRecord(record: OperationalRecord): OperationalRecord {
+  return {...record, amountRial:undefined, payload: redactProtectedFinancialValue(record.payload) as OperationalRecord['payload']};
+}
+
+function resolveLetterDeliveredRecipients(users:LocalUser[],sender:LocalUser,recipientUserIds:string[],recipientUnitIds:string[],copyRecipientUserIds:string[],classification:ReturnType<typeof letterClassification>):string[] {
+  const explicit=users.filter((user)=>recipientUserIds.includes(user.id)&&user.status==='active'&&user.companyId===sender.companyId).map((user)=>user.id);
+  const copies=users.filter((user)=>copyRecipientUserIds.includes(user.id)&&user.status==='active'&&user.companyId===sender.companyId).map((user)=>user.id);
+  if(['confidential','private'].includes(classification))return [...new Set([...explicit,...copies])];
+  const unitRecipients=users.filter((user)=>user.id!==sender.id&&user.status==='active'&&user.companyId===sender.companyId&&Boolean(user.unitId&&recipientUnitIds.includes(user.unitId))).map((user)=>user.id);
+  return [...new Set([...explicit,...unitRecipients,...copies])];
 }
 
 function requireOrganizationScope(actor: LocalUser, permission: PermissionCode, unitId: string | undefined, action: 'create' | 'edit', message: string): void {

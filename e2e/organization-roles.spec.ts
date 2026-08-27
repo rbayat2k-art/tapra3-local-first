@@ -15,9 +15,20 @@ async function enterAsAdmin(page: Page) {
   }
 }
 
+async function dismissCompletionGate(page: Page) {
+  const defer = page.getByRole('button', {name: /فعلاً وارد می‌شوم.*بعداً تکمیل می‌کنم/}).first();
+  await Promise.race([
+    defer.waitFor({state: 'visible', timeout: 10_000}),
+    page.locator('.role-list-panel').waitFor({state: 'visible', timeout: 10_000}),
+  ]).catch(() => undefined);
+  if (await defer.isVisible()) await defer.click();
+  await expect(page.locator('.role-list-panel')).toBeVisible({timeout: 10_000});
+}
+
 test('نقش‌ها سلامت، استفاده واقعی و حوزه مجوزها را نشان می‌دهند', async ({page}) => {
   await enterAsAdmin(page);
   await page.goto('/?page=roles');
+  await dismissCompletionGate(page);
 
   await expect(page.getByRole('region', {name: 'خلاصه سلامت نقش‌ها'})).toContainText('نیازمند بررسی');
   await page.getByRole('button', {name: /بدون استفاده/}).click();
@@ -33,10 +44,34 @@ test('نقش‌ها سلامت، استفاده واقعی و حوزه مجوز�
   await expect(dialog).toContainText('@s.ahmadi');
 });
 
+test('جست‌وجوی نقش فاصله و نیم‌فاصله فارسی را یکسان می‌بیند', async ({page}) => {
+  test.setTimeout(60_000);
+  await enterAsAdmin(page);
+  await page.goto('/?page=roles');
+  await dismissCompletionGate(page);
+
+  const search = page.getByPlaceholder('جست‌وجوی نام نقش، شرح، محدوده، وضعیت یا مجوز');
+  await search.fill('درخواست کننده');
+  await expect(page.locator('.role-row').filter({hasText: 'درخواست‌کننده مساعده'})).toBeVisible();
+  await expect(page.locator('.role-row').filter({hasText: 'درخواست‌کننده خرید'})).toBeVisible();
+
+  await search.fill('درخواست‌کننده مساعده');
+  await expect(page.locator('.role-row').filter({hasText: 'درخواست‌کننده مساعده'})).toBeVisible();
+
+  await search.fill('مساعده');
+  await expect(page.locator('.role-row')).toHaveCount(4);
+  await expect(page.locator('.role-row').filter({hasText: 'درخواست‌کننده مساعده'})).toBeVisible();
+  await expect(page.locator('.role-row').filter({hasText: 'مدیر شعبه مساعده'})).toBeVisible();
+  await expect(page.locator('.role-row').filter({hasText: 'کنترل‌کننده حسابداری مساعده'})).toBeVisible();
+  await expect(page.locator('.role-row').filter({hasText: 'تأییدکننده اصلی مساعده فروش'})).toBeVisible();
+  await expect(page.locator('.role-row').filter({hasText: 'ادمین'})).toHaveCount(0);
+});
+
 test('فیلترها و کارت‌های نقش در موبایل بیرون‌زدگی ندارند', async ({page}) => {
   await page.setViewportSize({width: 390, height: 844});
   await enterAsAdmin(page);
   await page.goto('/?page=roles');
+  await dismissCompletionGate(page);
   await page.getByRole('button', {name: /حساس/}).click();
   await expect(page.locator('.role-list-head')).toBeHidden();
   await expect(page.locator('.role-row').first()).toBeVisible();

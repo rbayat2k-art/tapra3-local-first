@@ -53,11 +53,19 @@ export function PersianDateInput({value = '', onChange, disabled = false, requir
   const pickerValue = value && !Number.isNaN(parseDate(value).getTime()) ? parseDate(value) : null;
   const pickerRef = useRef<DatePickerRef>(null);
   const calendarOpenRef = useRef(false);
+  const suppressFocusOpenRef = useRef(false);
   const unregisterOverlayRef = useRef<(() => void) | null>(null);
   const dialogPortal = useRecordDialogPortal();
   const closeCalendar = useCallback(() => {
+    // react-multi-date-picker blurs its input while closing. Restoring focus on
+    // the following frame would normally trigger its onFocus handler and open
+    // the calendar again, which made Escape nondeterministic inside dialogs.
+    suppressFocusOpenRef.current = true;
     pickerRef.current?.closeCalendar();
-    requestAnimationFrame(() => pickerRef.current?.querySelector<HTMLElement>('input')?.focus());
+    requestAnimationFrame(() => {
+      pickerRef.current?.querySelector<HTMLElement>('input')?.focus({preventScroll: true});
+      setTimeout(() => {suppressFocusOpenRef.current = false;}, 0);
+    });
   }, []);
   useEffect(() => {
     const closeCalendarBeforeParentDialog = (event: KeyboardEvent) => {
@@ -91,6 +99,10 @@ export function PersianDateInput({value = '', onChange, disabled = false, requir
     portal
     portalTarget={dialogPortal?.portalTarget}
     onOpen={() => {
+      if (suppressFocusOpenRef.current) {
+        suppressFocusOpenRef.current = false;
+        return false;
+      }
       calendarOpenRef.current = true;
       unregisterOverlayRef.current?.();
       unregisterOverlayRef.current = dialogPortal?.registerOverlay(closeCalendar) ?? null;

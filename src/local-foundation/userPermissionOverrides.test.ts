@@ -1,8 +1,8 @@
 import {describe, expect, it} from 'vitest';
-import type {AuditEvent, FoundationSession, FoundationStoreName, LocalUser, RegistrationRequest, SecurityRole, SnapshotManifest} from './model';
+import type {AuditEvent, FoundationSession, FoundationStoreName, LocalUser, PersonnelRecord, RegistrationRequest, SecurityRole, SnapshotManifest} from './model';
 import {FOUNDATION_STORES} from './model';
-import {createSeedData, LOCAL_USERS, ORGANIZATIONAL_UNITS, SECURITY_ROLES} from './seed';
-import {LocalFoundationService, userConcurrencyToken} from './service';
+import {createSeedData, LOCAL_USERS, ORGANIZATIONAL_UNITS, PERSONNEL_RECORDS, SECURITY_ROLES} from './seed';
+import {LocalFoundationService, userConcurrencyToken, type PersonnelInput} from './service';
 import type {StorageAdapter, StorageTransaction} from './storage';
 
 class MemoryStorage implements StorageAdapter {
@@ -60,6 +60,11 @@ function userInput(user: LocalUser) {
     managerUserId: user.managerUserId,
     roleIds: user.roleIds,
   };
+}
+
+function personnelInput(personnel: PersonnelRecord): PersonnelInput {
+  const {id: _id, companyId: _companyId, linkedUserId: _linkedUserId, movements: _movements, salesCompensationHistory: _salesCompensationHistory, lifecycleHistory: _lifecycleHistory, pendingLifecycleChange: _pendingLifecycleChange, createdAt: _createdAt, updatedAt: _updatedAt, ...input} = personnel;
+  return input;
 }
 
 describe('per-user permission overrides', () => {
@@ -157,7 +162,9 @@ describe('per-user permission overrides', () => {
   it('ends a stale local session immediately when its user has become inactive', async () => {
     const storage = new MemoryStorage();
     await storage.replaceAll(createSeedData());
-    const inactiveUser = LOCAL_USERS.find((user) => user.id === 'persona-support-agent')!;
+    const activeUser = LOCAL_USERS.find((user) => user.id === 'persona-support-agent')!;
+    const inactiveUser = {...activeUser, status: 'inactive' as const};
+    await storage.put('users', inactiveUser);
     const session = await storage.get<FoundationSession>('sessions', 'active-session');
     await storage.put('sessions', {...session!, activeUserId: inactiveUser.id, actingAdminUserId: undefined, signedOutAt: undefined});
 
@@ -220,7 +227,9 @@ describe('per-user permission overrides', () => {
     await storage.replaceAll(seed);
     const state = await new LocalFoundationService(storage).initialize();
     const target = state.users.find((user) => user.id === 'persona-laleh')!;
-    expect(target.permissionGrants).toEqual([]);
+    expect(target.permissionGrants).toEqual(['foundation.audit.view']);
+    expect(target.permissions).not.toContain('foundation.audit.view');
+    expect(target.permissionEntitlements.some((item) => item.permission === 'foundation.audit.view')).toBe(false);
     expect(target.permissionEntitlements?.some((item) => item.source === 'user-grant')).toBe(false);
     expect(target.permissions).not.toContain('foundation.audit.view');
   });
@@ -281,10 +290,11 @@ describe('per-user permission overrides', () => {
     await storage.put('sessions',{...session!,activeUserId:'persona-product-owner',actingAdminUserId:undefined});
     const service=new LocalFoundationService(storage);
     const target=(await service.loadState()).users.find((user)=>user.id==='persona-laleh')!;
+    const storedTarget=(await storage.get<LocalUser>('users',target.id))!;
     storage.failNextPut('audit_events');
     await expect(service.setUserPassword(target.id,userConcurrencyToken(target),'SecurePass123')).rejects.toThrow('injected failure');
-    expect(await storage.get<LocalUser>('users',target.id)).toEqual(target);
-    await storage.put('users',{...target,name:'تغییر هم‌زمان'});
+    expect(await storage.get<LocalUser>('users',target.id)).toEqual(storedTarget);
+    await storage.put('users',{...storedTarget,name:'تغییر هم‌زمان'});
     await expect(service.setUserStatus(target.id,userConcurrencyToken(target),'inactive')).rejects.toThrow('تب دیگری');
   });
 
@@ -366,7 +376,8 @@ describe('per-user permission overrides', () => {
     const storage = new MemoryStorage();
     await storage.replaceAll(createSeedData());
     const admin = LOCAL_USERS.find((user) => user.isAdmin)!;
-    const inactive = LOCAL_USERS.find((user) => user.status === 'inactive')!;
+    const inactive = {...LOCAL_USERS.find((user) => user.id === 'persona-support-agent')!, status: 'inactive' as const};
+    await storage.put('users', inactive);
     const session = await storage.get<FoundationSession>('sessions', 'active-session');
     await storage.put('sessions', {...session!, activeUserId: admin.id, actingAdminUserId: undefined});
     const service = new LocalFoundationService(storage);
@@ -394,6 +405,47 @@ describe('per-user permission overrides', () => {
     expect(saved.managerUserId).toBe('persona-seller');
     expect(saved.actingManager).toMatchObject({userId: admin.id, reason: 'مأموریت مدیر فروش', endsOn: '2099-01-01'});
     expect(updated.audits.some((audit) => audit.action === 'organization.unit.updated' && audit.metadata?.actingManagerUserId === admin.id)).toBe(true);
+  });
+
+  it('keeps personnel linking on the specialized atomic path and rejects manager cycles', async () => {
+    const storage = new MemoryStorage();
+    await storage.replaceAll(createSeedData());
+    const admin = LOCAL_USERS.find((user) => user.isAdmin)!;
+    const first = LOCAL_USERS.find((user) => user.id === 'persona-seller')!;
+    const second = LOCAL_USERS.find((user) => user.id === 'persona-laleh')!;
+    const session = await storage.get<FoundationSession>('sessions', 'active-session');
+    await storage.put('sessions', {...session!, activeUserId: admin.id, actingAdminUserId: undefined});
+    await storage.put('users', {...second, managerUserId: first.id});
+    const service = new LocalFoundationService(storage);
+
+    await expect(service.createUser({...userInput(first), username: 'linked.outside.profile', password: 'SafePass-123', personnelId: first.personnelId})).rejects.toThrow('فقط از داخل پرونده همان پرسنل');
+    await expect(service.updateUser(first.id, userConcurrencyToken(first), {...userInput(first), managerUserId: second.id})).rejects.toThrow('چرخه نامعتبر');
+  });
+
+  it('reserves personnel codes atomically and rolls back the record when audit storage fails', async () => {
+    const storage = new MemoryStorage();
+    await storage.replaceAll(createSeedData());
+    const admin = LOCAL_USERS.find((user) => user.isAdmin)!;
+    const session = await storage.get<FoundationSession>('sessions', 'active-session');
+    await storage.put('sessions', {...session!, activeUserId: admin.id, actingAdminUserId: undefined});
+    const candidates = PERSONNEL_RECORDS.filter((person) => person.employmentStatus === 'active' && !person.salesHierarchyLevel && person.id !== admin.personnelId).slice(0, 3);
+    expect(candidates).toHaveLength(3);
+    for (const candidate of candidates) await storage.delete('personnel', candidate.id);
+    const service = new LocalFoundationService(storage);
+    const detachedInput = (personnel: PersonnelRecord): PersonnelInput => ({...personnelInput(personnel), managerPersonnelId: undefined, salesSupervisorPersonnelId: undefined});
+
+    await Promise.all([
+      service.createPersonnel(detachedInput(candidates[0])),
+      service.createPersonnel(detachedInput(candidates[1])),
+    ]);
+    const afterConcurrent = await storage.getAll<PersonnelRecord>('personnel');
+    const created = afterConcurrent.filter((person) => [candidates[0].nationalId, candidates[1].nationalId].includes(person.nationalId));
+    expect(created).toHaveLength(2);
+    expect(new Set(created.map((person) => person.personnelCode)).size).toBe(2);
+
+    storage.failNextPut('audit_events');
+    await expect(service.createPersonnel(detachedInput(candidates[2]))).rejects.toThrow('injected failure');
+    expect((await storage.getAll<PersonnelRecord>('personnel')).some((person) => person.nationalId === candidates[2].nationalId)).toBe(false);
   });
 
   it('rolls back organization changes when their audit cannot be stored', async () => {

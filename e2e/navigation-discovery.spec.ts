@@ -26,6 +26,13 @@ test('جست‌وجوی منو به مساعده، خرید و پرسنل دقی
   await expect(page).toHaveTitle(/شاهراه/);
   const search = page.locator('#sidebar-navigation-search');
 
+  await search.fill('سند حسابداری');
+  const journalResult = page.locator('.navigation-search__result').filter({hasText: 'اسناد حسابداری'}).first();
+  await expect(journalResult.locator('.navigation-search__path')).toContainText('مالی و کنترل');
+  await expect(journalResult.locator('.navigation-search__path')).toContainText('حسابداری');
+  await expect(journalResult.locator('.navigation-search__path')).toContainText('اسناد حسابداری');
+  await expect(journalResult.locator('.navigation-search__path')).toHaveAttribute('aria-label', 'مسیر دسترسی: مالی و کنترل، سپس حسابداری، سپس اسناد حسابداری');
+
   await search.fill('مساعده');
   await expect(page.locator('.navigation-search [role="status"]')).toContainText('۱ نتیجه');
   await search.press('ArrowDown');

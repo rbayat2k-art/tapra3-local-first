@@ -1,6 +1,6 @@
 export const FOUNDATION_SCHEMA_VERSION = 11;
 export const FOUNDATION_DB_NAME = 'tapra2_local';
-export const FOUNDATION_SEED_VERSION = 'complete-local-erp-v1.32-formal-letters';
+export const FOUNDATION_SEED_VERSION = 'complete-local-erp-v1.34-organization-workflow-rebuild';
 
 export type ScopeType = 'COMPANY' | 'UNIT' | 'TEAM' | 'SELF' | 'RECORD';
 /** Permission codes are registry-driven and always use domain.resource.action. */
@@ -44,6 +44,16 @@ export interface LocalUser {
   username: string;
   passwordHash: string;
   passwordUpdatedAt: string;
+  /** Stored only in the local user record; projected UI users receive only hasSecondaryPassword. */
+  secondaryPasswordHash?: string;
+  secondaryPasswordUpdatedAt?: string;
+  secondaryPasswordOtpHash?: string;
+  secondaryPasswordOtpExpiresAt?: string;
+  secondaryPasswordOtpRequestedAt?: string;
+  secondaryPasswordOtpAttempts?: number;
+  secondaryPasswordFailedAttempts?: number;
+  secondaryPasswordLockedUntil?: string;
+  hasSecondaryPassword?: boolean;
   positionId?: string;
   managerUserId?: string;
   personnelId?: string;
@@ -148,6 +158,8 @@ export interface PersonnelMovement {
   recordedAt: string;
 }
 
+export type AdvanceEligibilityStatus = 'eligible' | 'suspended' | 'ineligible';
+
 export interface PersonnelRecord {
   id: string;
   /** Persisted tenant provenance. Legacy records may omit it and are resolved fail-closed. */
@@ -182,6 +194,11 @@ export interface PersonnelRecord {
   accountNumber?: string;
   cardNumber?: string;
   iban?: string;
+  /** Business eligibility for creating a new employee-advance request. Missing legacy values mean eligible. */
+  advanceEligibilityStatus?: AdvanceEligibilityStatus;
+  advanceEligibilityReason?: string;
+  advanceEligibilityEffectiveFrom?: string;
+  advanceEligibilityEffectiveUntil?: string;
   emergencyName?: string;
   emergencyRelation?: string;
   emergencyPhone?: string;
@@ -523,7 +540,7 @@ export interface OperationalRecordHistory {
   recordId: string;
   moduleId: string;
   sequence: number;
-  eventType: 'created' | 'edited' | 'transitioned' | 'assigned' | 'handoff' | 'comment' | 'corrected';
+  eventType: 'created' | 'edited' | 'transitioned' | 'assigned' | 'handoff' | 'comment' | 'corrected' | 'viewed' | 'archived_for_user' | 'restored_for_user';
   fromState?: string;
   toState?: string;
   actorId: string;

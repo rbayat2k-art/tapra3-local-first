@@ -1,5 +1,6 @@
 import {describe, expect, it} from 'vitest';
 import {
+  buildNavigationPath,
   frequentNavigationDestinations,
   incrementNavigationUsage,
   loadNavigationUsage,
@@ -13,7 +14,7 @@ import {
 
 const destinations: NavigationDestinationBase[] = [
   {id: 'page:personnel', title: 'پرسنل', subtitle: 'پرونده پرسنلی', group: 'سازمان', page: 'personnel', aliases: ['پرستل', 'کارکنان']},
-  {id: 'module:employee-advance', title: 'مساعده پرسنلی', subtitle: 'درخواست مساعده', group: 'منابع انسانی', page: 'hcm', moduleId: 'employee-advance'},
+  {id: 'module:employee-advance', title: 'مساعده پرسنلی', subtitle: 'درخواست مساعده', group: 'منابع انسانی', path: ['عملیات سازمان', 'منابع انسانی', 'مساعده پرسنلی'], page: 'hcm', moduleId: 'employee-advance'},
   {id: 'module:purchase-request', title: 'درخواست‌های خرید', subtitle: 'ثبت و بررسی خرید', group: 'تدارکات', page: 'procurement', moduleId: 'purchase-request', aliases: ['درخواست خرید']},
 ];
 
@@ -32,6 +33,11 @@ describe('navigation discovery', () => {
     expect(searchNavigationDestinations(destinations, 'مساعده')[0]?.id).toBe('module:employee-advance');
     expect(searchNavigationDestinations(destinations, 'درخواست خريد')[0]?.id).toBe('module:purchase-request');
     expect(searchNavigationDestinations(destinations, 'پرستل')[0]?.id).toBe('page:personnel');
+  });
+
+  it('builds a deduplicated RTL access path and makes its parents searchable', () => {
+    expect(buildNavigationPath('مالی و کنترل', 'حسابداری', 'حسابداری', 'اسناد حسابداری')).toEqual(['مالی و کنترل', 'حسابداری', 'اسناد حسابداری']);
+    expect(searchNavigationDestinations(destinations, 'عملیات سازمان مساعده')[0]?.id).toBe('module:employee-advance');
   });
 
   it('searches only the accessible catalog supplied by the caller', () => {

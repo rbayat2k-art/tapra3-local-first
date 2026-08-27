@@ -3,6 +3,7 @@ export interface NavigationDestinationBase {
   title: string;
   subtitle: string;
   group: string;
+  path?: string[];
   page: string;
   moduleId?: string;
   categoryId?: string;
@@ -37,9 +38,19 @@ export function normalizeNavigationText(value: string): string {
 }
 
 function destinationSearchParts(destination: NavigationDestinationBase): string[] {
-  return [destination.title, destination.subtitle, destination.group, ...(destination.aliases ?? [])]
+  return [destination.title, destination.subtitle, destination.group, ...(destination.path ?? []), ...(destination.aliases ?? [])]
     .map(normalizeNavigationText)
     .filter(Boolean);
+}
+
+export function buildNavigationPath(...segments: Array<string | undefined>): string[] {
+  const path: string[] = [];
+  for (const segment of segments) {
+    for (const part of (segment ?? '').split(/[/·]/).map((item) => item.trim()).filter(Boolean)) {
+      if (normalizeNavigationText(path.at(-1) ?? '') !== normalizeNavigationText(part)) path.push(part);
+    }
+  }
+  return path;
 }
 
 function destinationSearchScore(destination: NavigationDestinationBase, query: string): number {

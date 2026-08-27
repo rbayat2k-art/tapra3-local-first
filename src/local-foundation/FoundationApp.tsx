@@ -14,7 +14,7 @@ import type {
 } from './model';
 import {FOUNDATION_SCHEMA_VERSION} from './model';
 import {PERMISSION_CATALOG, ROLE_TEMPLATES} from './seed';
-import {LocalFoundationService, isEncryptedSnapshot, userConcurrencyToken, type SelfCredentialChangeInput, type UserInput} from './service';
+import {LocalFoundationService, isEncryptedSnapshot, userConcurrencyToken, type LocalSmsPreview, type SecondaryPasswordChangeInput, type SelfCredentialChangeInput, type UserInput} from './service';
 import {positionSupportsUnit, positionsForUnit} from './unitPosition';
 import {OrganizationOverviewPage, PositionsPage, RolesPage, UnitsPage} from './OrganizationPages';
 import {PersonnelPage} from './PersonnelPages';
@@ -47,6 +47,7 @@ import {NavigationSearch, type NavigationSearchDestination} from './NavigationSe
 import {notifyWorkspaceTabActivated, requestWorkspaceTabClose} from './windowWorkspaceGuard';
 import {userOrganizationHealth, userOrganizationIssueLabel} from './userOrganizationHealth';
 import {
+  buildNavigationPath,
   frequentNavigationDestinations,
   incrementNavigationUsage,
   loadNavigationUsage,
@@ -281,6 +282,7 @@ export function LocalFoundationApp() {
       title: item.title,
       subtitle: item.subtitle,
       group: item.group,
+      path: buildNavigationPath(item.group, item.title),
       aliases: PAGE_SEARCH_ALIASES[item.id] ?? [],
       icon: item.icon,
       trackUsage: !NON_TRACKED_PAGE_IDS.has(item.id),
@@ -298,6 +300,7 @@ export function LocalFoundationApp() {
           title: module.title,
           subtitle: module.description,
           group: `${parent.title} · ${module.group}`,
+          path: buildNavigationPath(parent.group, parent.title, module.title),
           aliases: [module.singular, ...(MODULE_SEARCH_ALIASES[module.id] ?? [])],
           icon: parent.icon,
           trackUsage: true,
@@ -308,11 +311,13 @@ export function LocalFoundationApp() {
       ...(can(foundation.activeUser, 'organization.personnel.changes.review') ? [{
         id: 'view:personnel-changes', page: 'personnel', categoryId: 'changes', title: 'صف تغییرات پرسنل',
         subtitle: 'بررسی درخواست‌های تغییر اطلاعات پرسنلی', group: 'سازمان · پرسنل',
+        path: buildNavigationPath('سازمان', 'پرسنل', 'صف تغییرات پرسنل'),
         aliases: ['بررسی تغییرات پرسنل'], icon: personnelPage.icon, trackUsage: true,
       }] : []),
       ...(foundation.activeUser.permissions.includes(PERSONNEL_DOCUMENT_PERMISSION_QUEUE) ? [{
         id: 'view:personnel-incomplete', page: 'personnel', categoryId: 'incomplete', title: 'نواقص پرونده پرسنلی',
         subtitle: 'افراد نیازمند تکمیل اطلاعات یا مدارک', group: 'سازمان · پرسنل',
+        path: buildNavigationPath('سازمان', 'پرسنل', 'نواقص پرونده پرسنلی'),
         aliases: ['مدارک ناقص', 'اطلاعات ناقص پرسنل'], icon: personnelPage.icon, trackUsage: true,
       }] : []),
     ] : [];
@@ -581,7 +586,7 @@ export function LocalFoundationApp() {
     try {
       const next = await work();
       setFoundation(next);
-      setToast(success);
+      setToast(success || null);
       return true;
     } catch (cause) {
       setError(messageOf(cause));
@@ -845,7 +850,7 @@ export function LocalFoundationApp() {
             {tab.page === 'reports' && <ReportsPage state={foundation} />}
             {tab.page === 'workflow-admin' && <WorkflowAdminPage state={foundation} execute={run} service={service} />}
             {tab.page === 'my-account' && <MyAccountPage state={foundation} service={service} execute={run} />}
-            {tab.page === 'account-security' && <AccountSecurityPage user={user} busy={busy === 'own-credentials'} onSubmit={(input) => run('own-credentials', () => service.changeOwnCredentials(userConcurrencyToken(user), input), 'نام کاربری و تنظیمات امنیتی حساب ذخیره شد.')} />}
+            {tab.page === 'account-security' && <AccountSecurityPage user={user} busy={busy === 'own-credentials' || busy === 'secondary-password'} onSubmit={(input) => run('own-credentials', () => service.changeOwnCredentials(userConcurrencyToken(user), input), 'نام کاربری و تنظیمات امنیتی حساب ذخیره شد.')} onRequestSecondaryOtp={() => service.requestOwnSecondaryPasswordOtp()} onSecondarySubmit={(input) => run('secondary-password', () => service.setOwnSecondaryPassword(userConcurrencyToken(user), input), 'رمز دوم ثابت با موفقیت ذخیره شد.')} />}
             {tab.page === 'appearance' && <AppearancePage preferences={preferences} onChange={setPreferences} />}
             {tab.page === 'policy' && <PolicyLab state={foundation} onState={setFoundation} />}
             {tab.page === 'audit' && <AuditPage state={foundation} />}
@@ -1365,7 +1370,7 @@ function IconAction({label, tone = 'neutral', large = false, disabled = false, o
   return <button type="button" className={`icon-action icon-action--${tone} ${large ? 'icon-action--large' : ''}`} aria-label={label} data-tooltip={label} disabled={disabled} onClick={onClick}>{children}</button>;
 }
 
-function AccountSecurityPage({user, busy, onSubmit}: {user: LocalUser; busy: boolean; onSubmit: (input: SelfCredentialChangeInput) => Promise<boolean>}) {
+function AccountSecurityPage({user, busy, onSubmit, onRequestSecondaryOtp, onSecondarySubmit}: {user: LocalUser; busy: boolean; onSubmit: (input: SelfCredentialChangeInput) => Promise<boolean>; onRequestSecondaryOtp:()=>Promise<LocalSmsPreview>; onSecondarySubmit:(input:SecondaryPasswordChangeInput)=>Promise<boolean>}) {
   const [username, setUsername] = useState(user.username);
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -1373,6 +1378,12 @@ function AccountSecurityPage({user, busy, onSubmit}: {user: LocalUser; busy: boo
   const [showCurrent, setShowCurrent] = useState(false);
   const [showNew, setShowNew] = useState(false);
   const [errors, setErrors] = useState<string[]>([]);
+  const [secondaryErrors,setSecondaryErrors]=useState<string[]>([]);
+  const [secondaryOtp,setSecondaryOtp]=useState('');
+  const [secondaryPassword,setSecondaryPassword]=useState('');
+  const [secondaryPasswordConfirm,setSecondaryPasswordConfirm]=useState('');
+  const [secondaryPreview,setSecondaryPreview]=useState<LocalSmsPreview>();
+  const [secondaryBusy,setSecondaryBusy]=useState(false);
   const usernameChanged = username.trim().toLowerCase() !== user.username.toLowerCase();
 
   const submit = () => {
@@ -1385,6 +1396,8 @@ function AccountSecurityPage({user, busy, onSubmit}: {user: LocalUser; busy: boo
     setErrors(next);
     if (!next.length) void onSubmit({currentPassword, username, newPassword: newPassword || undefined});
   };
+  const requestSecondaryOtp=async()=>{if(secondaryBusy||busy)return;setSecondaryBusy(true);setSecondaryErrors([]);try{setSecondaryPreview(await onRequestSecondaryOtp());}catch(error){setSecondaryErrors([error instanceof Error?error.message:'دریافت کد تأیید ممکن نشد.']);}finally{setSecondaryBusy(false);}};
+  const submitSecondary=async()=>{if(secondaryBusy||busy)return;const next:string[]=[];if(!/^\d{6}$/.test(secondaryOtp))next.push('کد تأیید پیامکی باید ۶ رقم باشد.');if(!/^\d{4}$/.test(secondaryPassword))next.push('رمز دوم ثابت باید دقیقاً ۴ رقم باشد.');if(secondaryPassword!==secondaryPasswordConfirm)next.push('تکرار رمز دوم با مقدار واردشده یکسان نیست.');setSecondaryErrors(next);if(next.length)return;setSecondaryBusy(true);try{const ok=await onSecondarySubmit({verificationCode:secondaryOtp,secondaryPassword});if(ok){setSecondaryOtp('');setSecondaryPassword('');setSecondaryPasswordConfirm('');setSecondaryPreview(undefined);}}finally{setSecondaryBusy(false);}};
 
   return <div className="page-stack account-security-page">
     <PageIntro icon={LockKeyhole} eyebrow="تنظیمات / حساب شخصی" title="حساب و امنیت" description="نام کاربری و رمز عبور همین حساب را شخصاً مدیریت کنید. تغییرات در داده محلی امن ثبت و در ممیزی ثبت می‌شوند." />
@@ -1392,13 +1405,27 @@ function AccountSecurityPage({user, busy, onSubmit}: {user: LocalUser; busy: boo
       <aside className="account-security-summary">
         <span className="persona-avatar persona-avatar--large" style={{background: user.accent}}>{user.initials}</span>
         <div><strong>{user.name}</strong><span>{user.roleTitle}</span><small dir="ltr">@{user.username}</small></div>
-        <dl><div><dt>وضعیت حساب</dt><dd><i className="status-badge status-badge--active">فعال</i></dd></div><div><dt>آخرین تغییر رمز</dt><dd>{formatDateTime(user.passwordUpdatedAt)}</dd></div></dl>
+        <dl><div><dt>وضعیت حساب</dt><dd><i className="status-badge status-badge--active">فعال</i></dd></div><div><dt>آخرین تغییر رمز</dt><dd>{formatDateTime(user.passwordUpdatedAt)}</dd></div><div><dt>رمز دوم ثابت</dt><dd>{user.hasSecondaryPassword?'فعال':'تعریف نشده'}</dd></div></dl>
       </aside>
       <div className="account-security-form">
         <FormValidationSummary errors={errors} />
         <section className="security-form-section">
           <SettingHeading icon={AtSign} title="نام کاربری" text="این نام در ورود بعدی استفاده می‌شود و ادمین آن را در فهرست کاربران مشاهده می‌کند." />
           <label className="field-label"><RequiredLabel>نام کاربری</RequiredLabel><input aria-required="true" dir="ltr" autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} placeholder="name.family" /><small>۳ تا ۳۲ نویسه لاتین، عدد، نقطه، خط تیره یا زیرخط</small></label>
+        </section>
+        <section className="security-form-section secondary-password-section">
+          <SettingHeading icon={Fingerprint} title="رمز دوم ثابت" text="یک رمز ۴ رقمی مستقل برای بازکردن نامه‌های خصوصی و محرمانه و برای تأیید یا ارسال نهایی نامه تعریف کنید." />
+          <FormValidationSummary errors={secondaryErrors}/>
+          <div className="secondary-password-status"><ShieldCheck size={20}/><span><strong>{user.hasSecondaryPassword?'رمز دوم شما فعال است':'هنوز رمز دوم تعریف نشده است'}</strong><small>برای تعریف، تغییر یا فراموشی رمز دوم، ابتدا کد یک‌بارمصرف شماره همراه ثبت‌شده در پرونده پرسنلی را بگیرید.</small></span></div>
+          {!secondaryPreview?<button type="button" className="button button--secondary" disabled={busy||secondaryBusy} onClick={()=>void requestSecondaryOtp()}><Phone size={18}/>{user.hasSecondaryPassword?'تغییر یا بازیابی رمز دوم':'دریافت کد و تعریف رمز دوم'}</button>:<>
+            <div className="local-sms-preview" role="status" aria-live="polite"><Phone size={18}/><span><strong>کد به {secondaryPreview.maskedMobile} ارسال شد</strong><small>{secondaryPreview.message}</small></span>{secondaryPreview.verificationCode&&<code dir="ltr">{secondaryPreview.verificationCode}</code>}</div>
+            <div className="security-password-grid">
+              <label className="field-label"><RequiredLabel>کد تأیید ۶ رقمی</RequiredLabel><input dir="ltr" inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={secondaryOtp} onChange={(event)=>setSecondaryOtp(digitsOnly(event.target.value).slice(0,6))}/></label>
+              <label className="field-label"><RequiredLabel>رمز دوم ثابت ۴ رقمی</RequiredLabel><input dir="ltr" type="password" inputMode="numeric" autoComplete="new-password" maxLength={4} value={secondaryPassword} onChange={(event)=>setSecondaryPassword(digitsOnly(event.target.value).slice(0,4))}/></label>
+              <label className="field-label"><RequiredLabel>تکرار رمز دوم</RequiredLabel><input dir="ltr" type="password" inputMode="numeric" autoComplete="new-password" maxLength={4} value={secondaryPasswordConfirm} onChange={(event)=>setSecondaryPasswordConfirm(digitsOnly(event.target.value).slice(0,4))}/></label>
+            </div>
+            <div className="account-security-actions"><button type="button" className="button button--primary" disabled={busy||secondaryBusy} onClick={()=>void submitSecondary()}><Fingerprint size={18}/> ذخیره رمز دوم ثابت</button><button type="button" className="button button--ghost" disabled={busy||secondaryBusy} onClick={()=>{setSecondaryPreview(undefined);setSecondaryErrors([]);}}>انصراف</button></div>
+          </>}
         </section>
         <section className="security-form-section">
           <SettingHeading icon={KeyRound} title="رمز عبور" text="برای تغییر نام کاربری یا رمز، ابتدا رمز فعلی را وارد کنید. رمز جدید اختیاری است." />
@@ -1493,7 +1520,7 @@ function AccountMenu({user, inQaSession, onMyAccount, onAccountSecurity, onAppea
   return <><button className="account-scrim" aria-label="بستن منوی حساب" onClick={onClose} /><section className="account-menu">
     <div className="account-summary"><span className="persona-avatar persona-avatar--large" style={{background: user.accent}}>{user.initials}</span><div><strong>{user.name}</strong><span>{user.roleTitle}</span><small>{scopeLabel(user.scope)}</small></div></div>
     <button onClick={onMyAccount}><UserRound size={18} /><span><strong>حساب کاربری من</strong><small>مشاهده پرونده و درخواست تغییر اطلاعات</small></span><ArrowLeft size={16} /></button>
-    {!inQaSession && <button onClick={onAccountSecurity}><LockKeyhole size={18} /><span><strong>حساب و امنیت</strong><small>تغییر نام کاربری و رمز عبور شخصی</small></span><ArrowLeft size={16} /></button>}
+    {!inQaSession && <button onClick={onAccountSecurity}><LockKeyhole size={18} /><span><strong>حساب و امنیت</strong><small>نام کاربری، رمز عبور و رمز دوم ثابت</small></span><ArrowLeft size={16} /></button>}
     <button onClick={onAppearance}><Palette size={18} /><span><strong>تنظیمات ظاهری</strong><small>فونت، پوسته، تراکم و فاصله ستون‌ها</small></span><ArrowLeft size={16} /></button>
     {!inQaSession && <button onClick={onSwitchAccount}><LogIn size={18} /><span><strong>ورود با حساب دیگر</strong><small>نام کاربری و رمز عبور محلی</small></span><ArrowLeft size={16} /></button>}
     {inQaSession && <button className="account-menu-qa" onClick={onEndQa}><ShieldCheck size={18} /><span><strong>بازگشت به دسترسی ادمین</strong><small>پایان مشاهده دسترسی کاربر</small></span><ArrowLeft size={16} /></button>}

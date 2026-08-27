@@ -4,7 +4,10 @@ import {FOUNDATION_STORES} from './model';
 import {createSeedData} from './seed';
 import {LocalFoundationService} from './service';
 import type {StorageAdapter, StorageTransaction} from './storage';
-import {chatHiddenForUserIds, chatMemberUserIds, normalizeChatSearch, validateChatAttachment} from './communications';
+import {
+  chatAdminUserIds, chatHiddenForUserIds, chatMemberUserIds, chatMessageIsDeleted, chatReplyToMessageId,
+  chatUnreadCount, normalizeChatSearch, validateChatAttachment,
+} from './communications';
 
 class MemoryStorage implements StorageAdapter {
   private stores = new Map<FoundationStoreName, Map<IDBValidKey, unknown>>(FOUNDATION_STORES.map((store)=>[store,new Map()]));
@@ -92,6 +95,43 @@ describe('specialized organizational conversations',()=>{
     await sessionAs(storage,'persona-seller');const state=await service.createChatConversation({kind:'unit',unitId:'unit-sales'});
     const chat=state.operationalRecords.find((record)=>record.moduleId==='chat')!;
     await expect(service.hideChatForMe(chat.id,chat.version)).rejects.toThrow('گفتگوی واحد سازمانی');
+  });
+
+  it('records an idempotent read receipt and derives unread count per member',async()=>{
+    const storage=new MemoryStorage();await storage.replaceAll(createSeedData());const service=new LocalFoundationService(storage);
+    await sessionAs(storage,'persona-seller');let state=await service.createChatConversation({kind:'direct',memberUserIds:['persona-user-manager']});const chat=state.operationalRecords.find((record)=>record.moduleId==='chat')!;
+    await service.sendChatMessage({conversationId:chat.id,body:'این پیام باید خوانده‌نشده باشد.'});
+    await sessionAs(storage,'persona-user-manager');state=await service.loadState();
+    expect(chatUnreadCount(state,chat.id,'persona-user-manager')).toBe(1);
+    state=await service.markChatRead(chat.id);expect(chatUnreadCount(state,chat.id,'persona-user-manager')).toBe(0);
+    await service.markChatRead(chat.id);
+    const history=await storage.getAll<{recordId:string;eventType:string;snapshot:Record<string,unknown>}>('workflow_history');
+    expect(history.filter((item)=>item.recordId===chat.id&&item.eventType==='viewed'&&item.snapshot.userId==='persona-user-manager')).toHaveLength(1);
+  });
+
+  it('supports reply, edit and time-limited tombstone deletion without exposing deleted content',async()=>{
+    const storage=new MemoryStorage();await storage.replaceAll(createSeedData());const service=new LocalFoundationService(storage);
+    await sessionAs(storage,'persona-seller');let state=await service.createChatConversation({kind:'direct',memberUserIds:['persona-user-manager']});const chat=state.operationalRecords.find((record)=>record.moduleId==='chat')!;
+    state=await service.sendChatMessage({conversationId:chat.id,body:'متن اولیه برای ویرایش'});let original=state.operationalRecords.find((record)=>record.moduleId==='message')!;
+    state=await service.editChatMessage(original.id,'متن ویرایش‌شده',original.version);original=state.operationalRecords.find((record)=>record.id===original.id)!;expect(original.description).toBe('متن ویرایش‌شده');
+    await sessionAs(storage,'persona-user-manager');await expect(service.editChatMessage(original.id,'دست‌کاری دیگران',original.version)).rejects.toThrow('فقط فرستنده');
+    state=await service.sendChatMessage({conversationId:chat.id,body:'پاسخ به متن',replyToMessageId:original.id});const reply=state.operationalRecords.find((record)=>record.moduleId==='message'&&record.id!==original.id)!;expect(chatReplyToMessageId(reply)).toBe(original.id);
+    await sessionAs(storage,'persona-seller');state=await service.deleteChatMessage(original.id,original.version);const deleted=state.operationalRecords.find((record)=>record.id===original.id)!;
+    expect(chatMessageIsDeleted(deleted)).toBe(true);expect(deleted.description).toBe('');expect(deleted.payload.attachment).toBeNull();
+    const deletionHistory=(await storage.getAll<{recordId:string;snapshot:Record<string,unknown>}>('workflow_history')).find((item)=>item.recordId===original.id&&item.snapshot.action==='message_deleted');
+    expect(deletionHistory?.snapshot.contentSha256).toMatch(/^[a-f0-9]{64}$/);expect(JSON.stringify(deletionHistory)).not.toContain('متن ویرایش‌شده');
+    await expect(service.sendChatMessage({conversationId:chat.id,body:'پاسخ دیرهنگام',replyToMessageId:original.id})).rejects.toThrow('دیگر در دسترس نیست');
+  });
+
+  it('lets the group owner manage admins and lets admins manage ordinary members only',async()=>{
+    const storage=new MemoryStorage();await storage.replaceAll(createSeedData());const service=new LocalFoundationService(storage);
+    await sessionAs(storage,'persona-seller');let state=await service.createChatConversation({kind:'group',title:'تیم اجرای فروش',memberUserIds:['persona-user-manager','persona-purchase-requester']});let group=state.operationalRecords.find((record)=>record.moduleId==='chat')!;
+    state=await service.updateChatGroup(group.id,{title:'تیم اجرای فروش و خرید',memberUserIds:['persona-seller','persona-user-manager'],adminUserIds:['persona-seller','persona-user-manager']},group.version);group=state.operationalRecords.find((record)=>record.id===group.id)!;
+    expect(chatMemberUserIds(group)).toEqual(['persona-seller','persona-user-manager']);expect(chatAdminUserIds(group)).toEqual(['persona-seller','persona-user-manager']);
+    await sessionAs(storage,'persona-purchase-requester');expect((await service.loadState()).operationalRecords.some((record)=>record.id===group.id)).toBe(false);
+    await sessionAs(storage,'persona-user-manager');state=await service.updateChatGroup(group.id,{title:group.title,memberUserIds:['persona-seller','persona-user-manager','persona-inventory-maker'],adminUserIds:['persona-seller','persona-user-manager']},group.version);group=state.operationalRecords.find((record)=>record.id===group.id)!;
+    expect(chatMemberUserIds(group)).toContain('persona-inventory-maker');
+    await expect(service.updateChatGroup(group.id,{title:group.title,memberUserIds:chatMemberUserIds(group),adminUserIds:['persona-seller']},group.version)).rejects.toThrow('فقط مالک گروه');
   });
 
   it('normalizes Persian variants and zero-width spaces for member search',()=>{

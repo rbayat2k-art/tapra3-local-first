@@ -1,4 +1,4 @@
-import type {FoundationState, LocalUser, OperationalRecord, OperationalPayloadValue} from './model';
+import type {FoundationState, LocalUser, OperationalRecord, OperationalPayloadValue, OperationalRecordHistory} from './model';
 
 export type ChatConversationKind = 'direct' | 'group' | 'unit';
 export type ChatAttachmentKind = 'file' | 'voice';
@@ -22,6 +22,13 @@ export interface ChatMessageInput {
   conversationId: string;
   body?: string;
   attachment?: ChatAttachmentInput;
+  replyToMessageId?: string;
+}
+
+export interface ChatGroupUpdateInput {
+  title: string;
+  memberUserIds: string[];
+  adminUserIds: string[];
 }
 
 const CHAT_FILE_TYPES = new Set([
@@ -32,6 +39,7 @@ const CHAT_FILE_TYPES = new Set([
 const CHAT_VOICE_TYPES = new Set(['audio/mpeg', 'audio/mp4', 'audio/ogg', 'audio/wav', 'audio/webm', 'audio/x-wav']);
 export const MAX_CHAT_FILE_SIZE = 8 * 1024 * 1024;
 export const MAX_CHAT_VOICE_SIZE = 12 * 1024 * 1024;
+export const CHAT_MESSAGE_EDIT_WINDOW_MS = 15 * 60 * 1000;
 
 function payloadText(value: OperationalPayloadValue | undefined): string {return typeof value === 'string' ? value : '';}
 function payloadStrings(value: OperationalPayloadValue | undefined): string[] {return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];}
@@ -43,6 +51,14 @@ export function chatKind(record: OperationalRecord): ChatConversationKind {
 
 export function chatMemberUserIds(record: OperationalRecord): string[] {
   return [...new Set(payloadStrings(record.payload.memberUserIds))];
+}
+
+export function chatOwnerUserId(record: OperationalRecord): string {
+  return payloadText(record.payload.ownerUserId) || record.createdByUserId;
+}
+
+export function chatAdminUserIds(record: OperationalRecord): string[] {
+  return [...new Set([chatOwnerUserId(record), ...payloadStrings(record.payload.adminUserIds)])];
 }
 
 export function chatHiddenForUserIds(record: OperationalRecord): string[] {
@@ -67,6 +83,39 @@ export function chatMessages(state: FoundationState, conversationId: string): Op
   return state.operationalRecords
     .filter((record) => record.moduleId === 'message' && record.relatedRecordId === conversationId)
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+}
+
+export function chatReplyToMessageId(record: OperationalRecord): string | undefined {
+  return payloadText(record.payload.replyToMessageId) || undefined;
+}
+
+export function chatMessageIsDeleted(record: OperationalRecord): boolean {
+  return record.status === 'cancelled' || record.payload.deleted === true;
+}
+
+export function chatMessageEditedAt(record: OperationalRecord): string | undefined {
+  return payloadText(record.payload.editedAt) || undefined;
+}
+
+export function chatMessageCanBeChanged(record: OperationalRecord, userId: string, now = Date.now()): boolean {
+  return record.createdByUserId === userId
+    && !chatMessageIsDeleted(record)
+    && now - new Date(record.createdAt).getTime() <= CHAT_MESSAGE_EDIT_WINDOW_MS;
+}
+
+export function chatReadAt(history: OperationalRecordHistory[], conversationId: string, userId: string): string | undefined {
+  return history
+    .filter((item) => item.moduleId === 'chat' && item.recordId === conversationId && item.eventType === 'viewed' && item.snapshot.userId === userId)
+    .sort((a, b) => b.occurredAt.localeCompare(a.occurredAt) || b.sequence - a.sequence)[0]?.occurredAt;
+}
+
+export function chatUnreadCount(state: FoundationState, conversationId: string, userId: string): number {
+  const readAt = chatReadAt(state.operationalHistory, conversationId, userId);
+  return chatMessages(state, conversationId).filter((message) => (
+    message.createdByUserId !== userId
+    && !chatMessageIsDeleted(message)
+    && (!readAt || message.createdAt > readAt)
+  )).length;
 }
 
 export function chatAttachment(record: OperationalRecord): ChatAttachmentInput | undefined {

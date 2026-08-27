@@ -8,8 +8,14 @@ async function enterAsAdmin(page: Page) {
     await page.locator('input[autocomplete="current-password"]').fill('Tapra2@123');
     await page.getByRole('button', {name: 'ورود به سامانه'}).click();
   }
-  const defer = page.getByRole('button', {name: 'فعلاً وارد می‌شوم؛ بعداً تکمیل می‌کنم'}).first();
-  if (await defer.isVisible()) await defer.click();
+  const defer = page.getByRole('button', {name: /فعلاً وارد می‌شوم/}).first();
+  try {
+    await defer.waitFor({state: 'visible', timeout: 15_000});
+    await defer.click();
+    await defer.waitFor({state: 'hidden', timeout: 15_000});
+  } catch {
+    // پرونده کامل است و دروازه تکمیل نمایش داده نشده است.
+  }
 }
 
 test('سمت‌ها انتساب جاری، سابقه و عملیات امن را جدا نشان می‌دهند', async ({page}) => {
@@ -48,4 +54,3 @@ test('صفحه سمت‌ها در موبایل بدون بیرون‌زدگی و
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(overflow).toBeLessThanOrEqual(1);
 });
-

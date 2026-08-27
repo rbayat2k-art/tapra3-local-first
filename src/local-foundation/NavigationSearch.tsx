@@ -1,5 +1,5 @@
 import {useMemo, useRef, useState, type KeyboardEvent} from 'react';
-import {ArrowLeft, Search, X, type LucideIcon} from 'lucide-react';
+import {ArrowLeft, ChevronLeft, Search, X, type LucideIcon} from 'lucide-react';
 import {searchNavigationDestinations, type NavigationDestinationBase} from './navigationDiscovery';
 
 export interface NavigationSearchDestination extends NavigationDestinationBase {
@@ -83,6 +83,7 @@ export function NavigationSearch({destinations, onSelect, onQueryStateChange}: P
       {active && <div className="navigation-search__results" aria-label="نتیجه‌های جست‌وجوی منو">
         {results.map((destination, index) => {
           const Icon = destination.icon;
+          const path = destination.path?.length ? destination.path : [destination.group, destination.title];
           return <button
             key={destination.id}
             ref={(element) => {resultRefs.current[index] = element;}}
@@ -92,7 +93,16 @@ export function NavigationSearch({destinations, onSelect, onQueryStateChange}: P
             onKeyDown={(event) => moveBetweenResults(event, index)}
           >
             <span><Icon size={18}/></span>
-            <div><strong>{destination.title}</strong><small>{destination.subtitle}</small><em>{destination.group}</em></div>
+            <div>
+              <strong>{destination.title}</strong>
+              <small>{destination.subtitle}</small>
+              <span className="navigation-search__path" role="group" aria-label={`مسیر دسترسی: ${path.join('، سپس ')}`}>
+                {path.map((segment, pathIndex) => <span key={`${segment}-${pathIndex}`}>
+                  {pathIndex > 0 && <ChevronLeft size={11} aria-hidden="true"/>}
+                  <i>{segment}</i>
+                </span>)}
+              </span>
+            </div>
             <ArrowLeft size={16}/>
           </button>;
         })}

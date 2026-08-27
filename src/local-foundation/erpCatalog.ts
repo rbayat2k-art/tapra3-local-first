@@ -30,7 +30,7 @@ function mod(input: Omit<ErpModuleDefinition, 'workflow'> & {states: string[]; a
 const purchaseRequestWorkflow: WorkflowDefinition = {
   id: 'workflow-purchase-request', moduleId: 'purchase-request', title: 'گردش‌کار درخواست خرید چندشعبه‌ای', version: 3,
   status: 'published', initialState: 'draft',
-  stateLabels: Object.fromEntries(['draft','submitted','purchase_review','needs_correction','purchase_approved','sent_to_treasury','rejected','cancelled'].map((state) => [state, STATE_LABELS[state] ?? state])),
+  stateLabels: Object.fromEntries(['draft','submitted','purchase_review','needs_correction','purchase_approved','sent_to_treasury','paid','rejected','cancelled'].map((state) => [state, STATE_LABELS[state] ?? state])),
   transitions: [
     transition('procurement','purchase-request',['draft','needs_correction'],'submitted','ثبت و ارسال برای تأیید'),
     transition('procurement','purchase-request','draft','cancelled','لغو پیش‌نویس با حفظ سابقه',{reasonRequired:true}),
@@ -67,13 +67,14 @@ const employeeAdvanceWorkflow: WorkflowDefinition = {
   },
   transitions: [
     transition('hr','employee-advance',['draft','needs_correction'],'branch_review','ثبت و ارسال به مدیر شعبه'),
+    transition('hr','employee-advance',['draft','needs_correction'],'accounting_review','ثبت ستادی یا ارجاع جایگزین به حسابداری',{id:'employee-advance.accounting_review.direct'}),
     transition('hr','employee-advance','branch_review','accounting_review','تأیید مدیر شعبه و ارسال به حسابداری',{makerChecker:true}),
     transition('hr','employee-advance','accounting_review','final_review','تأیید حسابداری و ارسال به تأییدکننده اصلی',{makerChecker:true}),
     transition('hr','employee-advance',['accounting_review','final_review'],'sent_to_treasury','تأیید و ارسال به خزانه',{makerChecker:true,sensitive:true,handoffModuleId:'treasury-execution'}),
     transition('hr','employee-advance','sent_to_treasury','paid','ثبت پرداخت'),
   ],
   queueStrategy: 'assignee',
-  assignmentPolicy: 'ثبت عادی: مدیر شعبه ← حسابداری ← تأییدکننده اصلی ← خزانه؛ ثبت نیابتی تأییدکننده اصلی: حسابداری ← خزانه.',
+  assignmentPolicy: 'کارکنان شعب: مسئول همان شعبه ← حسابداری ← تأییدکننده اصلی ← خزانه؛ کارکنان ستادی یا شعبه بدون مسئول فعال: حسابداری ← تأییدکننده اصلی ← خزانه؛ ثبت نیابتی تأییدکننده اصلی: حسابداری ← خزانه.',
   approvalPolicyId: 'employee-advance-branch-accounting-main-approver-v1', createdAt: SEED_TIME, updatedAt: SEED_TIME,
 };
 
@@ -218,6 +219,7 @@ const role = (id:string,title:string,description:string,scope:ScopeType,moduleId
 const hr=['recruitment-case','employment-contract','onboarding','offboarding','attendance','shift','leave','mission','overtime','employee-advance','employee-loan','performance-review','training','personnel-document'];
 const crm=['lead','call','followup','opportunity']; const sales=['quote','sale','invoice','payment']; const market=['campaign','promotion']; const catalog=['catalog-item','price-list']; const procurement=['purchase-request','rfq','supplier-offer','offer-comparison','purchase-order','matching']; const supplier=['supplier','supplier-invoice']; const finance=['cost-center','budget','finance-request']; const treasury=['bank-account','treasury-execution']; const accounting=['chart-account','accounting-period','journal-entry','bank-reconciliation']; const warehouse=['warehouse-master','location','inventory-item','receipt','reservation','transfer','adjustment','count','return','inventory-movement']; const logistics=['shipment','delivery']; const service=['service-case','service-evidence']; const support=['support-case','support-transaction'];
 export const ERP_ROLE_TEMPLATES: RoleTemplateInput[] = [
+  role('role-employee-advance-requester','درخواست‌کننده مساعده','ثبت، اصلاح و پیگیری درخواست مساعده فقط برای پرونده خود','SELF',['employee-advance'],['view','create','edit','transition']),
   role('role-workforce-requester','مدیر درخواست‌کننده نیرو','ثبت اعلام نیاز فقط برای واحد یا شعبه تحت مدیریت خود و مشاهده نتیجه همان پرونده','UNIT',['recruitment-case'],['view','create','edit','transition']),
   role('role-recruitment-operator','کارشناس جذب منابع انسانی','دریافت اعلام نیاز، تماس، ساخت پرونده موقت، انتشار آگهی، دعوت و تکمیل پرونده متقاضی','COMPANY',['recruitment-case'],['view','create','edit','transition']),
   role('role-recruitment-manager','مدیر جذب منابع انسانی','تأیید اعلام نیاز، ثبت نیابتی، پیشنهاد همکاری، دستور شروع و کنترل نهایی جذب','COMPANY',['recruitment-case'],['view','create','edit','transition','approve','manage']),

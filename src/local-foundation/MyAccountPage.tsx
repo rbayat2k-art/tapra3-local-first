@@ -85,7 +85,7 @@ export function MyAccountPage({state, service, execute}: {state: FoundationState
           <FactGrid><Fact label="نام" value={personnel.emergencyName}/><Fact label="نسبت" value={personnel.emergencyRelation}/><Fact label="شماره تماس" value={personnel.emergencyPhone} ltr/></FactGrid>
         </AccountSection>
         <AccountSection icon={ShieldCheck} title="حساب و دسترسی" subtitle="اطلاعات ورود و نقش‌های مؤثر">
-          <FactGrid><Fact label="نام کاربری" value={`@${user.username}`} ltr/><Fact label="نقش اصلی" value={user.roleTitle}/><Fact label="نقش‌ها" value={user.roles.join('، ')} wide/><Fact label="آخرین تغییر رمز" value={formatPersianDateTime(user.passwordUpdatedAt)}/></FactGrid>
+          <FactGrid><Fact label="نام کاربری" value={`@${user.username}`} ltr/><Fact label="نقش اصلی" value={user.roleTitle}/><Fact label="نقش‌ها" value={user.roles.join('، ')} wide/><Fact label="آخرین تغییر رمز" value={formatPersianDateTime(user.passwordUpdatedAt)}/><Fact label="رمز دوم ثابت" value={user.hasSecondaryPassword?'فعال':'تعریف نشده'}/></FactGrid>
         </AccountSection>
       </section>
 
