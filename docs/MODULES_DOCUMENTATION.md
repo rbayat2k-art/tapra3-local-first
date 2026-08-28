@@ -11,4 +11,4 @@
 
 - [فهرست ماژول‌های فعلی](product/module-catalog.md)
 - [Documentation index](README.md)
-- [Pre-migration copy](archive/pre-migration-snapshot/2026-08-10-stable-f271cca7/docs/MODULES_DOCUMENTATION.md)
+- Pre-migration copy در snapshot فعلی موجود نیست (`Deprecated` link removed).

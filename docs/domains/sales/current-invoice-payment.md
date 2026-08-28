@@ -1,5 +1,7 @@
 # فروش، فاکتور و پرداخت فعلی
 
+> **Deprecated / Conflict:** این سند چرخه Server/PostgreSQL نسخه تاریخی است و وضعیت جاری را نشان نمی‌دهد.
+
 > Status: CURRENT
 > Source of truth: این سند برای رفتار اجراشده `Sale → Invoice → Payment → Financial Review` است.
 > Owner: Sales Domain Owner

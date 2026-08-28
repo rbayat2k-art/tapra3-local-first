@@ -45,7 +45,7 @@ Tapra2 یک shell عملیاتی واحد دارد. ورود، context فعال�
 | مدیریت کامل Campaign/Promotion، Commission، Finance عمومی، Support و Communications | `Prototype-backed` و مخفی از ناوبری عملیاتی |
 | bank/Issabel/SMS/portal/commission/GL/DR/BPMN و Logistics پیشرفته | `Future` |
 
-جزئیات capability-by-capability، شاهد Git/stash و تصمیم preservation در [Legacy Product Preservation Matrix](../archive/legacy-product-preservation-matrix.md) ثبت شده است. آن ماتریس همچنین Legacy → SaaS migration map و role mapping را نگه می‌دارد و این سند آن محتوا را تکرار نمی‌کند.
+Legacy Product Preservation Matrix اشاره‌شده در نسخه قدیمی در snapshot فعلی وجود ندارد؛ بنابراین ادعاهای این بند فقط historical و `Deprecated` هستند.
 
 ## RBAC reconciliation
 

@@ -1,5 +1,7 @@
 # فهرست ماژول‌های فعلی
 
+> **Deprecated / Conflict:** این کاتالوگ متعلق به نسخه تاریخی است. کاتالوگ جاری Registry در [`../_meta/FEATURE-MATRIX.md`](../_meta/FEATURE-MATRIX.md) است.
+
 > Status: HISTORICAL — فهرست قابلیت‌های Shell سرورمحور پیش از Local-first Phase A
 > Source of truth: این سند برای فهرست ماژول‌های پیاده‌سازی‌شده و مرز مسئولیت آن‌ها است.
 > Owner: Product Owner

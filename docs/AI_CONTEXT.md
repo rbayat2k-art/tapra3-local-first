@@ -7,7 +7,6 @@
 > Supersedes: none
 > Superseded by: `AGENTS.md`, `docs/ai/start-here.md`
 
-این مسیر فقط برای compatibility/history نگهداری می‌شود. عامل‌های AI باید از [Start Here](ai/start-here.md)، [AGENTS.md](../AGENTS.md) و [documentation index](README.md) شروع کنند.
+این مسیر فقط برای compatibility/history نگهداری می‌شود. عامل‌های AI باید از [`AGENTS.md`](../AGENTS.md)، [Start Here](ai/start-here.md) و [documentation index](README.md) شروع کنند.
 
-- [Migration traceability](archive/migration-traceability.md)
-- [Pre-migration copy](archive/pre-migration-snapshot/2026-08-10-stable-f271cca7/docs/AI_CONTEXT.md)
+- Migration traceability و pre-migration copy در snapshot فعلی موجود نیستند (`Deprecated` link removed).

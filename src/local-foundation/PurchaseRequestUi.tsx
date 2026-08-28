@@ -1,4 +1,4 @@
-import {useMemo, useState} from 'react';
+import {useMemo, useRef, useState} from 'react';
 import {ArrowLeft, BellRing, Building2, CheckCircle2, Download, Eye, FileImage, FileText, Landmark, Pencil, Plus, Search, Trash2, UploadCloud, UserRound, X} from 'lucide-react';
 import {can} from './authorization';
 import {permissionFor, stateLabel, type ErpModuleDefinition} from './erpCatalog';
@@ -12,16 +12,20 @@ import {
 } from './purchaseRequest';
 import type {LocalFoundationService, OperationalRecordInput} from './service';
 import {SortHeader, useSortableRows, type SortColumn} from './Sorting';
+import {RecordDialog} from './RecordDialog';
 import {formatPortalAmount, normalizeBankCard} from '../utils/operationalFormat';
 import {canRequestTreasuryFollowUp} from './purchaseFollowUp';
+import {decisionsForWorkflowState, roleIdsForWorkflowState} from './workflowPolicy';
+import {readFinancialPaymentProgress} from './financialCore';
+import {ApprovalRoundProgress} from './ApprovalRoundProgress';
 
-type Execute = (label: string, work: () => Promise<FoundationState>, success: string) => Promise<void>;
+type Execute = (label: string, work: () => Promise<FoundationState>, success: string) => Promise<boolean>;
 const today = () => new Date().toISOString().slice(0, 10);
 const newId = (prefix: string) => `${prefix}-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`}`;
 const rial = (value: string | bigint | undefined) => `${BigInt(value || '0').toLocaleString('en-US')} ریال`;
 const groupedNumber = (value: string | undefined) => value ? formatPortalAmount(value) : '';
 const priorityLabel = (value: OperationalRecord['priority']) => ({low: 'کم', normal: 'عادی', high: 'زیاد', critical: 'بحرانی'})[value];
-const tone = (status: string) => ['purchase_approved', 'sent_to_treasury'].includes(status) ? 'good' : ['rejected', 'cancelled'].includes(status) ? 'danger' : status === 'draft' ? 'neutral' : 'progress';
+const tone = (status: string) => ['purchase_approved', 'sent_to_treasury', 'paid'].includes(status) ? 'good' : ['rejected', 'cancelled'].includes(status) ? 'danger' : status === 'draft' ? 'neutral' : 'progress';
 
 const emptyLine = (): PurchaseRequestLine => ({id: newId('line'), title: '', category: '', specification: '', quantity: '1', unit: 'عدد', estimatedUnitPriceRial: '', preferredSupplier: ''});
 const emptyAllocation = (): PurchaseRequestAllocation => ({id: newId('allocation'), branchUnitId: '', costCenterUnitId: '', amountRial: '', note: ''});
@@ -50,7 +54,8 @@ export function PurchaseRequestTable({records, state, module, onOpen, onEdit, on
     <th><SortHeader columnKey="updated" label="آخرین تغییر" sort={sort} onSort={requestSort}/></th><th><span className="sr-only">اقدام‌ها</span></th>
   </tr></thead><tbody>{sortedRows.map((record, index) => {
     const payload = readPurchaseRequestPayload(record.payload);
-    const editable = can(state.activeUser, permissionFor(module.id, 'edit')) && record.createdByUserId === state.activeUser.id && ['draft', 'needs_correction'].includes(record.status);
+    const correctionRecipient=typeof record.payload.continuityCorrectionRecipientUserId==='string'?record.payload.continuityCorrectionRecipientUserId:undefined;
+    const editable = can(state.activeUser, permissionFor(module.id, 'edit')) && (record.createdByUserId === state.activeUser.id || (record.status==='needs_correction'&&correctionRecipient===state.activeUser.id)) && ['draft', 'needs_correction'].includes(record.status);
     const followUpAvailable = canRequestTreasuryFollowUp(state, record);
     return <tr key={record.id} onDoubleClick={() => onOpen(record)}><td className="operational-row-number">{(index + 1).toLocaleString('en-US')}</td>
       <td><button className="record-link" onClick={() => onOpen(record)}><strong>{record.title}</strong><code dir="ltr">{record.trackingCode}</code></button></td>
@@ -62,7 +67,7 @@ export function PurchaseRequestTable({records, state, module, onOpen, onEdit, on
   })}</tbody></table>{!sortedRows.length && <div className="empty-state"><Search size={26}/><strong>درخواست خریدی پیدا نشد.</strong><span>فیلترها را تغییر دهید یا درخواست تازه بسازید.</span></div>}</div>;
 }
 
-export function PurchaseRequestEditor({state, record, onClose, onSave}: {state: FoundationState; record?: OperationalRecord; onClose: () => void; onSave: (input: OperationalRecordInput) => Promise<void>}) {
+export function PurchaseRequestEditor({state, record, onClose, onSave}: {state: FoundationState; record?: OperationalRecord; onClose: () => void; onSave: (input: OperationalRecordInput) => Promise<unknown>}) {
   const stored = readPurchaseRequestPayload(record?.payload);
   const [form, setForm] = useState<OperationalRecordInput>({
     title: record?.title ?? '', description: record?.description ?? '', priority: record?.priority ?? 'normal', dueAt: record?.dueAt?.slice(0, 10) ?? '',
@@ -162,39 +167,51 @@ export function PurchaseRequestEditor({state, record, onClose, onSave}: {state: 
 
 export function PurchaseRequestDrawer({state, record, module, service, execute, onClose, onEdit}: {state: FoundationState; record: OperationalRecord; module: ErpModuleDefinition; service: LocalFoundationService; execute: Execute; onClose: () => void; onEdit: () => void}) {
   const [reason, setReason] = useState(''); const [assignee, setAssignee] = useState(''); const [errors, setErrors] = useState<string[]>([]);
+  const decisionCommand=useRef<{id:string;fingerprint:string}|undefined>(undefined);const decisionBusy=useRef(false);
   const payload = readPurchaseRequestPayload(record.payload); const history = state.operationalHistory.filter((item) => item.recordId === record.id).sort((a, b) => b.sequence - a.sequence);
   const decisionStage = ['submitted', 'purchase_review', 'purchase_approved'].includes(record.status);
-  const isDecisionMaker = decisionStage && record.createdByUserId !== state.activeUser.id && can(state.activeUser, permissionFor('purchase-request', 'approve'));
-  const transitions = module.workflow.transitions.filter((item) => item.from.includes(record.status) && can(state.activeUser, item.permission) && !item.makerChecker && record.createdByUserId === state.activeUser.id);
-  const approvers = state.users.filter((user) => user.status === 'active' && !user.isAdmin && user.id !== state.activeUser.id && user.id !== record.createdByUserId && can(user, permissionFor('purchase-request', 'approve')));
-  const payers = state.users.filter((user) => user.status === 'active' && !user.isAdmin && user.id !== state.activeUser.id && can(user, permissionFor('treasury-execution', 'transition')) && !approvers.some((approver) => approver.id === user.id));
-  const editable = can(state.activeUser, permissionFor(module.id, 'edit')) && record.createdByUserId === state.activeUser.id && ['draft', 'needs_correction'].includes(record.status);
-  const decide = (transition: ErpModuleDefinition['workflow']['transitions'][number]) => {const next = transition.reasonRequired && reason.trim().length < 3 ? ['دلیل تصمیم یا توضیح برای خزانه را کامل وارد کنید.'] : []; setErrors(next); if (next.length) return; void execute('purchase-transition', () => service.transitionOperationalRecord(module.id, record.id, transition.id, reason), `وضعیت درخواست به «${stateLabel(module.workflow, transition.to)}» تغییر کرد.`).then(() => {setReason(''); setErrors([]);});};
+  const currentApprovalState = record.status === 'submitted' ? 'submitted' : 'purchase_review';
+  const currentApprovalRoles = roleIdsForWorkflowState(state, 'purchase-request', currentApprovalState, ['role-purchase-approver']);
+  const allowedDecisions = decisionsForWorkflowState(state, 'purchase-request', currentApprovalState, ['approve','reject','needs_correction']);
+  const isDecisionMaker = decisionStage && record.createdByUserId !== state.activeUser.id && can(state.activeUser, permissionFor('purchase-request', 'approve')) && (state.activeUser.isAdmin || state.activeUser.roleIds.some((roleId) => currentApprovalRoles.includes(roleId)));
+  const correctionRecipient=typeof record.payload.continuityCorrectionRecipientUserId==='string'?record.payload.continuityCorrectionRecipientUserId:undefined;
+  const isCorrectionOwner=record.createdByUserId===state.activeUser.id||(record.status==='needs_correction'&&correctionRecipient===state.activeUser.id);
+  const transitions = module.workflow.transitions.filter((item) => item.from.includes(record.status) && can(state.activeUser, item.permission) && !item.makerChecker && isCorrectionOwner);
+  const approverRoleIds = roleIdsForWorkflowState(state, 'purchase-request', 'purchase_review', ['role-purchase-approver']);
+  const payerRoleIds = roleIdsForWorkflowState(state, 'purchase-request', 'sent_to_treasury', ['role-treasury-executor-v1']);
+  const approvers = state.users.filter((user) => user.status === 'active' && !user.isAdmin && user.id !== state.activeUser.id && user.id !== record.createdByUserId && user.roleIds.some((roleId)=>approverRoleIds.includes(roleId)) && can(user, permissionFor('purchase-request', 'approve')));
+  const payers = state.users.filter((user) => user.status === 'active' && !user.isAdmin && user.id !== state.activeUser.id && user.roleIds.some((roleId)=>payerRoleIds.includes(roleId)) && can(user, permissionFor('treasury-execution', 'transition')) && !approvers.some((approver) => approver.id === user.id));
+  const editable = can(state.activeUser, permissionFor(module.id, 'edit')) && isCorrectionOwner && ['draft', 'needs_correction'].includes(record.status);
+  const decide = (transition: ErpModuleDefinition['workflow']['transitions'][number]) => {const next = transition.reasonRequired && reason.trim().length < 3 ? ['دلیل تصمیم یا توضیح برای خزانه را کامل وارد کنید.'] : []; setErrors(next); if(next.length||decisionBusy.current)return;const fingerprint=JSON.stringify({recordId:record.id,version:record.version,transitionId:transition.id,reason});if(!decisionCommand.current||decisionCommand.current.fingerprint!==fingerprint)decisionCommand.current={id:`ui-purchase-transition:${crypto.randomUUID()}`,fingerprint};const commandId=decisionCommand.current.id;decisionBusy.current=true;void execute('purchase-transition', () => service.transitionOperationalRecord(module.id, record.id, transition.id, reason,commandId), `وضعیت درخواست به «${stateLabel(module.workflow, transition.to)}» تغییر کرد.`).then((succeeded) => {if (succeeded) {decisionCommand.current=undefined;setReason(''); setErrors([]);}}).finally(()=>{decisionBusy.current=false;});};
   const submitDecision = (decision: 'approve_and_forward' | 'needs_correction' | 'rejected') => {
     const next = [
       ...(reason.trim().length < 3 ? ['توضیح تصمیم را کامل وارد کنید.'] : []),
       ...(decision === 'approve_and_forward' && !assignee ? ['تأییدکننده بعدی یا پرداخت‌کننده مقصد را انتخاب کنید.'] : []),
     ];
     setErrors(next);
-    if (next.length) return;
+    if (next.length||decisionBusy.current) return;
     const message = decision === 'approve_and_forward' ? 'درخواست تأیید و به مقصد بعدی ارجاع شد.' : decision === 'needs_correction' ? 'درخواست برای اصلاح به کارتابل درخواست‌کننده بازگشت.' : 'درخواست رد و بسته شد.';
-    void execute('purchase-decision', () => service.decidePurchaseRequest(record.id, decision, assignee, reason), message).then(() => {setReason(''); setAssignee(''); setErrors([]);});
+    const fingerprint=JSON.stringify({recordId:record.id,version:record.version,decision,assignee,reason});if(!decisionCommand.current||decisionCommand.current.fingerprint!==fingerprint)decisionCommand.current={id:`ui-purchase-decision:${crypto.randomUUID()}`,fingerprint};const commandId=decisionCommand.current.id;decisionBusy.current=true;
+    void execute('purchase-decision', () => service.decidePurchaseRequest(record.id, decision, assignee, reason, record.version,commandId), message).then((succeeded) => {if (succeeded) {decisionCommand.current=undefined;setReason(''); setAssignee(''); setErrors([]);}}).finally(()=>{decisionBusy.current=false;});
   };
-  return <div className="drawer-scrim" onMouseDown={(event) => {if (event.currentTarget === event.target) onClose();}}><aside className="record-drawer purchase-drawer" aria-label={`جزئیات ${record.title}`}><header><div><span className="eyebrow">{record.trackingCode}</span><h2>{record.title}</h2><p>{record.description}</p></div><button className="icon-button" onClick={onClose} aria-label="بستن"><X size={20}/></button></header><div className="drawer-body">
+  return <RecordDialog ariaLabel={`جزئیات ${record.title}`} className="purchase-drawer" onClose={onClose}><header><div><span className="eyebrow">{record.trackingCode}</span><h2>{record.title}</h2><p>{record.description}</p></div><button className="icon-button" onClick={onClose} aria-label="بستن"><X size={20}/></button></header><div className="drawer-body">
     <div className="record-status-hero"><span className={`state-badge state-badge--${tone(record.status)}`}>{stateLabel(module.workflow, record.status)}</span><span>نسخه {record.version.toLocaleString('en-US')}</span><span>{priorityLabel(record.priority)}</span><strong>{rial(record.amountRial)}</strong></div>
     <PurchaseRequestDetails state={state} record={record}/>
+    <ApprovalRoundProgress state={state} record={record}/>
     <section className="workflow-box"><h3>{isDecisionMaker ? 'تصمیم تأییدکننده' : 'اقدام بعدی'}</h3><FormValidationSummary errors={errors}/>{(isDecisionMaker || transitions.some((item) => item.reasonRequired)) && <label className="field"><RequiredLabel>توضیح تصمیم</RequiredLabel><textarea aria-required="true" value={reason} onChange={(event) => setReason(event.target.value)} placeholder="توضیحی بنویسید که در تاریخچه پرونده ثبت شود…"/></label>}
       {isDecisionMaker && <div className="purchase-assignment"><label className="field"><RequiredLabel>مقصد پس از تأیید</RequiredLabel><select value={assignee} onChange={(event) => setAssignee(event.target.value)}><option value="">انتخاب تأییدکننده بعدی یا پرداخت‌کننده…</option>{approvers.length > 0 && <optgroup label="تأییدکنندگان بعدی">{approvers.map((user) => <option key={user.id} value={user.id}>{user.name} — {user.roleTitle}</option>)}</optgroup>}{payers.length > 0 && <optgroup label="پرداخت‌کنندگان خزانه">{payers.map((user) => <option key={user.id} value={user.id}>{user.name} — {user.roleTitle}</option>)}</optgroup>}</select></label><span className="quiet-state"><UserRound size={16}/>با انتخاب تأییدکننده، پرونده در زنجیره تأیید می‌ماند؛ با انتخاب پرداخت‌کننده، سهم‌های شعب وارد صف خزانه می‌شوند.</span></div>}
-      {isDecisionMaker ? <div className="transition-actions"><button className="button button--primary" type="button" onClick={() => submitDecision('approve_and_forward')}>تأیید و ارجاع به نفر بعدی<ArrowLeft size={16}/></button><button className="button button--secondary" type="button" onClick={() => submitDecision('needs_correction')}>نیازمند اصلاح<ArrowLeft size={16}/></button><button className="button button--danger" type="button" onClick={() => submitDecision('rejected')}>رد و بستن پرونده<ArrowLeft size={16}/></button></div> : <div className="transition-actions">{transitions.map((transition) => <button className={`button ${transition.to === 'cancelled' ? 'button--danger' : 'button--primary'}`} key={transition.id} onClick={() => decide(transition)}>{transition.label}<ArrowLeft size={16}/></button>)}{!transitions.length && <span className="quiet-state"><CheckCircle2 size={18}/>اقدام مجاز بعدی برای این نقش وجود ندارد.</span>}</div>}
+      {isDecisionMaker ? <div className="transition-actions">{allowedDecisions.includes('approve') && <button className="button button--primary" type="button" onClick={() => submitDecision('approve_and_forward')}>تأیید و ارجاع به نفر بعدی<ArrowLeft size={16}/></button>}{allowedDecisions.includes('needs_correction') && <button className="button button--secondary" type="button" onClick={() => submitDecision('needs_correction')}>نیازمند اصلاح<ArrowLeft size={16}/></button>}{allowedDecisions.includes('reject') && <button className="button button--danger" type="button" onClick={() => submitDecision('rejected')}>رد و بستن پرونده<ArrowLeft size={16}/></button>}</div> : <div className="transition-actions">{transitions.map((transition) => <button className={`button ${transition.to === 'cancelled' ? 'button--danger' : 'button--primary'}`} key={transition.id} onClick={() => decide(transition)}>{transition.label}<ArrowLeft size={16}/></button>)}{!transitions.length && <span className="quiet-state"><CheckCircle2 size={18}/>اقدام مجاز بعدی برای این نقش وجود ندارد.</span>}</div>}
     </section>
     <section className="history-box"><h3>تاریخچه غیرقابل حذف</h3>{history.length ? history.map((item) => <article key={item.id}><span/><div><strong>{item.toState ? `${item.fromState ?? ''} ← ${item.toState}` : item.eventType}</strong><p>{item.reason || `${item.actorName} این رویداد را ثبت کرد.`}</p><small>{formatPersianDateTime(item.occurredAt)} · #{item.sequence.toLocaleString('en-US')}</small></div></article>) : <div className="quiet-state">تاریخچه‌ای ثبت نشده است.</div>}</section>
-  </div><footer>{editable && <button className="button button--secondary" onClick={onEdit}><Pencil size={17}/> ویرایش پیش‌نویس</button>}<button className="button button--ghost" onClick={onClose}>بستن</button></footer></aside></div>;
+  </div><footer>{editable && <button className="button button--secondary" onClick={onEdit}><Pencil size={17}/> ویرایش پیش‌نویس</button>}<button className="button button--ghost" onClick={onClose}>بستن</button></footer></RecordDialog>;
 }
 
 export function PurchaseRequestDetails({state, record, revealBeneficiaryCard = false}: {state: FoundationState; record: OperationalRecord; revealBeneficiaryCard?: boolean}) {
   const payload = readPurchaseRequestPayload(record.payload);
+  const paymentProgress = readFinancialPaymentProgress(record);
   return <>
     <div className="purchase-summary-grid"><span>تاریخ درخواست<strong>{payload.requestDate ? formatPersianDate(payload.requestDate) : '—'}</strong></span><span>تاریخ موردنیاز<strong>{record.dueAt ? formatPersianDate(record.dueAt) : '—'}</strong></span><span>نوع خرید<strong>{{goods: 'کالا', service: 'خدمت', mixed: 'کالا و خدمت'}[payload.purchaseType]}</strong></span><span>درخواست‌کننده<strong>{state.users.find((user) => user.id === record.createdByUserId)?.name ?? '—'}</strong></span></div>
+    {paymentProgress && <section className="financial-progress" aria-label="پیشرفت پرداخت درخواست"><div><span>سهم‌های پرداخت‌شده</span><strong>{paymentProgress.paidCount.toLocaleString('en-US')} از {paymentProgress.obligationCount.toLocaleString('en-US')}</strong></div><div><span>مبلغ پرداخت‌شده</span><strong>{rial(paymentProgress.paidRial)}</strong></div><div><span>وضعیت تعهد</span><strong>{paymentProgress.complete ? 'تسویه کامل' : 'در انتظار تکمیل پرداخت'}</strong></div></section>}
     <section className="purchase-detail-section"><h3>ردیف‌های خرید</h3><div className="purchase-detail-table"><div className="purchase-detail-table__head"><span>ردیف</span><span>شرح</span><span>مقدار</span><span>قیمت واحد</span><span>جمع</span></div>{payload.lines.map((line, index) => <div key={line.id}><span>{(index + 1).toLocaleString('en-US')}</span><span><strong>{line.title}</strong><small>{line.category} · {line.specification || 'بدون مشخصات تکمیلی'}</small></span><span>{Number(line.quantity).toLocaleString('en-US')} {line.unit}</span><span>{rial(line.estimatedUnitPriceRial)}</span><span>{rial(purchaseLineTotal(line))}</span></div>)}</div></section>
     <section className="purchase-detail-section"><h3>تقسیم مالی شعب</h3><div className="allocation-cards">{payload.allocations.map((item, index) => <article key={item.id}><i>{(index + 1).toLocaleString('en-US')}</i><Building2 size={18}/><span>شعبه<strong>{state.units.find((unit) => unit.id === item.branchUnitId)?.name ?? '—'}</strong></span><Landmark size={18}/><span>مرکز هزینه<strong>{state.units.find((unit) => unit.id === item.costCenterUnitId)?.name ?? '—'}</strong></span><b>{rial(item.amountRial)}</b>{item.note && <small>{item.note}</small>}</article>)}</div></section>
     <section className="purchase-detail-section"><h3>پیش‌فاکتور و اطلاعات پرداخت</h3><div className="quotation-payment-summary"><span>نام خانوادگی صاحب کارت<strong>{payload.beneficiaryLastName || '—'}</strong></span><span>{revealBeneficiaryCard ? 'شماره کارت مقصد پرداخت' : 'شماره کارت'}<strong dir="ltr">{revealBeneficiaryCard ? visibleCard(payload.beneficiaryCardNumber) : maskedCard(payload.beneficiaryCardNumber)}</strong>{revealBeneficiaryCard && <small>نمایش کامل فقط برای مجری همین پرداخت</small>}</span></div>{payload.quotationAttachments.length > 0 ? <div className="quote-cards">{payload.quotationAttachments.map((attachment) => <article key={attachment.id}>{attachment.mimeType.startsWith('image/') && attachment.dataUrl ? <img src={attachment.dataUrl} alt={`پیش‌نمایش ${attachment.fileName}`}/> : <FileText size={18}/>}<span><strong>{attachment.fileName}</strong><small>{attachment.size ? fileSizeLabel(attachment.size) : 'پیوست منتقل‌شده از نسخه قبلی'}</small></span>{attachment.dataUrl && <a className="icon-button" href={attachment.dataUrl} download={attachment.fileName} aria-label={`دریافت ${attachment.fileName}`} title="دریافت فایل"><Download size={16}/></a>}</article>)}</div> : <div className="quiet-state">فایل پیش‌فاکتوری بارگذاری نشده است.</div>}</section>

@@ -11,4 +11,4 @@
 
 - [راه‌اندازی و فرمان‌های فعلی](engineering/development.md)
 - [وضعیت quality و test](engineering/quality.md)
-- [Pre-migration copy](archive/pre-migration-snapshot/2026-08-10-stable-f271cca7/docs/DEVELOPMENT_GUIDE.md)
+- Pre-migration copy در snapshot فعلی موجود نیست (`Deprecated` link removed).

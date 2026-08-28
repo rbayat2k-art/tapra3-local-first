@@ -4,7 +4,7 @@ import {
   BriefcaseBusiness, Database, Download, Eye, FileClock, FileJson, Fingerprint, FlaskConical, GitBranch, HardDrive, KeyRound, LayoutDashboard,
   LockKeyhole, LogIn, LogOut, Menu, MessageSquareText, Monitor, Moon, MoreVertical, Palette, Pencil, Phone, RotateCcw, ScrollText, Shield, ShieldCheck,
   SlidersHorizontal, Sparkles, Sun, Upload, UserCheck, UserCog, UserPlus, UserRound, UserX, UsersRound, Workflow, X, Network, ContactRound, EyeOff,
-  PanelRightClose, PanelRightOpen, Headphones, Search,
+  PanelRightClose, PanelRightOpen, Headphones, Search, Layers3, FolderKanban,
   type LucideIcon,
 } from 'lucide-react';
 import {authorize, can} from './authorization';
@@ -14,7 +14,8 @@ import type {
 } from './model';
 import {FOUNDATION_SCHEMA_VERSION} from './model';
 import {PERMISSION_CATALOG, ROLE_TEMPLATES} from './seed';
-import {LocalFoundationService, isEncryptedSnapshot, type SelfCredentialChangeInput, type UserInput} from './service';
+import {LocalFoundationService, isEncryptedSnapshot, userConcurrencyToken, type LocalSmsPreview, type SecondaryPasswordChangeInput, type SelfCredentialChangeInput, type UserInput} from './service';
+import {positionSupportsUnit, positionsForUnit} from './unitPosition';
 import {OrganizationOverviewPage, PositionsPage, RolesPage, UnitsPage} from './OrganizationPages';
 import {PersonnelPage} from './PersonnelPages';
 import {CustomersPage} from './CustomerPages';
@@ -25,20 +26,39 @@ import {BranchesPage} from './BranchesPage';
 import {SalesStructuresPage} from './SalesStructuresPage';
 import {FormValidationSummary, OptionalLabel, RequiredLabel, validateRequired} from './FormValidation';
 import {SortHeader, useSortableRows, type SortColumn} from './Sorting';
-import {formatPersianDateTime} from './PersianDate';
+import {formatPersianDateTime, todayIsoDate} from './PersianDate';
 import {ProfileCompletionGate} from './ProfileCompletionGate';
-import {isProfileComplete, type ProfileCompletionInput} from './profileCompletion';
+import {type ProfileCompletionInput} from './profileCompletion';
+import {PERSONNEL_DOCUMENT_PERMISSION_QUEUE, personnelCompletionSummary} from './personnelDocuments';
 import {MyAccountPage} from './MyAccountPage';
 import {dashboardCapabilitiesFor, type DashboardCapability} from './organizationAccess';
 import {digitsOnly, normalizeIranianMobile} from '../utils/operationalFormat';
-import {pageFromUrl, pageRouteUrl} from './navigationUrl';
+import {destinationRouteUrl, pageFromUrl, pageRouteUrl} from './navigationUrl';
+import {sameNameUsers, userDisplayLabel} from './personIdentity';
+import {PRIMARY_ADMIN_USER_ID, PROTECTED_PERMISSION_CODES, PROTECTED_ROLE_IDS} from './accessPolicy';
+import {BrandMark} from './BrandMark';
+import {PRODUCT_NAME, PRODUCT_TAGLINE} from './branding';
+import {DEFAULT_PREFERENCES, normalizeUiPreferences, type UiPreferences} from './appearancePreferences';
+import {WorkflowAdminPage} from './WorkflowAdminPage';
+import {RecruitmentPage} from './RecruitmentPage';
+import {RecruitmentCandidateProfileDialog} from './RecruitmentCandidateProfileDialog';
+import {CommunicationsPage} from './CommunicationsPage';
+import {LettersPage} from './LettersPage';
+import {CollaborationDashboardPanel, CollaborationHubPage} from './CollaborationHubPage';
+import {NavigationSearch, type NavigationSearchDestination} from './NavigationSearch';
+import {notifyWorkspaceTabActivated, requestWorkspaceTabClose} from './windowWorkspaceGuard';
+import {userOrganizationHealth, userOrganizationIssueLabel} from './userOrganizationHealth';
+import {
+  buildNavigationPath,
+  frequentNavigationDestinations,
+  incrementNavigationUsage,
+  loadNavigationUsage,
+  saveNavigationUsage,
+  type NavigationUsageEntry,
+} from './navigationDiscovery';
+import {createActingManagerBoundaryCheck, subscribeActingManagerBoundaryChecks} from './actingManagerBoundary';
 
 type PageId = string;
-type ThemePreference = 'light' | 'dark' | 'system';
-type FontSizePreference = 'standard' | 'large' | 'xlarge';
-type DensityPreference = 'compact' | 'comfortable' | 'spacious';
-interface UiPreferences { theme: ThemePreference; fontSize: FontSizePreference; density: DensityPreference; columnGap: number; reduceMotion: boolean; highContrast: boolean; }
-
 interface NavigationItem {
   id: PageId;
   title: string;
@@ -56,17 +76,38 @@ const DOMAIN_PAGE_MODULES: Record<string, string[]> = {
 };
 const modulePermissions = (page: string) => (DOMAIN_PAGE_MODULES[page] ?? []).map((moduleId) => permissionFor(moduleId, 'view'));
 
+const PAGE_SEARCH_ALIASES: Record<string, string[]> = {
+  collaboration: ['همکاری', 'میز همکاری', 'پروژه', 'پروژه‌ها', 'کارهای من', 'وظایف تیم'],
+  personnel: ['پرستل', 'کارکنان', 'پرونده پرسنلی'],
+  hcm: ['منابع انسانی', 'امور کارکنان'],
+  procurement: ['تدارکات', 'خرید'],
+  treasury: ['خزانه داری', 'پرداخت'],
+  'my-account': ['پروفایل من', 'حساب من'],
+};
+
+const MODULE_SEARCH_ALIASES: Record<string, string[]> = {
+  'employee-advance': ['مساعده', 'مساعده پرسنلی', 'درخواست مساعده'],
+  'purchase-request': ['درخواست خرید', 'خرید کالا', 'خرید خدمات'],
+  'personnel-document': ['مدارک پرسنلی', 'اسناد پرسنل'],
+  leave: ['مرخصی', 'درخواست مرخصی'],
+  mission: ['ماموریت', 'مأموریت'],
+  'treasury-execution': ['صف پرداخت', 'اجرای پرداخت'],
+};
+
+const NON_TRACKED_PAGE_IDS = new Set(['dashboard', 'my-account', 'appearance', 'policy', 'audit', 'data', 'qa']);
+
 const NAVIGATION: NavigationItem[] = [
   {id: 'dashboard', title: 'نمای امروز', subtitle: 'وضعیت بنیاد محلی', icon: LayoutDashboard, anyPermissions: ['foundation.dashboard.view'], group: 'کار روزانه'},
   {id: 'organization', title: 'نمای سازمان', subtitle: 'ساختار شرکت در یک نگاه', icon: Network, anyPermissions: ['organization.overview.view'], group: 'سازمان'},
   {id: 'units', title: 'واحدهای سازمانی', subtitle: 'ساختار، والد و مسئول', icon: GitBranch, anyPermissions: ['organization.units.view'], group: 'سازمان'},
   {id: 'branches', title: 'شعبه', subtitle: 'شعبه‌های شرکت به‌صورت مستقل', icon: Building2, anyPermissions: ['organization.units.view'], group: 'سازمان'},
   {id: 'positions', title: 'سمت‌ها', subtitle: 'جایگاه‌های سازمانی', icon: BriefcaseBusiness, anyPermissions: ['organization.positions.view'], group: 'سازمان'},
-  {id: 'personnel', title: 'پرسنل', subtitle: 'پرونده شغلی، فروش و صف تغییرات', icon: ContactRound, anyPermissions: ['organization.personnel.view', 'organization.personnel.changes.review'], group: 'سازمان'},
+  {id: 'personnel', title: 'پرسنل', subtitle: 'پرونده شغلی، فروش و صف تغییرات', icon: ContactRound, anyPermissions: ['organization.personnel.view', 'organization.personnel.changes.review', 'organization.personnel.documents.queue.view'], group: 'سازمان'},
   {id: 'sales-structures', title: 'ساختار فروش', subtitle: 'شعب، سرپرستان کال‌سنتر و زنجیره فروش', icon: Headphones, anyPermissions: ['organization.personnel.view'], group: 'سازمان'},
   {id: 'users', title: 'کاربران', subtitle: 'سازمان · کاربران', icon: UsersRound, anyPermissions: ['foundation.users.view'], group: 'سازمان'},
   {id: 'roles', title: 'نقش‌ها و دسترسی‌ها', subtitle: 'مجوز و محدوده مؤثر', icon: KeyRound, anyPermissions: ['organization.roles.view'], group: 'سازمان'},
   {id: 'registrations', title: 'درخواست‌های ثبت‌نام', subtitle: 'بررسی، اتصال و فعال‌سازی', icon: UserCheck, anyPermissions: ['organization.registrations.view'], group: 'سازمان'},
+  {id: 'recruitment', title: 'جذب و شروع همکاری', subtitle: 'اعلام نیاز تا حساب و قرارداد', icon: UserPlus, anyPermissions: [permissionFor('recruitment-case','view'), permissionFor('recruitment-case','create')], group: 'عملیات سازمان'},
   {id: 'hcm', title: 'منابع انسانی', subtitle: 'قرارداد تا خروج و عملکرد', icon: ContactRound, anyPermissions: modulePermissions('hcm'), group: 'عملیات سازمان'},
   {id: 'customers', title: 'مشتریان', subtitle: 'فهرست و نمای ۳۶۰ مشتری', icon: UsersRound, anyPermissions: ['crm.customers.view'], group: 'مشتری و CRM'},
   {id: 'crm', title: 'CRM و سرنخ‌ها', subtitle: 'Lead، تماس، پیگیری و فرصت', icon: UserRound, anyPermissions: modulePermissions('crm'), group: 'مشتری و درآمد'},
@@ -84,12 +125,13 @@ const NAVIGATION: NavigationItem[] = [
   {id: 'support', title: 'پشتیبانی', subtitle: 'Case، SLA و ردیف‌های مالی', icon: ShieldCheck, anyPermissions: modulePermissions('support'), group: 'خدمات و همکاری'},
   {id: 'contracts', title: 'قراردادها', subtitle: 'نسخه، تعهد و تمدید', icon: FileJson, anyPermissions: modulePermissions('contracts'), group: 'خدمات و همکاری'},
   {id: 'assets', title: 'دارایی‌های ثابت', subtitle: 'ثبت، انتقال و نگهداری', icon: Building2, anyPermissions: modulePermissions('assets'), group: 'خدمات و همکاری'},
+  {id: 'collaboration', title: 'میز همکاری', subtitle: 'پروژه‌ها، کارهای من و پیگیری تیم', icon: FolderKanban, anyPermissions: [permissionFor('project','view'), permissionFor('task','view'), permissionFor('chat','view'), permissionFor('letter','view')], group: 'همکاری'},
   {id: 'tasks', title: 'وظایف', subtitle: 'تخصیص، تحویل و بازگشایی', icon: CheckCircle2, anyPermissions: modulePermissions('tasks'), group: 'همکاری'},
   {id: 'communications', title: 'گفت‌وگوها', subtitle: 'پیام با تاریخچه اصلاح', icon: ContactRound, anyPermissions: modulePermissions('communications'), group: 'همکاری'},
   {id: 'letters', title: 'نامه‌ها', subtitle: 'ثبت، ارجاع و مجوز ارسال', icon: ScrollText, anyPermissions: modulePermissions('letters'), group: 'همکاری'},
   {id: 'documents', title: 'اسناد و آرشیو', subtitle: 'هش، نسخه و سهمیه', icon: FileJson, anyPermissions: modulePermissions('documents'), group: 'همکاری'},
   {id: 'reports', title: 'گزارش‌ها و KPI', subtitle: 'صف‌ها و سلامت عملیات', icon: Activity, anyPermissions: ['foundation.reports.view'], group: 'کنترل و راهبری'},
-  {id: 'workflow-admin', title: 'مدیریت گردش‌کار', subtitle: 'صف، تخصیص و Policy محدود', icon: Workflow, anyPermissions: ['foundation.workflow.manage'], group: 'کنترل و راهبری'},
+  {id: 'workflow-admin', title: 'مدیریت گردش‌کار', subtitle: 'صف، تخصیص و سیاست تأیید محدود', icon: Workflow, anyPermissions: ['foundation.workflow.manage'], group: 'کنترل و راهبری'},
   {id: 'policy', title: 'آزمایش دسترسی', subtitle: 'مجوز، محدوده و گارد', icon: ShieldCheck, anyPermissions: ['foundation.policy.inspect'], group: 'مدیریت'},
   {id: 'audit', title: 'رویدادها و ممیزی', subtitle: 'ردپای همه اقدام‌ها', icon: ScrollText, anyPermissions: ['foundation.audit.view'], group: 'مدیریت'},
   {id: 'data', title: 'پشتیبان داده', subtitle: 'خروجی، بازیابی و بازنشانی', icon: Database, anyPermissions: ['foundation.data.export', 'foundation.data.manage'], group: 'مدیریت'},
@@ -103,25 +145,66 @@ const UI_PREFERENCES_KEY = 'tapra2_ui_preferences_v2';
 const LEGACY_UI_PREFERENCES_KEY = 'tapra2_ui_preferences_v1';
 const SIDEBAR_COLLAPSED_KEY = 'tapra2_sidebar_collapsed_v1';
 const SIDEBAR_GROUPS_KEY = 'tapra2_sidebar_groups_v1';
-const DEFAULT_PREFERENCES: UiPreferences = {theme: 'system', fontSize: 'large', density: 'comfortable', columnGap: 8, reduceMotion: false, highContrast: false};
+const safeLocalStorage = {
+  getItem(key: string): string | null { try { return window.localStorage.getItem(key); } catch { return null; } },
+  setItem(key: string, value: string): void { try { window.localStorage.setItem(key, value); } catch { /* Preferences remain usable for this session. */ } },
+};
 
 function loadPreferences(): UiPreferences {
   try {
-    const current = localStorage.getItem(UI_PREFERENCES_KEY);
-    const legacy = !current ? localStorage.getItem(LEGACY_UI_PREFERENCES_KEY) : null;
-    const stored = JSON.parse(current ?? legacy ?? '{}') as Partial<UiPreferences>;
-    return {...DEFAULT_PREFERENCES, ...stored, columnGap: legacy && stored.columnGap === 4 ? 8 : stored.columnGap ?? DEFAULT_PREFERENCES.columnGap};
+    const current = safeLocalStorage.getItem(UI_PREFERENCES_KEY);
+    const legacy = !current ? safeLocalStorage.getItem(LEGACY_UI_PREFERENCES_KEY) : null;
+    return normalizeUiPreferences(JSON.parse(current ?? legacy ?? '{}'), Boolean(legacy));
   }
   catch { return DEFAULT_PREFERENCES; }
 }
 
+interface WorkspaceTab {
+  id: string;
+  destinationId: string;
+  page: PageId;
+  url: string;
+  title: string;
+}
+
+function currentRouteText() { return `${window.location.pathname}${window.location.search}${window.location.hash}`; }
+function absoluteRouteUrl(route: string) { return new URL(route, window.location.origin).href; }
+function workspaceTabIdFromUrl(href: string) {
+  const url = new URL(href, window.location.origin);
+  const page = url.searchParams.get('page')?.trim() || 'dashboard';
+  const moduleId = url.searchParams.get('module')?.trim();
+  const categoryId = url.searchParams.get('category')?.trim();
+  if (moduleId) return `module:${moduleId}`;
+  if (page === 'personnel' && categoryId === 'changes') return 'view:personnel-changes';
+  if (page === 'personnel' && categoryId === 'incomplete') return 'view:personnel-incomplete';
+  if (categoryId) return `page:${page}:category:${categoryId}`;
+  return `page:${page}`;
+}
+
 export function LocalFoundationApp() {
   const [foundation, setFoundation] = useState<FoundationState | null>(null);
-  const [page, setPageState] = useState<PageId>(() => pageFromUrl(window.location.href));
+  const lastActingManagerTehranDateRef=useRef(todayIsoDate());
+  const actingManagerBoundaryInFlightRef=useRef<Promise<void>|null>(null);
+  const initialPage = pageFromUrl(window.location.href);
+  const initialWorkspaceUrl = currentRouteText();
+  const initialWorkspaceTabId = workspaceTabIdFromUrl(window.location.href);
+  const [page, setPageState] = useState<PageId>(initialPage);
+  const [workspaceTabs, setWorkspaceTabs] = useState<WorkspaceTab[]>([{
+    id: initialWorkspaceTabId,
+    destinationId: initialWorkspaceTabId,
+    page: initialPage,
+    url: initialWorkspaceUrl,
+    title: initialPage,
+  }]);
+  const [activeWorkspaceTabId, setActiveWorkspaceTabId] = useState(initialWorkspaceTabId);
   const setPage = useCallback((nextPage: PageId) => {
     const nextUrl = pageRouteUrl(window.location.href, nextPage);
-    if (`${window.location.pathname}${window.location.search}${window.location.hash}` !== nextUrl) window.history.pushState({page: nextPage}, '', nextUrl);
+    const nextId = `page:${nextPage}`;
+    if (currentRouteText() !== nextUrl) window.history.pushState({page: nextPage, workspaceTabId: nextId}, '', nextUrl);
+    setWorkspaceTabs([{id: nextId, destinationId: nextId, page: nextPage, url: nextUrl, title: nextPage}]);
+    setActiveWorkspaceTabId(nextId);
     setPageState(nextPage);
+    window.setTimeout(() => notifyWorkspaceTabActivated(nextId), 0);
   }, []);
   const [preferences, setPreferences] = useState<UiPreferences>(loadPreferences);
   const [accountOpen, setAccountOpen] = useState(false);
@@ -129,12 +212,13 @@ export function LocalFoundationApp() {
   const [loginOpen, setLoginOpen] = useState(false);
   const [logoutOpen, setLogoutOpen] = useState(false);
   const [registrationOpen, setRegistrationOpen] = useState(false);
+  const [recruitmentApplicationOpen, setRecruitmentApplicationOpen] = useState(false);
   const [editUser, setEditUser] = useState<LocalUser | 'new' | null>(null);
   const [mobileOpen, setMobileOpen] = useState(false);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === 'true');
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => safeLocalStorage.getItem(SIDEBAR_COLLAPSED_KEY) === 'true');
   const [expandedNavigationGroups, setExpandedNavigationGroups] = useState<Set<string>>(() => {
     try {
-      const stored = JSON.parse(localStorage.getItem(SIDEBAR_GROUPS_KEY) ?? '[]') as string[];
+      const stored = JSON.parse(safeLocalStorage.getItem(SIDEBAR_GROUPS_KEY) ?? '[]') as string[];
       return new Set(stored.length ? stored : ['کار روزانه']);
     } catch { return new Set(['کار روزانه']); }
   });
@@ -144,16 +228,252 @@ export function LocalFoundationApp() {
   const [resetOpen, setResetOpen] = useState(false);
   const [backupOpen, setBackupOpen] = useState(false);
   const [restoreInput, setRestoreInput] = useState<SnapshotManifest | EncryptedSnapshot | null>(null);
+  const [navigationUsageState, setNavigationUsageState] = useState<{ownerUserId: string | null; entries: NavigationUsageEntry[]}>({ownerUserId: null, entries: []});
+  const [navigationSearchActive, setNavigationSearchActive] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const sidebarRef = useRef<HTMLElement>(null);
+  const mainAreaRef = useRef<HTMLElement>(null);
+  const mobileMenuButtonRef = useRef<HTMLButtonElement>(null);
+  const mobileSidebarCloseRef = useRef<HTMLButtonElement>(null);
+  const [mobileSidebarMode, setMobileSidebarMode] = useState(() => window.matchMedia('(max-width: 920px)').matches);
+  const navigationIdentityId = foundation?.activeUser.id;
+  const navigationInQa = Boolean(foundation?.session.actingAdminUserId);
+  const navigationUsage = navigationIdentityId && !navigationInQa && navigationUsageState.ownerUserId === navigationIdentityId
+    ? navigationUsageState.entries
+    : [];
+
+  useEffect(() => {
+    if (!accountOpen && !notificationOpen) return;
+    const dismissFloatingPanels = (event: PointerEvent) => {
+      if (!(event.target instanceof Element)) return;
+      if (accountOpen && !event.target.closest('.account-menu, .account-trigger')) setAccountOpen(false);
+      if (notificationOpen && !event.target.closest('.notification-popover, .notification-trigger')) setNotificationOpen(false);
+    };
+    const dismissWithEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      setAccountOpen(false);
+      setNotificationOpen(false);
+    };
+    document.addEventListener('pointerdown', dismissFloatingPanels, true);
+    document.addEventListener('keydown', dismissWithEscape, true);
+    return () => {
+      document.removeEventListener('pointerdown', dismissFloatingPanels, true);
+      document.removeEventListener('keydown', dismissWithEscape, true);
+    };
+  }, [accountOpen, notificationOpen]);
+
+  const closeMobileSidebar = useCallback(() => {
+    setMobileOpen(false);
+    window.setTimeout(() => mobileMenuButtonRef.current?.focus(), 0);
+  }, []);
+
+  useEffect(()=>{
+    const check=createActingManagerBoundaryCheck({
+      lastTehranDateRef:lastActingManagerTehranDateRef,
+      inFlightRef:actingManagerBoundaryInFlightRef,
+      currentTehranDate:todayIsoDate,
+      reconcile:()=>service.reconcileActingManagerBoundaries(),
+      onState:(next)=>setFoundation(next),
+      onError:(cause)=>setError(messageOf(cause)),
+    });
+    return subscribeActingManagerBoundaryChecks({
+      windowTarget:window,
+      documentTarget:document,
+      documentIsVisible:()=>document.visibilityState==='visible',
+      check,
+      setInterval:(callback,delay)=>window.setInterval(callback,delay),
+      clearInterval:(timer)=>window.clearInterval(timer),
+    });
+  },[]);
 
   const visibleNavigation = useMemo(() => foundation
-    ? NAVIGATION.filter((item) => item.id === 'my-account' || item.anyPermissions.some((permission) => can(foundation.activeUser, permission)))
+    ? NAVIGATION.filter((item) => {
+      if (item.id === 'communications') return foundation.activeUser.status === 'active' && !foundation.session.actingAdminUserId && can(foundation.activeUser, permissionFor('chat','view'));
+      if (item.id === 'letters') return foundation.activeUser.status === 'active' && !foundation.session.actingAdminUserId && can(foundation.activeUser, permissionFor('letter','view'));
+      if (item.id === 'my-account' || item.anyPermissions.some((permission) => can(foundation.activeUser, permission))) return true;
+      if (item.id !== 'personnel' || !foundation.activeUser.personnelId) return false;
+      return foundation.personnel.some((person) => person.employmentStatus === 'active' && (person.managerPersonnelId === foundation.activeUser.personnelId || person.salesSupervisorPersonnelId === foundation.activeUser.personnelId));
+    })
     : [], [foundation]);
   const groupedNavigation = useMemo(() => {
     const groups = new Map<string, NavigationItem[]>();
     visibleNavigation.forEach((item) => groups.set(item.group, [...(groups.get(item.group) ?? []), item]));
     return Array.from(groups, ([group, items]) => ({group, items}));
   }, [visibleNavigation]);
+
+  const navigationDestinations = useMemo<NavigationSearchDestination[]>(() => {
+    if (!foundation) return [];
+    const visiblePageIds = new Set(visibleNavigation.map((item) => item.id));
+    const pages = visibleNavigation.map((item) => ({
+      id: `page:${item.id}`,
+      page: item.id,
+      title: item.title,
+      subtitle: item.subtitle,
+      group: item.group,
+      path: buildNavigationPath(item.group, item.title),
+      aliases: PAGE_SEARCH_ALIASES[item.id] ?? [],
+      icon: item.icon,
+      trackUsage: !NON_TRACKED_PAGE_IDS.has(item.id),
+    }));
+    const modules = Object.entries(DOMAIN_PAGE_MODULES).flatMap(([pageId, moduleIds]) => {
+      if (!visiblePageIds.has(pageId)) return [];
+      const parent = NAVIGATION.find((item) => item.id === pageId);
+      if (!parent) return [];
+      return ERP_MODULES
+        .filter((module) => moduleIds.includes(module.id) && can(foundation.activeUser, permissionFor(module.id, 'view')))
+        .map((module) => ({
+          id: `module:${module.id}`,
+          page: pageId,
+          moduleId: module.id,
+          title: module.title,
+          subtitle: module.description,
+          group: `${parent.title} · ${module.group}`,
+          path: buildNavigationPath(parent.group, parent.title, module.title),
+          aliases: [module.singular, ...(MODULE_SEARCH_ALIASES[module.id] ?? [])],
+          icon: parent.icon,
+          trackUsage: true,
+        }));
+    });
+    const personnelPage = NAVIGATION.find((item) => item.id === 'personnel');
+    const personnelViews: NavigationSearchDestination[] = personnelPage && visiblePageIds.has('personnel') ? [
+      ...(can(foundation.activeUser, 'organization.personnel.changes.review') ? [{
+        id: 'view:personnel-changes', page: 'personnel', categoryId: 'changes', title: 'صف تغییرات پرسنل',
+        subtitle: 'بررسی درخواست‌های تغییر اطلاعات پرسنلی', group: 'سازمان · پرسنل',
+        path: buildNavigationPath('سازمان', 'پرسنل', 'صف تغییرات پرسنل'),
+        aliases: ['بررسی تغییرات پرسنل'], icon: personnelPage.icon, trackUsage: true,
+      }] : []),
+      ...(foundation.activeUser.permissions.includes(PERSONNEL_DOCUMENT_PERMISSION_QUEUE) ? [{
+        id: 'view:personnel-incomplete', page: 'personnel', categoryId: 'incomplete', title: 'نواقص پرونده پرسنلی',
+        subtitle: 'افراد نیازمند تکمیل اطلاعات یا مدارک', group: 'سازمان · پرسنل',
+        path: buildNavigationPath('سازمان', 'پرسنل', 'نواقص پرونده پرسنلی'),
+        aliases: ['مدارک ناقص', 'اطلاعات ناقص پرسنل'], icon: personnelPage.icon, trackUsage: true,
+      }] : []),
+    ] : [];
+    return [...pages, ...modules, ...personnelViews];
+  }, [foundation, visibleNavigation]);
+
+  const resolvedPage = useMemo(() => {
+    if (!foundation) return page;
+    if (page === 'account-security' && !foundation.session.actingAdminUserId) return page;
+    if (visibleNavigation.some((item) => item.id === page)) return page;
+    return visibleNavigation.find((item) => item.id === 'dashboard')?.id
+      ?? visibleNavigation.find((item) => item.id === 'my-account')?.id
+      ?? 'my-account';
+  }, [foundation, page, visibleNavigation]);
+
+  const trackNavigationDestination = useCallback((destination: NavigationSearchDestination) => {
+    if (!foundation || foundation.session.actingAdminUserId || destination.trackUsage === false) return;
+    setNavigationUsageState((current) => {
+      const currentEntries = current.ownerUserId === foundation.activeUser.id ? current.entries : [];
+      const next = incrementNavigationUsage(currentEntries, destination.id);
+      saveNavigationUsage(foundation.activeUser.id, next, safeLocalStorage);
+      return {ownerUserId: foundation.activeUser.id, entries: next};
+    });
+  }, [foundation]);
+
+  const openNavigationDestination = useCallback((requested: NavigationSearchDestination, options?: {track?: boolean}) => {
+    const destination = navigationDestinations.find((item) => item.id === requested.id);
+    if (!destination) return;
+    const nextUrl = destinationRouteUrl(window.location.href, destination.page, destination.moduleId, destination.categoryId);
+    const existingTab = workspaceTabs.find((tab) => tab.id === destination.id);
+    const routeToOpen = existingTab?.url ?? nextUrl;
+    const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    if (currentUrl !== routeToOpen) {
+      window.history.pushState({page: destination.page, module: destination.moduleId, category: destination.categoryId, workspaceTabId: destination.id}, '', routeToOpen);
+    }
+    setWorkspaceTabs((current) => {
+      const nextTab: WorkspaceTab = {id: destination.id, destinationId: destination.id, page: destination.page, url: nextUrl, title: destination.title};
+      return current.some((tab) => tab.id === destination.id)
+        ? current
+        : [...current, nextTab];
+    });
+    setActiveWorkspaceTabId(destination.id);
+    setPageState(destination.page);
+    window.setTimeout(() => notifyWorkspaceTabActivated(destination.id), 0);
+    const shouldMoveFocusToPage = mobileSidebarMode && mobileOpen;
+    setMobileOpen(false);
+    setNavigationSearchActive(false);
+    if (options?.track !== false) trackNavigationDestination(destination);
+    if (shouldMoveFocusToPage) window.setTimeout(() => document.getElementById('main-page-heading')?.focus(), 0);
+  }, [mobileOpen, mobileSidebarMode, navigationDestinations, trackNavigationDestination, workspaceTabs]);
+
+  const navigateToPage = useCallback((nextPage: PageId) => {
+    const destination = navigationDestinations.find((item) => item.id === `page:${nextPage}`);
+    if (destination) openNavigationDestination(destination);
+    else setPage(nextPage);
+  }, [navigationDestinations, openNavigationDestination, setPage]);
+
+  const navigateToConversation = useCallback((chatId: string) => {
+    const destination = navigationDestinations.find((item) => item.id === 'page:communications');
+    if (!destination) { navigateToPage('communications'); return; }
+    openNavigationDestination(destination);
+    const url = new URL(destinationRouteUrl(window.location.href, 'communications'), window.location.origin);
+    url.searchParams.set('chat', chatId);
+    const nextUrl = `${url.pathname}${url.search}${url.hash}`;
+    window.history.replaceState({page:'communications',chatId,workspaceTabId:destination.id},'',nextUrl);
+    setWorkspaceTabs((current)=>current.map((tab)=>tab.id===destination.id?{...tab,url:nextUrl}:tab));
+  }, [navigateToPage, navigationDestinations, openNavigationDestination]);
+
+  const navigateToOperationalRecord = useCallback((nextPage: PageId, recordId: string, moduleId?: string) => {
+    const destination = navigationDestinations.find((item) => item.id === `page:${nextPage}`);
+    if (!destination) return;
+    openNavigationDestination(destination);
+    const url = new URL(destinationRouteUrl(window.location.href, nextPage), window.location.origin);
+    url.searchParams.set('record', recordId);
+    url.searchParams.set('recordOpen', Date.now().toString(36));
+    if (moduleId) url.searchParams.set('module', moduleId);
+    const nextUrl = `${url.pathname}${url.search}${url.hash}`;
+    window.history.replaceState({page:nextPage,recordId,workspaceTabId:destination.id},'',nextUrl);
+    setWorkspaceTabs((current)=>current.map((tab)=>tab.id===destination.id?{...tab,url:nextUrl}:tab));
+  },[navigationDestinations,openNavigationDestination]);
+
+  const navigateToCollaborationQueue = useCallback((queue: 'project'|'today'|'overdue'|'delegated' = 'project') => {
+    const destination = navigationDestinations.find((item) => item.id === 'page:collaboration');
+    if (!destination) { navigateToPage('collaboration'); return; }
+    openNavigationDestination(destination);
+    const url = new URL(destinationRouteUrl(window.location.href, 'collaboration'), window.location.origin);
+    if(queue==='project')url.searchParams.delete('queue');else url.searchParams.set('queue',queue);
+    const nextUrl=`${url.pathname}${url.search}${url.hash}`;
+    window.history.replaceState({page:'collaboration',queue,workspaceTabId:destination.id},'',nextUrl);
+    setWorkspaceTabs((current)=>current.map((tab)=>tab.id===destination.id?{...tab,url:nextUrl}:tab));
+  },[navigateToPage,navigationDestinations,openNavigationDestination]);
+
+  const activateWorkspaceTab = useCallback((tab: WorkspaceTab) => {
+    if (tab.id === activeWorkspaceTabId) return;
+    window.history.pushState({page: tab.page, workspaceTabId: tab.id}, '', tab.url);
+    setActiveWorkspaceTabId(tab.id);
+    setPageState(tab.page);
+    window.setTimeout(() => notifyWorkspaceTabActivated(tab.id), 0);
+    setAccountOpen(false);
+    setNotificationOpen(false);
+    window.setTimeout(() => document.getElementById('main-page-heading')?.focus(), 0);
+  }, [activeWorkspaceTabId]);
+
+  const closeWorkspaceTab = useCallback((tabId: string) => {
+    if (workspaceTabs.length <= 1 || !requestWorkspaceTabClose(tabId)) return;
+    const closingIndex = workspaceTabs.findIndex((tab) => tab.id === tabId);
+    const remaining = workspaceTabs.filter((tab) => tab.id !== tabId);
+    setWorkspaceTabs(remaining);
+    if (tabId !== activeWorkspaceTabId) return;
+    const next = remaining[Math.min(Math.max(closingIndex, 0), remaining.length - 1)];
+    setActiveWorkspaceTabId(next.id);
+    setPageState(next.page);
+    window.history.pushState({page: next.page, workspaceTabId: next.id}, '', next.url);
+    window.setTimeout(() => notifyWorkspaceTabActivated(next.id), 0);
+  }, [activeWorkspaceTabId, workspaceTabs]);
+
+  const updateWorkspaceTabUrl = useCallback((tabId: string, nextUrl: string) => {
+    setWorkspaceTabs((current) => {
+      const tab = current.find((item) => item.id === tabId);
+      return !tab || tab.url === nextUrl ? current : current.map((item) => item.id === tabId ? {...item, url: nextUrl} : item);
+    });
+    if (tabId === activeWorkspaceTabId && currentRouteText() !== nextUrl) window.history.replaceState({...window.history.state, workspaceTabId: tabId}, '', nextUrl);
+  }, [activeWorkspaceTabId]);
+
+  const trackModuleNavigation = useCallback((moduleId: string) => {
+    const destination = navigationDestinations.find((item) => item.id === `module:${moduleId}`);
+    if (destination) trackNavigationDestination(destination);
+  }, [navigationDestinations, trackNavigationDestination]);
 
   useEffect(() => {
     let active = true;
@@ -165,48 +485,156 @@ export function LocalFoundationApp() {
   }, []);
 
   useEffect(() => {
-    const restorePageFromUrl = () => setPageState(pageFromUrl(window.location.href));
+    const invalidateSession = () => {
+      setFoundation((current) => current ? {...current, session: {...current.session, stale: true}} : current);
+      setError('هویت فعال در تب دیگری تغییر کرده است. برای جلوگیری از ثبت با حساب اشتباه، این صفحه را تازه‌سازی کنید.');
+    };
+    window.addEventListener('shahrah-session-invalidated', invalidateSession);
+    return () => window.removeEventListener('shahrah-session-invalidated', invalidateSession);
+  }, []);
+
+  useEffect(() => {
+    const restorePageFromUrl = () => {
+      const restoredPage = pageFromUrl(window.location.href);
+      const restoredId = workspaceTabIdFromUrl(window.location.href);
+      const restoredUrl = currentRouteText();
+      setWorkspaceTabs((current) => current.some((tab) => tab.id === restoredId)
+        ? current.map((tab) => tab.id === restoredId ? {...tab, page: restoredPage, url: restoredUrl} : tab)
+        : [...current, {id: restoredId, destinationId: restoredId, page: restoredPage, url: restoredUrl, title: restoredPage}]);
+      setActiveWorkspaceTabId(restoredId);
+      setPageState(restoredPage);
+      window.setTimeout(() => notifyWorkspaceTabActivated(restoredId), 0);
+    };
     window.addEventListener('popstate', restorePageFromUrl);
     return () => window.removeEventListener('popstate', restorePageFromUrl);
   }, []);
+
+  useEffect(() => {
+    const handleRequestedTabActivation = (event: Event) => {
+      const tabId = (event as CustomEvent<{tabId?: string}>).detail?.tabId;
+      const tab = workspaceTabs.find((item) => item.id === tabId);
+      if (tab) activateWorkspaceTab(tab);
+    };
+    window.addEventListener('workspace:request-tab-activation', handleRequestedTabActivation);
+    return () => window.removeEventListener('workspace:request-tab-activation', handleRequestedTabActivation);
+  }, [activateWorkspaceTab, workspaceTabs]);
+
+  useEffect(() => {
+    const media = window.matchMedia('(max-width: 920px)');
+    const update = () => setMobileSidebarMode(media.matches);
+    update();
+    media.addEventListener('change', update);
+    return () => media.removeEventListener('change', update);
+  }, []);
+
+  useEffect(() => {
+    const sidebar = sidebarRef.current;
+    const main = mainAreaRef.current;
+    if (!sidebar || !main) return;
+    if (!mobileSidebarMode) {
+      sidebar.removeAttribute('inert');
+      main.removeAttribute('inert');
+      return;
+    }
+    if (!mobileOpen) {
+      sidebar.setAttribute('inert', '');
+      main.removeAttribute('inert');
+      return;
+    }
+    sidebar.removeAttribute('inert');
+    main.setAttribute('inert', '');
+    window.setTimeout(() => mobileSidebarCloseRef.current?.focus(), 0);
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeMobileSidebar();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const focusable = Array.from(sidebar.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'))
+        .filter((element) => element.getClientRects().length > 0 && window.getComputedStyle(element).visibility !== 'hidden');
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    };
+    document.addEventListener('keydown', handleKeyDown, true);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown, true);
+      main.removeAttribute('inert');
+    };
+  }, [closeMobileSidebar, mobileOpen, mobileSidebarMode]);
+
+  useEffect(() => {
+    if (!navigationIdentityId || navigationInQa) {
+      setNavigationUsageState({ownerUserId: null, entries: []});
+      setNavigationSearchActive(false);
+      return;
+    }
+    setNavigationUsageState({ownerUserId: navigationIdentityId, entries: loadNavigationUsage(navigationIdentityId, safeLocalStorage)});
+    setNavigationSearchActive(false);
+  }, [navigationIdentityId, navigationInQa]);
 
   useEffect(() => {
     const root = document.documentElement;
     const media = window.matchMedia('(prefers-color-scheme: dark)');
     const apply = () => {
       root.dataset.theme = preferences.theme === 'system' ? (media.matches ? 'dark' : 'light') : preferences.theme;
+      root.dataset.palette = preferences.palette;
       root.dataset.fontSize = preferences.fontSize;
       root.dataset.density = preferences.density;
       root.dataset.reduceMotion = String(preferences.reduceMotion);
       root.dataset.highContrast = String(preferences.highContrast);
       const columnGap = Math.min(24, Math.max(0, Number(preferences.columnGap) || 0));
       root.style.setProperty('--table-column-gap', `${columnGap}px`);
+      const themeColor = getComputedStyle(root).getPropertyValue('--browser-theme-color').trim();
+      document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')?.setAttribute('content', themeColor || '#111827');
     };
     apply();
     media.addEventListener('change', apply);
-    localStorage.setItem(UI_PREFERENCES_KEY, JSON.stringify(preferences));
+    safeLocalStorage.setItem(UI_PREFERENCES_KEY, JSON.stringify(preferences));
     return () => media.removeEventListener('change', apply);
   }, [preferences]);
 
   useEffect(() => {
-    if (!foundation) return;
-    if (page === 'account-security') return;
-    const isCurrentVisible = visibleNavigation.some((item) => item.id === page);
-    if (!isCurrentVisible) setPage('dashboard');
-  }, [foundation, page, visibleNavigation]);
+    if (!foundation || page === resolvedPage) return;
+    const nextUrl = pageRouteUrl(window.location.href, resolvedPage);
+    const nextId = `page:${resolvedPage}`;
+    window.history.replaceState({page: resolvedPage, workspaceTabId: nextId}, '', nextUrl);
+    setWorkspaceTabs((current) => {
+      const replacement = {id: nextId, destinationId: nextId, page: resolvedPage, url: nextUrl, title: NAVIGATION.find((item) => item.id === resolvedPage)?.title ?? resolvedPage};
+      return current
+        .filter((tab) => tab.id !== nextId || tab.id === activeWorkspaceTabId)
+        .map((tab) => tab.id === activeWorkspaceTabId ? replacement : tab);
+    });
+    setActiveWorkspaceTabId(nextId);
+    setPageState(resolvedPage);
+    window.setTimeout(() => notifyWorkspaceTabActivated(nextId), 0);
+  }, [activeWorkspaceTabId, foundation, page, resolvedPage]);
 
   useEffect(() => {
-    const activeGroup = visibleNavigation.find((item) => item.id === page)?.group;
+    if (!navigationDestinations.length) return;
+    setWorkspaceTabs((current) => current.map((tab) => {
+      const destination = navigationDestinations.find((item) => item.id === tab.destinationId);
+      const fallback = NAVIGATION.find((item) => item.id === tab.page)?.title;
+      const title = destination?.title ?? fallback ?? tab.title;
+      return title === tab.title ? tab : {...tab, title};
+    }));
+  }, [navigationDestinations]);
+
+  useEffect(() => {
+    const activeGroup = visibleNavigation.find((item) => item.id === resolvedPage)?.group;
     if (!activeGroup) return;
     setExpandedNavigationGroups((current) => current.has(activeGroup) ? current : new Set(current).add(activeGroup));
-  }, [page, visibleNavigation]);
+  }, [resolvedPage, visibleNavigation]);
 
   useEffect(() => {
-    localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(sidebarCollapsed));
+    safeLocalStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(sidebarCollapsed));
   }, [sidebarCollapsed]);
 
   useEffect(() => {
-    localStorage.setItem(SIDEBAR_GROUPS_KEY, JSON.stringify(Array.from(expandedNavigationGroups)));
+    safeLocalStorage.setItem(SIDEBAR_GROUPS_KEY, JSON.stringify(Array.from(expandedNavigationGroups)));
   }, [expandedNavigationGroups]);
 
   function toggleNavigationGroup(group: string) {
@@ -226,24 +654,27 @@ export function LocalFoundationApp() {
   async function run(label: string, work: () => Promise<FoundationState>, success: string) {
     setBusy(label);
     setError(null);
+    setToast(null);
     try {
       const next = await work();
       setFoundation(next);
-      setToast(success);
+      setToast(success || null);
+      return true;
     } catch (cause) {
       setError(messageOf(cause));
+      return false;
     } finally {
       setBusy(null);
     }
   }
 
   async function loginAsUser(user: LocalUser) {
-    await run('qa-login', () => service.loginAsUser(user.id), `اکنون محیط را با دسترسی واقعی «${user.name}» می‌بینید.`);
+    if (!await run('qa-login', () => service.loginAsUser(user.id), `اکنون محیط را با دسترسی واقعی «${user.name}» می‌بینید.`)) return;
     setEditUser(null); setPage('dashboard'); setMobileOpen(false);
   }
 
   async function endQaSession() {
-    await run('qa-return', () => service.endQaSession(), 'به حساب ادمین بازگشتید.');
+    if (!await run('qa-return', () => service.endQaSession(), 'به حساب ادمین بازگشتید.')) return;
     setAccountOpen(false); setNotificationOpen(false); setPage('users');
   }
 
@@ -288,7 +719,7 @@ export function LocalFoundationApp() {
     setError(null);
     try {
       const snapshot = await service.exportSnapshot(password);
-      downloadJson(snapshot, password ? 'tapra2-backup-encrypted.json' : 'tapra2-backup.json');
+      downloadJson(snapshot, password ? 'shahrah-backup-encrypted.json' : 'shahrah-backup.json');
       setFoundation(await service.loadState());
       setToast(password ? 'پشتیبان رمزگذاری‌شده آماده شد.' : 'فایل پشتیبان آماده شد.');
       setBackupOpen(false);
@@ -314,8 +745,12 @@ export function LocalFoundationApp() {
   async function openNotification(notification: UserNotification) {
     setNotificationOpen(false);
     if (!notification.readAt) await run('notification-read', () => service.markNotificationRead(notification.id), 'اعلان خوانده شد.');
-    if (notification.relatedModuleId === 'treasury-execution') setPage('treasury');
-    else if (notification.relatedModuleId === 'purchase-request') setPage('procurement');
+    const destination = ['chat','message'].includes(notification.relatedModuleId ?? '')
+      ? navigationDestinations.find((item) => item.id === 'page:communications')
+      : notification.relatedModuleId === 'letter'
+        ? navigationDestinations.find((item) => item.id === 'page:letters')
+      : navigationDestinations.find((item) => item.moduleId === notification.relatedModuleId);
+    if (destination) openNavigationDestination(destination, {track: false});
   }
 
   if (busy === 'initializing') return <LoadingScreen />;
@@ -330,48 +765,70 @@ export function LocalFoundationApp() {
       onClearError={() => setError(null)}
       onClose={signedOut ? undefined : () => setLoginOpen(false)}
       onRegister={() => setRegistrationOpen(true)}
+      onApply={() => setRecruitmentApplicationOpen(true)}
       onSubmit={signIn}
     />
     {registrationOpen && <RegistrationDialog service={service} onClose={() => setRegistrationOpen(false)} onDone={(state) => {setFoundation(state);setRegistrationOpen(false);setToast('درخواست ثبت‌نام با کد پیگیری ثبت شد.');}} />}
+    {recruitmentApplicationOpen&&<RecruitmentCandidateProfileDialog state={foundation} service={service} mode="public" onClose={()=>setRecruitmentApplicationOpen(false)} onSubmitted={(result)=>{setRecruitmentApplicationOpen(false);setToast(`رزومه با کد پیگیری ${result.trackingCode} ثبت شد.`);}}/>}
     {busy && <div className="busy-indicator"><span /><b>در حال بررسی امن اطلاعات…</b></div>}
-    {toast && <div className="toast"><BadgeCheck size={20} /><span>{toast}</span></div>}
+    {toast && <div className="toast" role="status" aria-live="polite"><BadgeCheck size={20} /><span>{toast}</span></div>}
   </>;
 
   const user = foundation.activeUser;
-  const currentNavigation = NAVIGATION.find((item) => item.id === page) ?? NAVIGATION[0];
-  const currentPageTitle = page === 'account-security' ? 'حساب و امنیت' : currentNavigation.title;
+  const currentNavigation = NAVIGATION.find((item) => item.id === resolvedPage) ?? NAVIGATION[0];
+  const activeWorkspaceTab = workspaceTabs.find((tab) => tab.id === activeWorkspaceTabId);
+  const currentPageTitle = resolvedPage === 'account-security' ? 'حساب و امنیت' : activeWorkspaceTab?.title || currentNavigation.title;
   const activePersonnel = foundation.personnel.find((person) => person.id === user.personnelId || person.linkedUserId === user.id);
-  const profileIncomplete = !isProfileComplete(activePersonnel);
+  const profileIncomplete = !personnelCompletionSummary(activePersonnel, foundation.operationalRecords).complete;
+  const profileCompletionDeferred = Boolean(foundation.session.profileCompletionDeferredUntil && new Date(foundation.session.profileCompletionDeferredUntil).getTime() > Date.now());
 
-  if (profileIncomplete) return <ProfileCompletionGate state={foundation} busy={busy === 'profile-completion'} externalError={error} onSubmit={(input: ProfileCompletionInput) => run('profile-completion', () => service.completeOwnPersonnelProfile(input), 'اطلاعات الزامی پرونده تکمیل شد. اکنون می‌توانید از سامانه استفاده کنید.')} onSignOut={() => void signOut()} onEndQa={foundation.session.actingAdminUserId ? () => void endQaSession() : undefined}/>;
+  if (profileIncomplete && !profileCompletionDeferred && !foundation.session.actingAdminUserId) return <ProfileCompletionGate state={foundation} service={service} execute={run} busy={Boolean(busy)} externalError={error} externalStatus={toast} onSubmit={(input: ProfileCompletionInput) => run('profile-completion', () => service.completeOwnPersonnelProfile(input), 'اطلاعات و مدارک الزامی پرونده تکمیل شد. اکنون می‌توانید از سامانه استفاده کنید.')} onDefer={() => run('profile-defer', () => service.deferOwnPersonnelProfileCompletion(), 'یادآوری تکمیل پرونده برای هفت روز به تعویق افتاد.')} onSignOut={() => void signOut()} onEndQa={foundation.session.actingAdminUserId ? () => void endQaSession() : undefined}/>;
 
   return (
     <div className={`app-shell ${sidebarCollapsed ? 'app-shell--sidebar-collapsed' : ''}`} dir="rtl">
-      <aside className={`sidebar ${sidebarCollapsed ? 'sidebar--collapsed' : ''} ${mobileOpen ? 'sidebar--open' : ''}`}>
+      <aside ref={sidebarRef} id="main-sidebar" role={mobileSidebarMode && mobileOpen ? 'dialog' : undefined} aria-modal={mobileSidebarMode && mobileOpen ? true : undefined} aria-hidden={mobileSidebarMode && !mobileOpen ? true : undefined} inert={mobileSidebarMode && !mobileOpen ? true : undefined} aria-label={`منوی اصلی ${PRODUCT_NAME}`} className={`sidebar ${sidebarCollapsed ? 'sidebar--collapsed' : ''} ${mobileOpen ? 'sidebar--open' : ''}`}>
         <div className="brand-lockup">
-          <div className="brand-mark"><Sparkles size={21} /></div>
-          <div><strong>تپرا</strong><span>بنیاد محلی محصول</span></div>
+          <BrandMark variant={sidebarCollapsed && !mobileSidebarMode ? 'mark' : 'lockup'} tone="inverse" />
           <button
             className="icon-button sidebar-collapse-toggle"
-            onClick={() => setSidebarCollapsed((value) => !value)}
+            onClick={() => {setNavigationSearchActive(false);setSidebarCollapsed((value) => !value);}}
             title={sidebarCollapsed ? 'باز کردن منوی اصلی' : 'جمع کردن منوی اصلی'}
             aria-label={sidebarCollapsed ? 'باز کردن منوی اصلی' : 'جمع کردن منوی اصلی'}
             aria-expanded={!sidebarCollapsed}
           >
             {sidebarCollapsed ? <PanelRightOpen size={19} /> : <PanelRightClose size={19} />}
           </button>
-          <button className="icon-button sidebar-close" onClick={() => setMobileOpen(false)} aria-label="بستن منو"><X size={20} /></button>
+          <button ref={mobileSidebarCloseRef} className="icon-button sidebar-close" onClick={closeMobileSidebar} aria-label="بستن منو"><X size={20} /></button>
         </div>
 
         <div className="local-pill"><span className="pulse-dot" /><span>ERP محلی آماده آزمون</span><small>Master V1 · IndexedDB</small></div>
 
+        {(!sidebarCollapsed || mobileSidebarMode) && <NavigationSearch
+          key={`${user.id}:${foundation.session.actingAdminUserId ?? 'direct'}`}
+          destinations={navigationDestinations}
+          onSelect={openNavigationDestination}
+          onQueryStateChange={setNavigationSearchActive}
+        />}
+
         <nav className="main-navigation" aria-label="منوی اصلی">
-          {sidebarCollapsed ? visibleNavigation.map((item) => {
+          {sidebarCollapsed && !mobileSidebarMode ? <>
+            <button
+              type="button"
+              className="nav-item nav-item--icon-only sidebar-search-toggle"
+              title="جست‌وجوی منو و کارها"
+              aria-label="جست‌وجوی منو و کارها"
+              onClick={() => {
+                setSidebarCollapsed(false);
+                window.setTimeout(() => document.getElementById('sidebar-navigation-search')?.focus(), 0);
+              }}
+            ><Search size={21}/></button>
+            {visibleNavigation.map((item) => {
             const Icon = item.icon;
-            return <button key={item.id} title={`${item.title} — ${item.group}`} aria-label={item.title} className={`nav-item nav-item--icon-only ${page === item.id ? 'nav-item--active' : ''}`} onClick={() => { setPage(item.id); setMobileOpen(false); }}><Icon size={21} /></button>;
-          }) : groupedNavigation.map(({group, items}) => {
+            const destination = navigationDestinations.find((entry) => entry.id === `page:${item.id}`);
+            return <button key={item.id} title={`${item.title} — ${item.group}`} aria-label={item.title} aria-current={resolvedPage === item.id ? 'page' : undefined} className={`nav-item nav-item--icon-only ${resolvedPage === item.id ? 'nav-item--active' : ''}`} onClick={() => { if (destination) openNavigationDestination(destination); }}><Icon size={21} /></button>;
+          })}</> : !navigationSearchActive && groupedNavigation.map(({group, items}) => {
             const isExpanded = expandedNavigationGroups.has(group);
-            const hasActivePage = items.some((item) => item.id === page);
+            const hasActivePage = items.some((item) => item.id === resolvedPage);
             return <section className={`nav-group ${hasActivePage ? 'nav-group--active' : ''}`} key={group}>
               <button className="nav-group-trigger" onClick={() => toggleNavigationGroup(group)} aria-expanded={isExpanded} aria-controls={`nav-group-${items[0].id}`}>
                 <span>{group}</span>
@@ -381,10 +838,11 @@ export function LocalFoundationApp() {
               {isExpanded && <div className="nav-group-items" id={`nav-group-${items[0].id}`}>
                 {items.map((item) => {
                   const Icon = item.icon;
-                  return <button key={item.id} className={`nav-item ${page === item.id ? 'nav-item--active' : ''}`} onClick={() => { setPage(item.id); setMobileOpen(false); }}>
+                  const destination = navigationDestinations.find((entry) => entry.id === `page:${item.id}`);
+                  return <button key={item.id} aria-current={resolvedPage === item.id ? 'page' : undefined} className={`nav-item ${resolvedPage === item.id ? 'nav-item--active' : ''}`} onClick={() => { if (destination) openNavigationDestination(destination); }}>
                     <Icon size={20} />
                     <span><strong>{item.title}</strong><small>{item.subtitle}</small></span>
-                    {page === item.id && <ArrowLeft size={16} />}
+                    {resolvedPage === item.id && <ArrowLeft size={16} />}
                   </button>;
                 })}
               </div>}
@@ -398,13 +856,13 @@ export function LocalFoundationApp() {
         </div>
       </aside>
 
-      {mobileOpen && <button className="sidebar-scrim" onClick={() => setMobileOpen(false)} aria-label="بستن منو" />}
+      {mobileOpen && <button className="sidebar-scrim" onClick={closeMobileSidebar} aria-label="بستن منو" />}
 
-      <main className="main-area">
+      <main ref={mainAreaRef} className="main-area">
         <header className="topbar">
           <div className="topbar-title">
-            <button className="icon-button mobile-menu" onClick={() => {setSidebarCollapsed(false);setMobileOpen(true);}} aria-label="بازکردن منو"><Menu size={21} /></button>
-            <div><span>تپرا / {currentPageTitle}</span><h1>{currentPageTitle}</h1></div>
+            <button ref={mobileMenuButtonRef} className="icon-button mobile-menu" onClick={() => setMobileOpen(true)} aria-label="بازکردن منو" aria-expanded={mobileOpen} aria-controls="main-sidebar"><Menu size={21} /></button>
+            <div><span>{PRODUCT_NAME} / {currentPageTitle}</span><h1 id="main-page-heading" tabIndex={-1}>{currentPageTitle}</h1></div>
           </div>
           <div className="topbar-actions">
             <NotificationCenter notifications={foundation.notifications} open={notificationOpen} onToggle={() => {setNotificationOpen((value) => !value);setAccountOpen(false);}} onClose={() => setNotificationOpen(false)} onOpen={(notification) => {void openNotification(notification);}} onReadAll={() => {void run('notifications-read-all', () => service.markAllNotificationsRead(), 'همه اعلان‌ها خوانده شدند.');}} />
@@ -413,35 +871,67 @@ export function LocalFoundationApp() {
               <span><strong>{user.name}</strong><small>{user.roleTitle}</small></span>
               <ChevronDown size={17} />
             </button>
-            {accountOpen && <AccountMenu user={user} inQaSession={Boolean(foundation.session.actingAdminUserId)} onMyAccount={() => {setPage('my-account');setAccountOpen(false);}} onAccountSecurity={() => {setPage('account-security');setAccountOpen(false);}} onAppearance={() => { setPage('appearance'); setAccountOpen(false); }} onSwitchAccount={() => {setAccountOpen(false); setLoginOpen(true);}} onEndQa={endQaSession} onSignOut={() => {setAccountOpen(false);setLogoutOpen(true);}} onClose={() => setAccountOpen(false)} />}
+            {accountOpen && <AccountMenu user={user} inQaSession={Boolean(foundation.session.actingAdminUserId)} onMyAccount={() => {navigateToPage('my-account');setAccountOpen(false);}} onAccountSecurity={() => {navigateToPage('account-security');setAccountOpen(false);}} onAppearance={() => { navigateToPage('appearance'); setAccountOpen(false); }} onSwitchAccount={() => {setAccountOpen(false); setLoginOpen(true);}} onEndQa={endQaSession} onSignOut={() => {setAccountOpen(false);setLogoutOpen(true);}} onClose={() => setAccountOpen(false)} />}
           </div>
         </header>
 
-        {foundation.session.actingAdminUserId && <div className="access-view-banner"><Eye size={19} /><span>در حال مشاهده با دسترسی: <strong>{foundation.activeUser.name}</strong></span><button onClick={endQaSession}>بازگشت به دسترسی ادمین <ArrowLeft size={16} /></button></div>}
+        <WorkspaceTabStrip
+          tabs={workspaceTabs}
+          activeId={activeWorkspaceTabId}
+          destinations={navigationDestinations}
+          onActivate={activateWorkspaceTab}
+          onClose={closeWorkspaceTab}
+        />
+
+        {foundation.session.actingAdminUserId && <div className="access-view-banner"><Eye size={19} /><span>در حال مشاهده با دسترسی: <strong>{userDisplayLabel(foundation.activeUser,foundation)}</strong></span><button onClick={endQaSession}>بازگشت به دسترسی ادمین <ArrowLeft size={16} /></button></div>}
+        {foundation.session.stale && <div className="access-view-banner" role="alert"><CircleAlert size={19}/><span><strong>نشست این تب قدیمی شده است.</strong> هویت فعال در تب دیگری تغییر کرده؛ پیش از هر اقدام صفحه را تازه‌سازی کنید.</span><button type="button" onClick={() => window.location.reload()}>تازه‌سازی صفحه <RotateCcw size={16}/></button></div>}
 
         <div className="page-frame">
-          {error && <div className="notice notice--danger"><CircleAlert size={19} /><span>{error}</span><button onClick={() => setError(null)}>بستن</button></div>}
-          {page === 'dashboard' && <Dashboard state={foundation} navigate={setPage} />}
-          {page === 'organization' && <OrganizationOverviewPage state={foundation} />}
-          {page === 'units' && <UnitsPage state={foundation} service={service} execute={run} />}
-          {page === 'branches' && <BranchesPage state={foundation} service={service} execute={run} />}
-          {page === 'positions' && <PositionsPage state={foundation} service={service} execute={run} />}
-          {page === 'personnel' && <PersonnelPage state={foundation} service={service} execute={run} />}
-          {page === 'sales-structures' && <SalesStructuresPage state={foundation} service={service} execute={run} />}
-          {page === 'users' && <UsersPage state={foundation} onEdit={setEditUser} onLogin={loginAsUser} onStatus={(target, status) => run('user-status', () => service.setUserStatus(target.id, status), `وضعیت «${target.name}» به‌روزرسانی شد.`)} />}
-          {page === 'roles' && <RolesPage state={foundation} service={service} execute={run} />}
-          {page === 'registrations' && <RegistrationPage state={foundation} service={service} execute={run} />}
-          {page === 'customers' && <CustomersPage state={foundation} service={service} execute={run} />}
-          {DOMAIN_PAGE_MODULES[page] && <ErpWorkspacePage key={page} state={foundation} moduleIds={DOMAIN_PAGE_MODULES[page]} service={service} execute={run} />}
-          {page === 'reports' && <ReportsPage state={foundation} />}
-          {page === 'workflow-admin' && <WorkflowAdminPage state={foundation} execute={run} />}
-          {page === 'my-account' && <MyAccountPage state={foundation} service={service} execute={run} />}
-          {page === 'account-security' && <AccountSecurityPage user={user} busy={busy === 'own-credentials'} onSubmit={(input) => run('own-credentials', () => service.changeOwnCredentials(input), 'نام کاربری و تنظیمات امنیتی حساب ذخیره شد.')} />}
-          {page === 'appearance' && <AppearancePage preferences={preferences} onChange={setPreferences} />}
-          {page === 'policy' && <PolicyLab state={foundation} onState={setFoundation} />}
-          {page === 'audit' && <AuditPage state={foundation} />}
-          {page === 'data' && (
-            <DataPage
+          {error && <div className="notice notice--danger global-operation-error" role="alert" aria-live="assertive"><CircleAlert size={19} /><span>{error}</span><button type="button" aria-label="بستن پیام خطا" onClick={() => setError(null)}>بستن</button></div>}
+          {workspaceTabs.map((tab) => <section
+            key={tab.id}
+            className="workspace-page-panel"
+            data-workspace-page-id={tab.id}
+            hidden={tab.id !== activeWorkspaceTabId}
+            aria-hidden={tab.id !== activeWorkspaceTabId}
+          >
+            {tab.page === 'dashboard' && <Dashboard state={foundation} navigate={navigateToPage} onOpenCollaborationQueue={navigateToCollaborationQueue} destinations={navigationDestinations} usage={navigationUsage} onDestination={openNavigationDestination} />}
+            {tab.page === 'organization' && <OrganizationOverviewPage state={foundation} onNavigate={navigateToPage} />}
+            {tab.page === 'units' && <UnitsPage state={foundation} service={service} execute={run} />}
+            {tab.page === 'branches' && <BranchesPage state={foundation} service={service} execute={run} />}
+            {tab.page === 'positions' && <PositionsPage state={foundation} service={service} execute={run} />}
+            {tab.page === 'personnel' && <PersonnelPage state={foundation} service={service} execute={run} routeUrl={absoluteRouteUrl(tab.url)} onRouteChange={(nextUrl) => updateWorkspaceTabUrl(tab.id, nextUrl)} />}
+            {tab.page === 'sales-structures' && <SalesStructuresPage state={foundation} service={service} execute={run} />}
+            {tab.page === 'users' && <UsersPage state={foundation} onEdit={setEditUser} onLogin={loginAsUser} onStatus={(target, status) => run('user-status', () => service.setUserStatus(target.id, userConcurrencyToken(target), status), `وضعیت «${target.name}» به‌روزرسانی شد.`)} />}
+            {tab.page === 'roles' && <RolesPage state={foundation} service={service} execute={run} />}
+            {tab.page === 'registrations' && <RegistrationPage state={foundation} service={service} execute={run} />}
+            {tab.page === 'recruitment' && <RecruitmentPage state={foundation} service={service} execute={run} />}
+            {tab.page === 'customers' && <CustomersPage state={foundation} service={service} execute={run} />}
+            {tab.page === 'collaboration' && <CollaborationHubPage state={foundation} service={service} execute={run} initialQueue={(new URL(tab.url,window.location.origin).searchParams.get('queue') as 'project'|'today'|'overdue'|'delegated'|null)??'project'} onOpenConversations={() => navigateToPage('communications')} onOpenConversation={navigateToConversation} onOpenLetters={(recordId) => recordId?navigateToOperationalRecord('letters',recordId):navigateToPage('letters')} onOpenDocuments={(recordId) => recordId?navigateToOperationalRecord('documents',recordId,'document'):navigateToPage('documents')} />}
+            {tab.page === 'communications' && <CommunicationsPage state={foundation} service={service} execute={run} initialConversationId={new URL(absoluteRouteUrl(tab.url)).searchParams.get('chat') ?? undefined} />}
+            {tab.page === 'letters' && <LettersPage state={foundation} service={service} execute={run} initialRecordId={new URL(absoluteRouteUrl(tab.url)).searchParams.get('record')??undefined} initialRecordRequestKey={new URL(absoluteRouteUrl(tab.url)).searchParams.get('recordOpen')??undefined} />}
+            {DOMAIN_PAGE_MODULES[tab.page] && tab.page !== 'communications' && tab.page !== 'letters' && <ErpWorkspacePage
+              state={foundation}
+              moduleIds={DOMAIN_PAGE_MODULES[tab.page]}
+              service={service}
+              execute={run}
+              routeUrl={absoluteRouteUrl(tab.url)}
+              initialRecordId={new URL(absoluteRouteUrl(tab.url)).searchParams.get('record')??undefined}
+              onRouteChange={(nextUrl) => updateWorkspaceTabUrl(tab.id, nextUrl)}
+              onOpenModule={(moduleId) => {
+                const destination = navigationDestinations.find((item) => item.moduleId === moduleId);
+                if (destination) openNavigationDestination(destination);
+              }}
+              onNavigateModule={trackModuleNavigation}
+            />}
+            {tab.page === 'reports' && <ReportsPage state={foundation} />}
+            {tab.page === 'workflow-admin' && <WorkflowAdminPage state={foundation} execute={run} service={service} />}
+            {tab.page === 'my-account' && <MyAccountPage state={foundation} service={service} execute={run} />}
+            {tab.page === 'account-security' && <AccountSecurityPage user={user} busy={busy === 'own-credentials' || busy === 'secondary-password'} onSubmit={(input) => run('own-credentials', () => service.changeOwnCredentials(userConcurrencyToken(user), input), 'نام کاربری و تنظیمات امنیتی حساب ذخیره شد.')} onRequestSecondaryOtp={() => service.requestOwnSecondaryPasswordOtp()} onSecondarySubmit={(input) => run('secondary-password', () => service.setOwnSecondaryPassword(userConcurrencyToken(user), input), 'رمز دوم ثابت با موفقیت ذخیره شد.')} />}
+            {tab.page === 'appearance' && <AppearancePage preferences={preferences} onChange={setPreferences} />}
+            {tab.page === 'policy' && <PolicyLab state={foundation} onState={setFoundation} />}
+            {tab.page === 'audit' && <AuditPage state={foundation} />}
+            {tab.page === 'data' && <DataPage
               state={foundation}
               onExport={() => exportBackup()}
               onEncrypted={() => setBackupOpen(true)}
@@ -451,37 +941,84 @@ export function LocalFoundationApp() {
               onResetQa={() => run('qa-reset', () => service.resetLargeQaDataset(), 'داده آزمون حجیم حذف شد.')}
               onRebuild={() => run('projection-rebuild', () => service.rebuildProjections(), 'Projectionها بازسازی شدند.')}
               onRunQa={() => run('qa-scenarios', () => service.runQaScenarios(), 'سناریوهای یکپارچگی اجرا و در Audit ثبت شدند.')}
-            />
-          )}
-          {page === 'qa' && <QaGuide state={foundation} navigate={setPage} />}
+            />}
+            {tab.page === 'qa' && <QaGuide state={foundation} navigate={navigateToPage} />}
+          </section>)}
         </div>
       </main>
 
       <input ref={fileInputRef} hidden type="file" accept="application/json,.json" onChange={chooseRestore} />
 
-      {editUser && <UserDialog user={editUser === 'new' ? undefined : editUser} state={foundation} onClose={() => setEditUser(null)} onSave={(input) => run('user-save', () => editUser === 'new' ? service.createUser(input) : service.updateUser(editUser.id, input), editUser === 'new' ? 'کاربر جدید ایجاد شد.' : 'اطلاعات کاربر ذخیره شد.').then(() => setEditUser(null))} onPassword={editUser === 'new' ? undefined : (password) => run('user-password', () => service.setUserPassword(editUser.id, password), 'رمز عبور کاربر با موفقیت تنظیم شد.')} onLogin={editUser === 'new' ? undefined : () => loginAsUser(editUser)} />}
+      {editUser && <UserDialog user={editUser === 'new' ? undefined : editUser} state={foundation} onClose={() => setEditUser(null)} onSave={(input) => run('user-save', () => editUser === 'new' ? service.createUser(input) : service.updateUser(editUser.id, userConcurrencyToken(editUser), input), editUser === 'new' ? 'کاربر جدید ایجاد شد.' : 'اطلاعات کاربر ذخیره شد.').then((succeeded) => {if (succeeded) setEditUser(null);})} onPassword={editUser === 'new' ? undefined : (password) => run('user-password', () => service.setUserPassword(editUser.id, userConcurrencyToken(editUser), password), 'رمز عبور کاربر با موفقیت تنظیم شد.')} onLogin={editUser === 'new' ? undefined : () => loginAsUser(editUser)} />}
       {registrationOpen && <RegistrationDialog service={service} onClose={() => setRegistrationOpen(false)} onDone={(state) => {setFoundation(state);setRegistrationOpen(false);setToast('درخواست ثبت‌نام با کد پیگیری ثبت شد.');}} />}
       {logoutOpen && <ConfirmLogoutDialog busy={busy === 'sign-out'} user={foundation.activeUser} onClose={() => setLogoutOpen(false)} onConfirm={signOut} />}
-      {resetOpen && <ResetDialog busy={busy === 'reset'} onClose={() => setResetOpen(false)} onConfirm={() => run('reset', () => service.reset(), 'داده‌ها به سناریوی اولیه بازگشتند.').then(() => setResetOpen(false))} />}
-      {backupOpen && <PasswordDialog title="پشتیبان رمزگذاری‌شده" description="یک رمز حداقل ۸ نویسه‌ای انتخاب کنید. این رمز در تپرا ذخیره نمی‌شود." actionLabel="ساخت پشتیبان" busy={busy === 'backup'} onClose={() => setBackupOpen(false)} onSubmit={exportBackup} />}
-      {restoreInput && <RestoreDialog input={restoreInput} busy={busy === 'restore'} onClose={() => setRestoreInput(null)} onSubmit={(password) => run('restore', () => service.importSnapshot(restoreInput, password), 'پشتیبان با موفقیت بازیابی شد.').then(() => setRestoreInput(null))} />}
+      {resetOpen && <ResetDialog busy={busy === 'reset'} onClose={() => setResetOpen(false)} onConfirm={() => run('reset', () => service.reset(), 'داده‌ها به سناریوی اولیه بازگشتند.').then((succeeded) => {if (succeeded) setResetOpen(false);})} />}
+      {backupOpen && <PasswordDialog title="پشتیبان رمزگذاری‌شده" description={`یک رمز حداقل ۸ نویسه‌ای انتخاب کنید. این رمز در ${PRODUCT_NAME} ذخیره نمی‌شود.`} actionLabel="ساخت پشتیبان" busy={busy === 'backup'} onClose={() => setBackupOpen(false)} onSubmit={exportBackup} />}
+      {restoreInput && <RestoreDialog input={restoreInput} busy={busy === 'restore'} onClose={() => setRestoreInput(null)} onSubmit={(password) => run('restore', () => service.importSnapshot(restoreInput, password), 'پشتیبان با موفقیت بازیابی شد.').then((succeeded) => {if (succeeded) setRestoreInput(null);})} />}
       {busy && busy !== 'initializing' && <div className="busy-indicator"><span /><b>در حال ثبت امن تغییرات…</b></div>}
-      {toast && <div className="toast"><BadgeCheck size={20} /><span>{toast}</span></div>}
+      {toast && <div className="toast" role="status" aria-live="polite"><BadgeCheck size={20} /><span>{toast}</span></div>}
     </div>
   );
 }
 
-function Dashboard({state, navigate}: {state: FoundationState; navigate: (page: PageId) => void}) {
+function WorkspaceTabStrip({tabs, activeId, destinations, onActivate, onClose}: {
+  tabs: WorkspaceTab[];
+  activeId: string;
+  destinations: NavigationSearchDestination[];
+  onActivate: (tab: WorkspaceTab) => void;
+  onClose: (tabId: string) => void;
+}) {
+  return <nav className="workspace-page-tabs" aria-label="تب‌های میزکار">
+    <div className="workspace-page-tabs__heading"><Layers3 size={17}/><span>میزکار</span></div>
+    <div className="workspace-page-tabs__list" aria-label="صفحه‌های باز">
+      {tabs.map((tab) => {
+        const destination = destinations.find((item) => item.id === tab.destinationId);
+        const navigation = NAVIGATION.find((item) => item.id === tab.page);
+        const Icon = destination?.icon ?? navigation?.icon ?? Layers3;
+        const active = tab.id === activeId;
+        return <div key={tab.id} className={`workspace-page-tab ${active ? 'workspace-page-tab--active' : ''}`}>
+          <button
+            type="button"
+            aria-current={active ? 'page' : undefined}
+            onClick={() => onActivate(tab)}
+            title={tab.title}
+          >
+            <Icon size={16}/>
+            <span><strong>{tab.title}</strong><small>{destination?.group ?? navigation?.group ?? 'شاهراه'}</small></span>
+          </button>
+          {tabs.length > 1 && <button
+            type="button"
+            className="workspace-page-tab__close"
+            aria-label={`بستن تب ${tab.title}`}
+            title={`بستن تب ${tab.title}`}
+            onClick={() => onClose(tab.id)}
+          ><X size={14}/></button>}
+        </div>;
+      })}
+    </div>
+  </nav>;
+}
+
+function Dashboard({state, navigate, onOpenCollaborationQueue, destinations, usage, onDestination}: {
+  state: FoundationState;
+  navigate: (page: PageId) => void;
+  onOpenCollaborationQueue: (queue?:'project'|'today'|'overdue'|'delegated') => void;
+  destinations: NavigationSearchDestination[];
+  usage: NavigationUsageEntry[];
+  onDestination: (destination: NavigationSearchDestination) => void;
+}) {
   const {activeUser: user} = state;
   const auditVisible = can(user, 'foundation.audit.view');
   const dataVisible = can(user, 'foundation.data.export') || can(user, 'foundation.data.manage');
   const workspaceItems = dashboardCapabilitiesFor(user);
+  const frequentItems = frequentNavigationDestinations(destinations, usage);
   return (
     <div className="page-stack">
       <section className="hero-card">
         <div className="hero-copy">
-          <span className="eyebrow"><span className="pulse-dot pulse-dot--light" /> بنیاد محلی تپرا فعال است</span>
-          <h2>سلام {user.name.split(' ')[0]}،<br /><em>این همان شروع تازه تپراست.</em></h2>
+          <BrandMark variant="lockup" tone="inverse" decorative className="hero-brand-heading" />
+          <span className="eyebrow"><span className="pulse-dot pulse-dot--light" /> {PRODUCT_NAME} آماده کار است</span>
+          <h2>سلام {user.name.split(' ')[0]}،<br /><em>{PRODUCT_TAGLINE}</em></h2>
           <p>با نقش «{user.roleTitle}» وارد شده‌اید. منو و اقدام‌ها فقط بر اساس مجوز، محدوده و سیاست‌های واقعی همین کاربر محاسبه می‌شوند.</p>
           <div className="hero-actions">
             {can(user, 'organization.overview.view') && <button className="button button--light" onClick={() => navigate('organization')}>مشاهده سازمان <ArrowLeft size={17} /></button>}
@@ -489,9 +1026,8 @@ function Dashboard({state, navigate}: {state: FoundationState; navigate: (page: 
             {auditVisible && <button className="button button--ghost-light" onClick={() => navigate('audit')}>دیدن ردپای رویدادها</button>}
           </div>
         </div>
-        <div className="identity-orbit">
-          <div className="orbit-ring orbit-ring--one" /><div className="orbit-ring orbit-ring--two" />
-          <div className="orbit-center" style={{background: user.accent}}><span>{user.initials}</span><small>{scopeLabel(user.scope)}</small></div>
+        <div className="hero-visual" aria-hidden="true">
+          <BrandMark variant="mark" tone="inverse" decorative className="hero-brand-large" />
           <div className="orbit-chip orbit-chip--top"><Shield size={15} /> {user.permissions.length.toLocaleString('en-US')} مجوز</div>
           <div className="orbit-chip orbit-chip--bottom"><Fingerprint size={15} /> Actor مستقل</div>
         </div>
@@ -504,12 +1040,34 @@ function Dashboard({state, navigate}: {state: FoundationState; navigate: (page: 
         <Metric icon={LockKeyhole} tone="amber" value={scopeLabel(user.scope)} label="محدوده فعال" detail="Fail-closed در حالت ناشناخته" />
       </section>
 
+      {(can(user, permissionFor('project','view')) || can(user, permissionFor('task','view')) || can(user, permissionFor('chat','view')) || can(user, permissionFor('letter','view'))) && <CollaborationDashboardPanel state={state} onOpenHub={onOpenCollaborationQueue} onOpenConversations={() => navigate('communications')} onOpenLetters={() => navigate('letters')} />}
+
+      <section className="panel frequent-navigation">
+        <PanelHeading eyebrow="مسیرهای شخصی شما" title="منوهای پرکاربرد من" subtitle="این فهرست فقط از مسیرهایی ساخته می‌شود که خودتان باز کرده‌اید و همیشه دوباره با مجوزهای فعلی شما کنترل می‌شود." />
+        {frequentItems.length ? <div className="role-workspace-grid frequent-navigation-grid">
+          {frequentItems.map(({destination, usage: itemUsage}) => {
+            const Icon = destination.icon;
+            return <button key={destination.id} type="button" onClick={() => onDestination(destination)}>
+              <span><Icon size={20}/></span>
+              <div><strong>{destination.title}</strong><small>{destination.subtitle}</small></div>
+              <b>{itemUsage.count.toLocaleString('fa-IR')} بار</b>
+              <ArrowLeft size={17}/>
+            </button>;
+          })}
+        </div> : <div className="frequent-navigation-empty"><Search size={24}/><div><strong>{state.session.actingAdminUserId ? 'در مشاهده آزمایشی، مسیرهای شخصی ثبت نمی‌شوند.' : 'هنوز مسیر پرکاربردی ساخته نشده است.'}</strong><span>{state.session.actingAdminUserId ? 'با بازگشت به حساب ادمین، پرکاربردهای همان حساب دوباره نمایش داده می‌شوند.' : 'از جست‌وجوی منو یا منوی اصلی استفاده کنید؛ مسیرهای پرتکرار شما اینجا ظاهر می‌شوند.'}</span></div></div>}
+      </section>
+
       <section className="panel role-workspace">
         <PanelHeading eyebrow="میزکار مبتنی بر نقش" title={`کارهای مجاز ${user.roleTitle}`} subtitle="این میان‌برها از مجوز مؤثر همین حساب ساخته شده‌اند؛ با تغییر نقش، خودکار کم یا زیاد می‌شوند." />
         <div className="role-workspace-grid">
           {workspaceItems.map((item) => {
             const Icon = dashboardCapabilityIcon(item.id);
-            return <button key={item.id} onClick={() => navigate(item.page)}>
+            const exactDestinationId = item.id === 'procurement' ? 'module:purchase-request'
+              : item.id === 'treasury' ? 'module:treasury-execution'
+                : item.id === 'personnel-review' ? 'view:personnel-changes'
+                  : `page:${item.page}`;
+            const exactDestination = destinations.find((destination) => destination.id === exactDestinationId);
+            return <button key={item.id} onClick={() => exactDestination ? onDestination(exactDestination) : navigate(item.page)}>
               <span><Icon size={20}/></span>
               <div><strong>{item.title}</strong><small>{item.description}</small></div>
               <b>{dashboardCapabilityMetric(item.id, state)}</b>
@@ -536,7 +1094,7 @@ function Dashboard({state, navigate}: {state: FoundationState; navigate: (page: 
             <div><span>واحد</span><strong>{unitLabel(user.unitId)}</strong></div>
             <div><span>سطح داده</span><strong>{dataVisible ? 'پشتیبان مجاز' : 'بدون مدیریت داده'}</strong></div>
           </div>
-          <div className="permission-cloud">{user.permissions.map((permission) => <span key={permission}>{permissionLabel(permission)}</span>)}</div>
+          <div className="permission-cloud">{[...new Set(user.permissions)].map((permission) => <span key={permission}>{permissionLabel(permission)}</span>)}</div>
         </section>
       </div>
 
@@ -549,7 +1107,7 @@ function Dashboard({state, navigate}: {state: FoundationState; navigate: (page: 
 }
 
 function dashboardCapabilityIcon(id: DashboardCapability['id']): LucideIcon {
-  return ({organization: Network, structure: GitBranch, personnel: ContactRound, 'personnel-review': FileClock, users: UserCog, registrations: UserCheck, roles: KeyRound, procurement: BriefcaseBusiness, treasury: HardDrive})[id];
+  return ({organization: Network, structure: GitBranch, personnel: ContactRound, recruitment: UserCheck, 'personnel-review': FileClock, users: UserCog, registrations: UserCheck, roles: KeyRound, procurement: BriefcaseBusiness, treasury: HardDrive})[id];
 }
 
 function dashboardCapabilityMetric(id: DashboardCapability['id'], state: FoundationState): string {
@@ -557,9 +1115,10 @@ function dashboardCapabilityMetric(id: DashboardCapability['id'], state: Foundat
     organization: state.units.filter((unit) => unit.status === 'active').length,
     structure: state.units.filter((unit) => unit.status === 'active').length + state.positions.filter((position) => position.status === 'active').length,
     personnel: state.personnel.filter((person) => person.employmentStatus === 'active').length,
+    recruitment: state.operationalRecords.filter((record) => record.moduleId === 'recruitment-case' && !['closed','rejected','withdrawn'].includes(record.status)).length,
     'personnel-review': state.personnelProfileChangeRequests.filter((request) => request.status === 'submitted').length,
     users: state.users.filter((item) => item.status === 'active').length,
-    registrations: state.registrationRequests.filter((request) => request.status === 'submitted' || request.status === 'in_review').length,
+    registrations: state.registrationRequests.filter((request) => ['submitted', 'in_review', 'approved'].includes(request.status)).length,
     roles: state.roles.filter((role) => role.status === 'active').length,
     procurement: state.operationalRecords.filter((record) => record.moduleId === 'purchase-request' && !['cancelled', 'rejected'].includes(record.status)).length,
     treasury: state.operationalRecords.filter((record) => record.moduleId === 'treasury-execution' && !['paid', 'failed'].includes(record.status)).length,
@@ -637,11 +1196,14 @@ function DataPage({state, onExport, onEncrypted, onRestore, onReset, onGenerateQ
   const persona = state.activeUser;
   const mayExport = can(persona, 'foundation.data.export');
   const mayManage = can(persona, 'foundation.data.manage');
+  const hasSensitiveDocuments = state.operationalRecords.some((record) =>
+    (record.moduleId === 'personnel-document' && typeof record.payload.fileRef === 'string')
+    || (record.moduleId === 'recruitment-case' && Array.isArray(record.payload.candidateDocuments) && record.payload.candidateDocuments.length > 0));
   return (
     <div className="page-stack">
       <PageIntro icon={Database} eyebrow="Local data controls" title="پشتیبان‌گیری و بازیابی روی همین دستگاه" description="داده عملیاتی فقط در IndexedDB است. ترجیحات ظاهری تنها داده‌هایی هستند که در localStorage نگهداری می‌شوند." />
       <div className="data-grid">
-        <DataAction icon={Download} tone="violet" title="خروجی ساده" text="Snapshot نسخه‌دار با checksum بسازید." action="دریافت فایل JSON" disabled={!mayExport} onClick={onExport} />
+        <DataAction icon={Download} tone="violet" title="خروجی ساده" text={hasSensitiveDocuments ? 'به دلیل وجود مدارک هویتی غیرفعال است؛ خروجی رمزگذاری‌شده بگیرید.' : 'Snapshot نسخه‌دار با checksum بسازید.'} action={hasSensitiveDocuments ? 'نیازمند رمزگذاری' : 'دریافت فایل JSON'} disabled={!mayExport || hasSensitiveDocuments} onClick={onExport} />
         <DataAction icon={LockKeyhole} tone="blue" title="خروجی رمزگذاری‌شده" text="AES-GCM با رمزی که فقط شما می‌دانید." action="انتخاب رمز و دریافت" disabled={!mayExport} onClick={onEncrypted} />
         <DataAction icon={Upload} tone="green" title="بازیابی پشتیبان" text="فایل ساده یا رمزگذاری‌شده را اعتبارسنجی کنید." action="انتخاب فایل" disabled={!mayManage} onClick={onRestore} />
         <DataAction icon={RotateCcw} tone="danger" title="بازنشانی محلی" text="بازگشت به Seed قطعی ERP V1 بدون حذف تنظیمات ظاهری." action="بازنشانی داده" disabled={!mayManage} onClick={onReset} />
@@ -650,7 +1212,7 @@ function DataPage({state, onExport, onEncrypted, onRestore, onReset, onGenerateQ
         <PanelHeading eyebrow="سلامت ذخیره‌سازی" title="وضعیت پایگاه داده این مرورگر" subtitle="آخرین وضعیت پس از هر Command دوباره از Adapter خوانده می‌شود." />
         <div className="storage-grid">
           <StorageDatum label="نام پایگاه" value="tapra2_local" mono />
-          <StorageDatum label="نسخه Schema" value="۵" />
+          <StorageDatum label="نسخه Schema" value={FOUNDATION_SCHEMA_VERSION.toLocaleString('fa-IR')} />
           <StorageDatum label="کاربران" value={state.users.length.toLocaleString('en-US')} />
           <StorageDatum label="رویدادهای Audit" value={state.audits.length.toLocaleString('en-US')} />
           <StorageDatum label="آخرین ثبت" value={formatDateTime(state.lastPersistedAt)} />
@@ -668,17 +1230,6 @@ function ReportsPage({state}:{state:FoundationState}) {
   const groups = [...new Set(ERP_MODULES.map((item)=>item.group))].map((group)=>({group,count:state.operationalRecords.filter((record)=>ERP_MODULES.find((module)=>module.id===record.moduleId)?.group===group).length})).sort((a,b)=>b.count-a.count);
   return <div className="page-stack"><PageIntro icon={Activity} eyebrow="Operational MIS" title="گزارش مدیریتی و سلامت صف‌ها" description="این نما از Projection و داده مرجع IndexedDB محاسبه می‌شود و هیچ عددی از سرور دریافت نمی‌کند."/><section className="metric-grid"><Metric icon={Database} tone="violet" value={state.operationalRecords.length.toLocaleString('en-US')} label="رکورد عملیاتی" detail={`${ERP_MODULES.length.toLocaleString('en-US')} زیربخش فعال`}/><Metric icon={Workflow} tone="blue" value={active.length.toLocaleString('en-US')} label="در جریان" detail="به‌جز وضعیت‌های پایانی"/><Metric icon={CircleAlert} tone="amber" value={overdue.length.toLocaleString('en-US')} label="سررسید گذشته" detail="نیازمند پیگیری"/><Metric icon={ScrollText} tone="green" value={state.audits.length.toLocaleString('en-US')} label="رویداد Audit" detail="قابل ردگیری"/></section><section className="panel"><PanelHeading eyebrow="Queue health" title="توزیع رکوردها در حوزه‌های محصول" subtitle="هر نوار با رکوردهای واقعی ذخیره‌شده در مرورگر به‌روز می‌شود."/><div className="report-bars">{groups.map((item)=><div key={item.group}><span>{item.group}</span><i><b style={{width:`${Math.max(5,(item.count/Math.max(1,state.operationalRecords.length))*100)}%`}}/></i><strong>{item.count.toLocaleString('en-US')}</strong></div>)}</div></section><section className="panel"><PanelHeading eyebrow="Rebuildable projections" title="وضعیت نماهای محاسباتی" subtitle="Projectionها مشتق‌شده‌اند و با ابزار داده می‌توانند از Source of Truth بازسازی شوند."/><div className="storage-grid">{state.projections.map((item)=><StorageDatum key={item.id} label={item.kind} value={`نسخه ${item.version.toLocaleString('en-US')} · ${formatDateTime(item.rebuiltAt)}`}/>)}</div></section></div>
 }
-
-function WorkflowAdminPage({state,execute}:{state:FoundationState;execute:(label:string,work:()=>Promise<FoundationState>,success:string)=>Promise<void>}) {
-  const [selected,setSelected]=useState(state.workflows[0]?.moduleId??''); const [editing,setEditing]=useState(false); const [query,setQuery]=useState(''); const workflow=state.workflows.find((item)=>item.moduleId===selected)??state.workflows[0];
-  const visibleWorkflows=useMemo(()=>{const search=query.trim().toLocaleLowerCase('fa-IR');if(!search)return state.workflows;return state.workflows.filter((item)=>`${item.title} ${item.moduleId} ${item.assignmentPolicy} ${item.approvalPolicyId??''} ${queueLabel(item.queueStrategy)}`.toLocaleLowerCase('fa-IR').includes(search));},[query,state.workflows]);
-  useEffect(()=>{if(visibleWorkflows.length&&!visibleWorkflows.some((item)=>item.moduleId===selected))setSelected(visibleWorkflows[0].moduleId);},[selected,visibleWorkflows]);
-  if(!workflow)return <FatalState error="گردش‌کاری در داده محلی پیدا نشد."/>;
-  return <div className="page-stack"><PageIntro icon={Workflow} eyebrow="Controlled workflow designer" title="مدیریت محدود گردش‌کار" description="در V1 فقط Queue، Assignment و Approval Policy قابل نسخه‌گذاری است؛ State Machine مصوب به‌صورت آزاد ویرایش نمی‌شود."/><div className="workflow-admin-grid"><section className="panel workflow-directory"><h3>گردش‌کارهای منتشرشده</h3><DataSearchToolbar value={query} onChange={setQuery} placeholder="جست‌وجوی گردش‌کار یا سیاست" count={visibleWorkflows.length} unit="گردش‌کار" compact/><label className="select-field"><select value={selected} onChange={(event)=>setSelected(event.target.value)}>{visibleWorkflows.map((item)=><option key={item.id} value={item.moduleId}>{item.title}</option>)}</select></label>{visibleWorkflows.map((item)=><button key={item.id} className={item.moduleId===workflow.moduleId?'active':''} onClick={()=>setSelected(item.moduleId)}><span><strong>{item.title}</strong><small>{item.moduleId}</small></span><b>V{item.version.toLocaleString('en-US')}</b></button>)}{!visibleWorkflows.length&&<DataSearchEmpty text="گردش‌کاری با این جست‌وجو پیدا نشد."/>}</section><section className="panel workflow-detail"><div className="panel-heading"><div><span className="eyebrow">نسخه منتشرشده {workflow.version.toLocaleString('en-US')}</span><h3>{workflow.title}</h3><p>{workflow.assignmentPolicy}</p></div><button className="button button--primary" onClick={()=>setEditing(true)}><Pencil size={17}/> نسخه جدید Policy</button></div><div className="record-facts"><div><span>راهبرد صف<strong>{queueLabel(workflow.queueStrategy)}</strong></span></div><div><span>Approval Policy<strong>{workflow.approvalPolicyId??'Policy ماژول'}</strong></span></div><div><span>وضعیت<strong>منتشرشده</strong></span></div></div><div className="workflow-state-map">{Object.entries(workflow.stateLabels).map(([id,label])=><span key={id}>{label}<code>{id}</code></span>)}</div><div className="transition-map">{workflow.transitions.map((item)=><article key={item.id}><span>{item.from.map((from)=>workflow.stateLabels[from]??from).join(' / ')}</span><ArrowLeft size={17}/><strong>{workflow.stateLabels[item.to]??item.to}</strong><small>{item.label}{item.makerChecker?' · maker/checker':''}</small></article>)}</div></section></div>{editing&&<WorkflowPolicyDialog workflow={workflow} onClose={()=>setEditing(false)} onSave={(input)=>execute('workflow-policy',()=>service.updateWorkflowPolicy(workflow.moduleId,workflow.version,input),'نسخه جدید Policy منتشر شد.').then(()=>setEditing(false))}/>}</div>;
-}
-
-function WorkflowPolicyDialog({workflow,onClose,onSave}:{workflow:FoundationState['workflows'][number];onClose:()=>void;onSave:(input:{queueStrategy:FoundationState['workflows'][number]['queueStrategy'];assignmentPolicy:string;approvalPolicyId?:string})=>Promise<void>}){const [queueStrategy,setQueue]=useState(workflow.queueStrategy);const [assignmentPolicy,setAssignment]=useState(workflow.assignmentPolicy);const [approvalPolicyId,setApproval]=useState(workflow.approvalPolicyId??'');const [errors,setErrors]=useState<string[]>([]);return <div className="modal-scrim"><form noValidate className="dialog" onSubmit={(event)=>{event.preventDefault();const next=validateRequired([{label:'سیاست تخصیص',value:assignmentPolicy}]);setErrors(next);if(!next.length)void onSave({queueStrategy,assignmentPolicy,approvalPolicyId});}}><header><div><span className="eyebrow">نسخه جدید بدون تغییر State Machine</span><h2>{workflow.title}</h2></div><button type="button" className="icon-button" onClick={onClose}><X size={20}/></button></header><div className="dialog-body form-grid"><FormValidationSummary errors={errors}/><label className="field"><RequiredLabel>راهبرد صف</RequiredLabel><select aria-required="true" value={queueStrategy} onChange={(event)=>setQueue(event.target.value as typeof queueStrategy)}><option value="owner">مالک رکورد</option><option value="assignee">کاربر تخصیص‌یافته</option><option value="unit">صف واحد</option><option value="company">صف شرکت</option></select></label><label className="field"><OptionalLabel>شناسه سیاست تأیید</OptionalLabel><input dir="ltr" value={approvalPolicyId} onChange={(event)=>setApproval(event.target.value)}/></label><label className="field field--wide"><RequiredLabel>سیاست تخصیص</RequiredLabel><textarea aria-required="true" rows={4} value={assignmentPolicy} onChange={(event)=>setAssignment(event.target.value)}/></label></div><footer><button type="button" className="button button--ghost" onClick={onClose}>انصراف</button><button className="button button--primary">انتشار نسخه جدید</button></footer></form></div>}
-function queueLabel(value:string){return {owner:'مالک رکورد',assignee:'کاربر تخصیص‌یافته',unit:'صف واحد',company:'صف شرکت'}[value]??value}
 
 function QaGuide({state, navigate}: {state: FoundationState; navigate: (page: PageId) => void}) {
   const steps = [
@@ -706,23 +1257,31 @@ function QaGuide({state, navigate}: {state: FoundationState; navigate: (page: Pa
 }
 
 function UsersPage({state, onEdit, onLogin, onStatus}: {state: FoundationState; onEdit: (user: LocalUser) => void; onLogin: (user: LocalUser) => void; onStatus: (user: LocalUser, status: UserStatus) => void}) {
-  const [filter, setFilter] = useState<'all' | UserStatus>('all');
+  const [filter, setFilter] = useState<'all' | UserStatus | 'attention' | 'protected'>('all');
   const [query, setQuery] = useState('');
   const [deactivateTarget, setDeactivateTarget] = useState<LocalUser | null>(null);
+  const healthInsights = useMemo(() => state.users.map((user) => userOrganizationHealth(user, state)), [state]);
+  const healthByUserId = useMemo(() => new Map(healthInsights.map((insight) => [insight.user.id, insight])), [healthInsights]);
   const users = useMemo(() => {
     const search = query.trim().toLocaleLowerCase('fa-IR');
     return state.users.filter((user) => {
-      if (filter !== 'all' && user.status !== filter) return false;
+      const health = healthByUserId.get(user.id)!;
+      if ((filter === 'active' || filter === 'inactive') && user.status !== filter) return false;
+      if (filter === 'attention' && !health.issues.length) return false;
+      if (filter === 'protected' && !health.protectedAccess) return false;
       if (!search) return true;
       const unit = state.units.find((item) => item.id === user.unitId)?.name ?? '';
       const position = state.positions.find((item) => item.id === user.positionId)?.title ?? '';
       return `${user.name} ${user.username} ${user.roles.join(' ')} ${unit} ${position} ${user.status === 'active' ? 'فعال' : 'غیرفعال'}`.toLocaleLowerCase('fa-IR').includes(search);
     });
-  }, [filter, query, state.positions, state.units, state.users]);
+  }, [filter, healthByUserId, query, state.positions, state.units, state.users]);
   const mayEdit = can(state.activeUser, 'foundation.users.edit');
   const mayManageStatus = can(state.activeUser, 'foundation.users.status.manage');
   const mayQaLogin = can(state.activeUser, 'foundation.users.qa_login');
   const activeCount = state.users.filter((user) => user.status === 'active').length;
+  const linkedCount = healthInsights.filter((insight) => insight.linked).length;
+  const attentionCount = healthInsights.filter((insight) => insight.issues.length).length;
+  const protectedCount = healthInsights.filter((insight) => insight.protectedAccess).length;
   const userSortColumns = useMemo<SortColumn<LocalUser>[]>(() => [
     {key: 'user', kind: 'text', value: (item) => item.name},
     {key: 'roles', kind: 'text', value: (item) => item.roles.join('، ')},
@@ -734,24 +1293,26 @@ function UsersPage({state, onEdit, onLogin, onStatus}: {state: FoundationState; 
   return <><div className="page-stack">
     <PageIntro icon={UsersRound} eyebrow="سازمان / کاربران" title="کاربران سازمان" description="این فهرست فقط حساب‌های ورود را نشان می‌دهد. ایجاد حساب تازه از پرونده پرسنلی انجام می‌شود تا اطلاعات هویتی تکرار نشود." />
     <div className="org-toolbar"><div><strong>حساب کاربری از پرسنل مستقل است</strong><span>غیرفعال‌سازی حساب، پرونده پرسنلی یا سابقه همکاری را حذف نمی‌کند.</span></div></div>
-    <section className="user-metrics">
+    <section className="user-metrics user-metrics--health">
       <Metric icon={UsersRound} tone="violet" value={state.users.length.toLocaleString('en-US')} label="همه کاربران" detail="Seed قطعی محلی" />
       <Metric icon={UserCheck} tone="green" value={activeCount.toLocaleString('en-US')} label="کاربر فعال" detail="قابل ورود و مشاهده دسترسی" />
-      <Metric icon={UserX} tone="amber" value={(state.users.length - activeCount).toLocaleString('en-US')} label="کاربر غیرفعال" detail="داده حفظ می‌شود" />
+      <Metric icon={ContactRound} tone="blue" value={linkedCount.toLocaleString('en-US')} label="متصل به پرسنل" detail="پیوند هویتی دوطرفه" />
+      <Metric icon={CircleAlert} tone="amber" value={attentionCount.toLocaleString('en-US')} label="نیازمند بررسی" detail={`${protectedCount.toLocaleString('en-US')} حساب سطح‌بالا`} />
     </section>
     <div className="filter-row user-filter">
-      {([['all', 'همه کاربران'], ['active', 'کاربران فعال'], ['inactive', 'کاربران غیرفعال']] as const).map(([id, title]) => <button key={id} className={filter === id ? 'active' : ''} onClick={() => setFilter(id)}>{title}</button>)}
+      {([['all', 'همه کاربران'], ['active', 'فعال'], ['inactive', 'غیرفعال'], ['attention', 'نیازمند بررسی'], ['protected', 'سطح‌بالا']] as const).map(([id, title]) => <button key={id} className={filter === id ? 'active' : ''} aria-pressed={filter === id} onClick={() => setFilter(id)}>{title}</button>)}
       <span>{users.length.toLocaleString('en-US')} کاربر</span>
     </div>
     <DataSearchToolbar value={query} onChange={setQuery} placeholder="جست‌وجوی نام، نام کاربری، نقش، واحد یا سمت" count={users.length} unit="کاربر"/>
     <section className="users-panel">
       <div className="users-head"><span><SortHeader columnKey="user" label="کاربر" sort={userSort} onSort={requestUserSort}/></span><span><SortHeader columnKey="roles" label="نقش‌های دسترسی" sort={userSort} onSort={requestUserSort}/></span><span><SortHeader columnKey="status" label="وضعیت" sort={userSort} onSort={requestUserSort}/></span><span><SortHeader columnKey="unit" label="واحد سازمانی" sort={userSort} onSort={requestUserSort}/></span><span><SortHeader columnKey="position" label="سمت سازمانی" sort={userSort} onSort={requestUserSort}/></span><span>اقدام‌ها</span></div>
-      {sortedUsers.map((target) => <article className="user-row" key={target.id}>
-        <button className="user-identity user-name-button" onClick={() => onEdit(target)} aria-label={`بازکردن پرونده ${target.name}`}><span className="persona-avatar" style={{background: target.accent}}>{target.initials}</span><span><strong>{target.name}</strong><small dir="ltr">@{target.username}</small></span></button>
-        <div className="role-chips">{target.roles.map((role) => <span key={role}>{role}</span>)}</div>
+      {sortedUsers.map((target) => {const health=healthByUserId.get(target.id)!;return <article className={`user-row ${health.issues.length?'user-row--attention':''}`} key={target.id}>
+        <button className="user-identity user-name-button" onClick={() => onEdit(target)} aria-label={`بازکردن پرونده ${userDisplayLabel(target,state)}`}><span className="persona-avatar" style={{background: target.accent}}>{target.initials}</span><span><strong>{target.name}</strong><small dir="ltr">@{target.username}</small>{sameNameUsers(target,state.users).length>0&&<em className="identity-name-warning">نام مشابه؛ شناسه را بررسی کنید</em>}</span></button>
+        <div className="role-chips">{target.roles.map((role) => <span key={role}>{role}</span>)}{health.issues.length>0?<em className="account-health-badge account-health-badge--attention"><CircleAlert size={11}/>{health.issues.length.toLocaleString('en-US')} مورد بررسی</em>:<em className="account-health-badge"><BadgeCheck size={11}/>هماهنگ</em>}</div>
         <span className={`status-badge status-badge--${target.status}`}>{target.status === 'active' ? 'فعال' : 'غیرفعال'}</span>
         <span className="user-unit"><b>{state.units.find((unit) => unit.id === target.unitId)?.name ?? 'بدون واحد'}</b></span>
         <span className="user-position"><b>{state.positions.find((position) => position.id === target.positionId)?.title ?? 'بدون سمت'}</b></span>
+        <div className="user-placement-summary"><span><small>واحد</small><b>{state.units.find((unit) => unit.id === target.unitId)?.name ?? 'بدون واحد'}</b></span><span><small>سمت</small><b>{state.positions.find((position) => position.id === target.positionId)?.title ?? 'بدون سمت'}</b></span></div>
         <div className="user-actions">
           {(mayEdit || mayQaLogin) && <IconAction label="مشاهده و ویرایش کاربر" tone="primary" onClick={() => onEdit(target)}><Pencil size={17} /></IconAction>}
           {mayQaLogin && target.id !== state.activeUser.id && <IconAction label={target.status === 'active' ? 'ورود به دسترسی کاربر' : 'کاربر غیرفعال است'} tone="qa" disabled={target.status !== 'active'} onClick={() => onLogin(target)}><LogIn size={17} /></IconAction>}
@@ -759,13 +1320,13 @@ function UsersPage({state, onEdit, onLogin, onStatus}: {state: FoundationState; 
           {mayManageStatus && target.id !== state.activeUser.id && target.status === 'inactive' && <IconAction label="فعال‌سازی کاربر" tone="success" onClick={() => onStatus(target, 'active')}><UserCheck size={17} /></IconAction>}
           {!mayEdit && !mayQaLogin && <span className="read-only-label">فقط مشاهده</span>}
         </div>
-      </article>)}
+      </article>})}
       {!sortedUsers.length && <DataSearchEmpty text="کاربری با این جست‌وجو پیدا نشد."/>}
     </section>
-  </div>{deactivateTarget && <StatusConfirmDialog user={deactivateTarget} onClose={() => setDeactivateTarget(null)} onConfirm={() => { onStatus(deactivateTarget, 'inactive'); setDeactivateTarget(null); }} />}</>;
+  </div>{deactivateTarget && <StatusConfirmDialog user={deactivateTarget} state={state} onClose={() => setDeactivateTarget(null)} onConfirm={() => { onStatus(deactivateTarget, 'inactive'); setDeactivateTarget(null); }} />}</>;
 }
 
-function UserDialog({user, state, onClose, onSave, onPassword, onLogin}: {user?: LocalUser; state: FoundationState; onClose: () => void; onSave: (input: UserInput) => void; onPassword?: (password: string) => Promise<void>; onLogin?: () => void}) {
+function UserDialog({user, state, onClose, onSave, onPassword, onLogin}: {user?: LocalUser; state: FoundationState; onClose: () => void; onSave: (input: UserInput) => void; onPassword?: (password: string) => Promise<boolean>; onLogin?: () => void}) {
   const actor = state.activeUser; const creating = !user;
   const linkedPersonnel = state.personnel.find((person) => person.id === user?.personnelId);
   const [tab, setTab] = useState<'profile' | 'access' | 'activity'>('profile');
@@ -773,48 +1334,58 @@ function UserDialog({user, state, onClose, onSave, onPassword, onLogin}: {user?:
   const [unitId, setUnitId] = useState(user?.unitId ?? state.units.find((unit) => unit.status === 'active' && unit.type !== 'شعبه')?.id ?? '');
   const [positionId, setPositionId] = useState(user?.positionId ?? state.positions.find((position) => position.status === 'active')?.id ?? '');
   const [managerUserId, setManagerUserId] = useState(user?.managerUserId ?? ''); const [roleIds, setRoleIds] = useState<string[]>(user?.roleIds ?? []);
-  const [permissionGrants, setPermissionGrants] = useState<PermissionCode[]>(user?.permissionGrants ?? []);
   const [permissionDenials, setPermissionDenials] = useState<PermissionCode[]>(user?.permissionDenials ?? []);
   const [password, setPassword] = useState(''); const [passwordMode, setPasswordMode] = useState(false); const [errors,setErrors]=useState<string[]>([]);
   const mayEdit = creating ? can(actor, 'organization.users.create') : can(actor, 'foundation.users.edit');
   const mayAssign = can(actor, 'organization.roles.assign'); const mayLogin = Boolean(user && onLogin && actor.isAdmin && user.status === 'active' && user.id !== actor.id);
+  const availablePositions = positionsForUnit(state.positions, unitId, user?.positionId).filter((position) => position.status === 'active' || position.id === user?.positionId);
+  const changeUnit = (nextUnitId: string) => {
+    setUnitId(nextUnitId);
+    const currentPosition = state.positions.find((position) => position.id === positionId);
+    if (!currentPosition || !positionSupportsUnit(currentPosition, nextUnitId)) setPositionId('');
+  };
   const basePermissions = [...new Set(state.roles.filter((role) => roleIds.includes(role.id) && role.status === 'active').flatMap((role) => role.permissions))];
-  const permissions = user?.isAdmin ? user.permissions : [...new Set([...basePermissions.filter((permission) => !permissionDenials.includes(permission)), ...permissionGrants])];
+  const permissions = user?.isAdmin ? user.permissions : [...new Set(basePermissions.filter((permission) => !permissionDenials.includes(permission)))];
   const recent = user ? state.audits.filter((audit) => audit.effectiveUserId === user.id || audit.actorId === user.actorId).slice(0, 6) : [];
-  const submit=()=>{const next=validateRequired([{label:'نام و نام خانوادگی',value:name,valid:(value)=>String(value).trim().length>=3,message:'فیلد «نام و نام خانوادگی» الزامی است و باید حداقل ۳ نویسه داشته باشد.'},{label:'نام کاربری',value:username,valid:(value)=>/^[a-zA-Z0-9._-]{3,32}$/.test(String(value).trim()),message:'فیلد «نام کاربری» الزامی است و باید ۳ تا ۳۲ نویسه انگلیسی معتبر داشته باشد.'},{label:'واحد سازمانی',value:unitId},{label:'سمت سازمانی',value:positionId},{label:'نقش‌های دسترسی',value:roleIds},...(creating?[{label:'رمز عبور اولیه',value:password,valid:(value:unknown)=>String(value).length>=8,message:'فیلد «رمز عبور اولیه» الزامی است و باید حداقل ۸ نویسه داشته باشد.'}]:[])]);setErrors(next);if(next.length){setTab(!name.trim()||!username.trim()||!unitId||!positionId||creating&&password.length<8?'profile':'access');return;}onSave({name,username,unitId,positionId,managerUserId:managerUserId||undefined,roleIds,password:creating?password:undefined,permissionGrants:permissionGrants.filter((permission)=>!basePermissions.includes(permission)),permissionDenials:permissionDenials.filter((permission)=>basePermissions.includes(permission))});};
+  const submit=()=>{const next=validateRequired([{label:'نام و نام خانوادگی',value:name,valid:(value)=>String(value).trim().length>=3,message:'فیلد «نام و نام خانوادگی» الزامی است و باید حداقل ۳ نویسه داشته باشد.'},{label:'نام کاربری',value:username,valid:(value)=>/^[a-zA-Z0-9._-]{3,32}$/.test(String(value).trim()),message:'فیلد «نام کاربری» الزامی است و باید ۳ تا ۳۲ نویسه انگلیسی معتبر داشته باشد.'},{label:'واحد سازمانی',value:unitId},{label:'سمت سازمانی',value:positionId},{label:'نقش‌های دسترسی',value:roleIds},...(creating?[{label:'رمز عبور اولیه',value:password,valid:(value:unknown)=>String(value).length>=8,message:'فیلد «رمز عبور اولیه» الزامی است و باید حداقل ۸ نویسه داشته باشد.'}]:[])]);setErrors(next);if(next.length){setTab(!name.trim()||!username.trim()||!unitId||!positionId||creating&&password.length<8?'profile':'access');return;}onSave({name,username,unitId,positionId,managerUserId:managerUserId||undefined,roleIds,password:creating?password:undefined,permissionGrants:[],permissionDenials:permissionDenials.filter((permission)=>basePermissions.includes(permission))});};
+  const organizationHealth=user?userOrganizationHealth(user,state):undefined;
   return <Modal onClose={onClose} wide>
-    <div className="modal-heading"><div><span>سازمان / پرونده کاربر</span><h2>{creating ? 'ایجاد کاربر جدید' : user.name}</h2><p>{creating ? 'حساب، جایگاه سازمانی و دسترسی اولیه را در یک جریان کنترل‌شده بسازید.' : 'اطلاعات سازمانی، نقش‌های دسترسی و فعالیت اخیر کاربر را بررسی کنید.'}</p></div><button className="icon-button" aria-label="بستن پنجره" onClick={onClose}><X size={20} /></button></div>
-    <FormValidationSummary errors={errors}/>{!creating && <div className="user-dialog-profile"><span className="persona-avatar persona-avatar--large" style={{background: user.accent}}>{user.initials}</span><div><strong>{user.name}</strong><span>@{user.username} · {user.roleTitle}</span><span className={`status-badge status-badge--${user.status}`}>{user.status === 'active' ? 'فعال' : 'غیرفعال'}</span></div></div>}
+    <div className="modal-heading"><div><span>سازمان / پرونده کاربر</span><h2>{creating ? 'ایجاد کاربر جدید' : userDisplayLabel(user,state)}</h2><p>{creating ? 'حساب، جایگاه سازمانی و دسترسی اولیه را در یک جریان کنترل‌شده بسازید.' : 'اطلاعات سازمانی، نقش‌های دسترسی و فعالیت اخیر کاربر را بررسی کنید.'}</p></div><button className="icon-button" aria-label="بستن پنجره" onClick={onClose}><X size={20} /></button></div>
+    <FormValidationSummary errors={errors}/>{!creating && <div className="user-dialog-profile"><span className="persona-avatar persona-avatar--large" style={{background: user.accent}}>{user.initials}</span><div><strong>{user.name}</strong><span>@{user.username} · {user.roleTitle}</span><span className={`status-badge status-badge--${user.status}`}>{user.status === 'active' ? 'فعال' : 'غیرفعال'}</span></div></div>}{organizationHealth&&organizationHealth.issues.length>0&&<section className="user-health-alert" aria-label="موارد نیازمند بررسی حساب"><CircleAlert size={19}/><div><strong>جایگاه و دسترسی این حساب نیازمند بررسی است</strong>{organizationHealth.issues.map((issue)=><span key={issue}>{userOrganizationIssueLabel(issue)}</span>)}</div></section>}
     <div className="record-tabs"><button className={tab === 'profile' ? 'active' : ''} onClick={() => setTab('profile')}>مشخصات و جایگاه</button><button className={tab === 'access' ? 'active' : ''} onClick={() => setTab('access')}>نقش و دسترسی مؤثر</button>{!creating && <button className={tab === 'activity' ? 'active' : ''} onClick={() => setTab('activity')}>فعالیت اخیر</button>}</div>
     {tab === 'profile' && <><div className="form-grid user-profile-form">
       <label className="field-label"><RequiredLabel>نام و نام خانوادگی</RequiredLabel><input aria-required="true" autoFocus value={name} disabled={!mayEdit || Boolean(linkedPersonnel)} onChange={(event) => setName(event.target.value)} /></label>
       <label className="field-label"><RequiredLabel>نام کاربری</RequiredLabel><input aria-required="true" dir="ltr" value={username} disabled={!mayEdit} onChange={(event) => setUsername(event.target.value)} placeholder="name.family" /></label>
-      <label className="field-label"><RequiredLabel>واحد سازمانی</RequiredLabel><select aria-required="true" value={unitId} disabled={!mayEdit || Boolean(linkedPersonnel)} onChange={(event) => setUnitId(event.target.value)}><option value="">انتخاب کنید</option>{state.units.filter((unit) => unit.type !== 'شعبه' && (unit.status === 'active' || unit.id === user?.unitId)).map((unit) => <option key={unit.id} value={unit.id}>{unit.name}</option>)}</select></label>
-      <label className="field-label"><RequiredLabel>سمت سازمانی</RequiredLabel><select aria-required="true" value={positionId} disabled={!mayEdit || Boolean(linkedPersonnel)} onChange={(event) => setPositionId(event.target.value)}><option value="">انتخاب کنید</option>{state.positions.filter((position) => position.status === 'active' || position.id === user?.positionId).map((position) => <option key={position.id} value={position.id}>{position.title}</option>)}</select></label>
-      <label className="field-label"><OptionalLabel>مدیر مستقیم</OptionalLabel><select value={managerUserId} disabled={!mayEdit || Boolean(linkedPersonnel)} onChange={(event) => setManagerUserId(event.target.value)}><option value="">بدون مدیر مستقیم</option>{state.users.filter((item) => item.status === 'active' && item.id !== user?.id).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+      <label className="field-label"><RequiredLabel>واحد سازمانی</RequiredLabel><select aria-required="true" value={unitId} disabled={!mayEdit || Boolean(linkedPersonnel)} onChange={(event) => changeUnit(event.target.value)}><option value="">انتخاب کنید</option>{state.units.filter((unit) => unit.type !== 'شعبه' && (unit.status === 'active' || unit.id === user?.unitId)).map((unit) => <option key={unit.id} value={unit.id}>{unit.name}</option>)}</select></label>
+      <label className="field-label"><RequiredLabel>سمت سازمانی</RequiredLabel><select aria-required="true" value={positionId} disabled={!mayEdit || Boolean(linkedPersonnel) || !unitId} onChange={(event) => setPositionId(event.target.value)}><option value="">{unitId ? 'انتخاب سمت مجاز این واحد' : 'ابتدا واحد را انتخاب کنید'}</option>{availablePositions.map((position) => <option key={position.id} value={position.id}>{position.title}</option>)}</select><small>فقط سمت‌های تعریف‌شده برای واحد انتخابی نمایش داده می‌شوند.</small></label>
+      <label className="field-label"><OptionalLabel>مدیر مستقیم</OptionalLabel><select value={managerUserId} disabled={!mayEdit || Boolean(linkedPersonnel)} onChange={(event) => setManagerUserId(event.target.value)}><option value="">بدون مدیر مستقیم</option>{state.users.filter((item) => item.status === 'active' && item.id !== user?.id).map((item) => <option key={item.id} value={item.id}>{userDisplayLabel(item,state)}</option>)}</select></label>
       {creating && <label className="field-label"><RequiredLabel>رمز عبور اولیه</RequiredLabel><input aria-required="true" type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="حداقل ۸ نویسه" /></label>}
-    </div>{linkedPersonnel && <div className="linked-source-note"><ContactRound size={19} /><span><strong>متصل به پرونده پرسنلی</strong> نام، واحد، سمت و مدیر مستقیم از پرونده «{linkedPersonnel.personnelCode}» خوانده می‌شوند.</span></div>}{!creating && can(actor, 'organization.users.password.manage') && <div className="password-control"><div><KeyRound size={20} /><span><strong>رمز عبور محلی</strong><small>آخرین تغییر: {formatDateTime(user.passwordUpdatedAt)}</small></span></div>{!passwordMode ? <button className="button button--secondary" onClick={() => setPasswordMode(true)}>تنظیم رمز جدید</button> : <div className="password-inline"><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="حداقل ۸ نویسه" /><button className="button button--primary" disabled={password.length < 8} onClick={() => onPassword?.(password).then(() => {setPassword(''); setPasswordMode(false);})}>ثبت رمز</button><button className="icon-button" aria-label="انصراف از تغییر رمز" onClick={() => setPasswordMode(false)}><X size={18} /></button></div>}</div>}</>}
-    {tab === 'access' && <UserAccessEditor user={user} state={state} roleIds={roleIds} mayAssign={mayAssign} permissions={permissions} permissionGrants={permissionGrants} permissionDenials={permissionDenials} onChange={setRoleIds} onGrantsChange={setPermissionGrants} onDenialsChange={setPermissionDenials} />}
+    </div>{linkedPersonnel && <div className="linked-source-note"><ContactRound size={19} /><span><strong>متصل به پرونده پرسنلی</strong> نام، واحد، سمت و مدیر مستقیم از پرونده «{linkedPersonnel.personnelCode}» خوانده می‌شوند.</span></div>}{!creating && can(actor, 'organization.users.password.manage') && <div className="password-control"><div><KeyRound size={20} /><span><strong>رمز عبور محلی</strong><small>آخرین تغییر: {formatDateTime(user.passwordUpdatedAt)}</small></span></div>{!passwordMode ? <button className="button button--secondary" onClick={() => setPasswordMode(true)}>تنظیم رمز جدید</button> : <div className="password-inline"><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="حداقل ۸ نویسه" /><button className="button button--primary" disabled={password.length < 8} onClick={() => onPassword?.(password).then((succeeded) => {if (succeeded) {setPassword(''); setPasswordMode(false);}})}>ثبت رمز</button><button className="icon-button" aria-label="انصراف از تغییر رمز" onClick={() => setPasswordMode(false)}><X size={18} /></button></div>}</div>}</>}
+    {tab === 'access' && <UserAccessEditor user={user} state={state} roleIds={roleIds} mayAssign={mayAssign} permissions={permissions} permissionDenials={permissionDenials} onChange={setRoleIds} onDenialsChange={setPermissionDenials} />}
     {tab === 'activity' && <div className="recent-activity">{recent.length ? recent.map((audit) => <article key={audit.id}><span className={`audit-outcome audit-outcome--${audit.outcome}`}>{audit.outcome === 'success' ? <Check size={15} /> : <CircleAlert size={15} />}</span><div><strong>{legacyTerminology(audit.summary)}</strong><p>{audit.reason ?? actionLabel(audit.action)}</p></div><time>{formatDateTime(audit.occurredAt)}</time></article>) : <div className="empty-state"><ScrollText size={24} /><strong>فعالیتی ثبت نشده است</strong></div>}</div>}
     <div className="user-policy-note"><ShieldCheck size={20} /><div><strong>دسترسی از نام نقش مستقل است</strong><span>Permission، Scope، Resource Policy و Workflow Guard با هم تصمیم نهایی را می‌سازند. استثنای ادمین قابل انتساب به نقش‌های دیگر نیست.</span></div></div>
     <div className="modal-actions modal-actions--split"><div>{mayLogin && <IconAction label="ورود به دسترسی کاربر" tone="qa" large onClick={onLogin!}><LogIn size={20} /></IconAction>}{user && actor.isAdmin && user.status === 'inactive' && <span className="inactive-help">کاربر غیرفعال قابل ورود نیست.</span>}</div><div><button className="button button--secondary" onClick={onClose}>بستن</button>{mayEdit && <button className="button button--primary" onClick={submit}>{creating ? 'ایجاد کاربر' : 'ذخیره تغییرات'}</button>}</div></div>
   </Modal>;
 }
 
-function UserAccessEditor({user, state, roleIds, mayAssign, permissions, permissionGrants, permissionDenials, onChange, onGrantsChange, onDenialsChange}: {user?: LocalUser; state: FoundationState; roleIds: string[]; mayAssign: boolean; permissions: PermissionCode[]; permissionGrants: PermissionCode[]; permissionDenials: PermissionCode[]; onChange: (roleIds: string[]) => void; onGrantsChange: (permissions: PermissionCode[]) => void; onDenialsChange: (permissions: PermissionCode[]) => void}) {
+function UserAccessEditor({user, state, roleIds, mayAssign, permissions, permissionDenials, onChange, onDenialsChange}: {user?: LocalUser; state: FoundationState; roleIds: string[]; mayAssign: boolean; permissions: PermissionCode[]; permissionDenials: PermissionCode[]; onChange: (roleIds: string[]) => void; onDenialsChange: (permissions: PermissionCode[]) => void}) {
   const [query, setQuery] = useState('');
   const [permissionQuery, setPermissionQuery] = useState('');
-  const [extraQuery, setExtraQuery] = useState('');
   const selectedRoles = state.roles.filter((role) => roleIds.includes(role.id));
   const basePermissions = [...new Set(selectedRoles.filter((role) => role.status === 'active').flatMap((role) => role.permissions))];
   const normalizedQuery = query.trim().toLocaleLowerCase('fa-IR');
   const visibleRoles = state.roles.filter((role) => !normalizedQuery || `${role.name} ${role.description} ${scopeLabel(role.scope)}`.toLocaleLowerCase('fa-IR').includes(normalizedQuery));
   const catalogByCode = new Map(PERMISSION_CATALOG.map((item) => [item.code, item]));
   const matchesPermission = (permission: PermissionCode, source: string) => {const item = catalogByCode.get(permission); const haystack = `${permission} ${item?.label ?? ''} ${item?.description ?? ''} ${source}`.toLocaleLowerCase('fa-IR'); return haystack.includes(permissionQuery.trim().toLocaleLowerCase('fa-IR'));};
-  const extraMatches = PERMISSION_CATALOG.filter((item) => item.available && !basePermissions.includes(item.code) && (!extraQuery.trim() || `${item.code} ${item.label} ${item.description}`.toLocaleLowerCase('fa-IR').includes(extraQuery.trim().toLocaleLowerCase('fa-IR'))));
   const toggleDenial = (permission: PermissionCode, enabled: boolean) => onDenialsChange(enabled ? permissionDenials.filter((item) => item !== permission) : [...new Set([...permissionDenials, permission])]);
-  const toggleGrant = (permission: PermissionCode, enabled: boolean) => onGrantsChange(enabled ? [...new Set([...permissionGrants, permission])] : permissionGrants.filter((item) => item !== permission));
-  const overridesDisabled = !mayAssign || Boolean(user?.isAdmin);
+  const actorIsPrimaryAdmin = state.activeUser.id === PRIMARY_ADMIN_USER_ID;
+  const selfAccessEdit = user?.id === state.activeUser.id;
+  const targetHasProtectedAccess = Boolean(user?.roleIds.some((roleId) => {
+    const role = state.roles.find((item) => item.id === roleId);
+    return PROTECTED_ROLE_IDS.has(roleId) || role?.permissions.some((permission) => PROTECTED_PERMISSION_CODES.has(permission));
+  }));
+  const protectedTargetReadonly = targetHasProtectedAccess && !actorIsPrimaryAdmin;
+  const overridesDisabled = !mayAssign || Boolean(user?.isAdmin) || selfAccessEdit || protectedTargetReadonly;
 
   return <div className="compact-access-layout">
     <section className="compact-role-section">
@@ -829,22 +1400,22 @@ function UserAccessEditor({user, state, roleIds, mayAssign, permissions, permiss
           <div className="compact-role-list">
             {visibleRoles.map((role) => {
               const checked = roleIds.includes(role.id);
-              const protectedRole = Boolean(user?.isAdmin && role.id === 'role-admin');
-              const disabled = !mayAssign || protectedRole || role.status === 'inactive';
+              const protectedRole = PROTECTED_ROLE_IDS.has(role.id) || role.permissions.some((permission) => PROTECTED_PERMISSION_CODES.has(permission));
+              const disabled = !mayAssign || selfAccessEdit || protectedTargetReadonly || (role.id === 'role-admin' && user?.id !== PRIMARY_ADMIN_USER_ID) || (protectedRole && !actorIsPrimaryAdmin) || role.status === 'inactive';
               return <label key={role.id} className={`${checked ? 'selected' : ''} ${disabled ? 'disabled' : ''}`}>
                 <input type="checkbox" checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked ? [...roleIds, role.id] : roleIds.filter((id) => id !== role.id))} />
                 <span className="permission-check">{checked && <Check size={13} />}</span>
                 <span className="compact-role-copy"><strong>{role.name}</strong><small>{role.description}</small></span>
                 <span className="compact-role-meta"><b>{scopeLabel(role.scope)}</b><small>{role.permissions.length.toLocaleString('en-US')} مجوز</small></span>
                 {role.status === 'inactive' && <em>غیرفعال</em>}
-                {protectedRole && <em>محافظت‌شده</em>}
+                {protectedRole && <em>{actorIsPrimaryAdmin ? 'سطح‌بالا' : 'فقط ادمین اصلی'}</em>}
               </label>;
             })}
             {!visibleRoles.length && <div className="compact-role-empty">نقشی مطابق جست‌وجو پیدا نشد.</div>}
           </div>
         </div>
       </details>
-      {!mayAssign && <p className="compact-role-readonly"><Shield size={15} /> نقش‌ها فقط برای مشاهده نمایش داده می‌شوند.</p>}
+      {(!mayAssign || selfAccessEdit || protectedTargetReadonly) && <p className="compact-role-readonly"><Shield size={15} /> {selfAccessEdit ? 'تغییر نقش یا ریزمجوز حساب خود کاربر مجاز نیست.' : protectedTargetReadonly ? 'این حساب دسترسی سطح‌بالا دارد و فقط ادمین اصلی می‌تواند نقش یا استثنای آن را تغییر دهد.' : 'نقش‌ها فقط برای مشاهده نمایش داده می‌شوند.'}</p>}
       <section className="permission-override-editor">
         <div className="section-mini-heading"><strong>ریزِ مجوزهای نقش‌ها</strong><span>هر مجوز را فقط برای همین کاربر روشن یا خاموش کنید</span></div>
         <label className="compact-role-search"><Search size={16}/><input value={permissionQuery} onChange={(event) => setPermissionQuery(event.target.value)} placeholder="جست‌وجوی مجوز در نقش‌های انتخاب‌شده…" /></label>
@@ -855,36 +1426,33 @@ function UserAccessEditor({user, state, roleIds, mayAssign, permissions, permiss
             return <details key={role.id} open={roleIndex === 0} className="role-permission-accordion">
               <summary><span><KeyRound size={15}/><strong>{role.name}</strong>{roleIndex === 0 && <i>اصلی</i>}</span><small>{enabledCount.toLocaleString('en-US')} از {role.permissions.length.toLocaleString('en-US')} مجوز فعال</small><ChevronDown size={16}/></summary>
               <div className="role-permission-list">
-                {visiblePermissions.map((permission) => {const item = catalogByCode.get(permission); const enabled = !permissionDenials.includes(permission); return <label key={permission} className={!enabled ? 'permission-denied' : ''}><input type="checkbox" checked={enabled} disabled={overridesDisabled} onChange={(event) => toggleDenial(permission, event.target.checked)}/><span className="permission-check">{enabled && <Check size={12}/>}</span><span><strong>{item?.label ?? permissionLabel(permission)}</strong><small>{item?.description ?? permission}</small></span><code>{permission}</code>{!enabled && <em>مستثنا برای این کاربر</em>}</label>;})}
+                {visiblePermissions.map((permission) => {const item = catalogByCode.get(permission); const enabled = !permissionDenials.includes(permission); const protectedPermission = PROTECTED_PERMISSION_CODES.has(permission); return <label key={permission} className={!enabled ? 'permission-denied' : ''}><input type="checkbox" checked={enabled} disabled={overridesDisabled || (protectedPermission && !actorIsPrimaryAdmin)} onChange={(event) => toggleDenial(permission, event.target.checked)}/><span className="permission-check">{enabled && <Check size={12}/>}</span><span><strong>{item?.label ?? permissionLabel(permission)}</strong><small>{item?.description ?? permission}</small></span><code>{permission}</code>{protectedPermission && !actorIsPrimaryAdmin ? <em>فقط ادمین اصلی</em> : !enabled && <em>مستثنا برای این کاربر</em>}</label>;})}
                 {!visiblePermissions.length && <div className="compact-role-empty">مجوزی مطابق جست‌وجو در این نقش نیست.</div>}
               </div>
             </details>;
           })}
           {!selectedRoles.length && <div className="compact-role-empty">ابتدا حداقل یک نقش انتخاب کنید.</div>}
         </div>
-        <details className="extra-permission-picker">
-          <summary><span><ShieldCheck size={16}/><strong>مجوز افزوده خارج از نقش</strong></span><small>{permissionGrants.length.toLocaleString('en-US')} مجوز افزوده</small><ChevronDown size={16}/></summary>
-          <div><label className="compact-role-search"><Search size={16}/><input value={extraQuery} onChange={(event) => setExtraQuery(event.target.value)} placeholder="جست‌وجوی مجوز تکمیلی…" /></label><div className="role-permission-list extra-permission-list">{extraMatches.map((item) => {const enabled = permissionGrants.includes(item.code); return <label key={item.code}><input type="checkbox" checked={enabled} disabled={overridesDisabled} onChange={(event) => toggleGrant(item.code, event.target.checked)}/><span className="permission-check">{enabled && <Check size={12}/>}</span><span><strong>{item.label}</strong><small>{item.description}</small></span><code>{item.code}</code>{enabled && <em>افزوده برای این کاربر</em>}</label>;})}</div></div>
-        </details>
+        <p className="compact-role-readonly"><Shield size={15}/> افزودن مجوز مستقیم غیرفعال است؛ دسترسی مؤثر فقط از نقش‌های مصوب و استثناهای کاهنده به‌دست می‌آید.</p>
         {user?.isAdmin && <p className="compact-role-readonly"><Shield size={15}/> حساب ادمین محافظت‌شده است و ریزمجوز کاربری نمی‌پذیرد.</p>}
       </section>
     </section>
     <section className="compact-access-summary">
-      <div className="section-mini-heading"><strong>خلاصه دسترسی مؤثر</strong><span>نقش‌ها منهای استثناها، به‌علاوه مجوزهای تکمیلی</span></div>
-      <div className="effective-access-card"><ShieldCheck size={27} /><strong>{permissions.length.toLocaleString('en-US')} مجوز مؤثر</strong><span>محدوده پایه: {user?.isAdmin ? 'کل شرکت · استثنای محافظت‌شده ادمین' : scopeLabel(state.roles.find((role) => role.id === roleIds[0])?.scope ?? 'SELF')}</span><dl className="permission-override-stats"><div><dt>پایه نقش‌ها</dt><dd>{basePermissions.length.toLocaleString('en-US')}</dd></div><div><dt>مستثناشده</dt><dd>{permissionDenials.filter((item) => basePermissions.includes(item)).length.toLocaleString('en-US')}</dd></div><div><dt>افزوده</dt><dd>{permissionGrants.filter((item) => !basePermissions.includes(item)).length.toLocaleString('en-US')}</dd></div></dl><div>{permissions.slice(0, 12).map((permission) => <i key={permission}>{permissionLabel(permission)}</i>)}</div></div>
+      <div className="section-mini-heading"><strong>خلاصه دسترسی مؤثر</strong><span>نقش‌های مصوب منهای استثناهای کاهنده</span></div>
+      <div className="effective-access-card"><ShieldCheck size={27} /><strong>{permissions.length.toLocaleString('en-US')} مجوز مؤثر</strong><span>{user?.isAdmin ? 'محدوده: کل شرکت · استثنای محافظت‌شده ادمین' : selectedRoles.length ? `محدوده مستقل هر نقش: ${selectedRoles.map((role)=>`${role.name} (${scopeLabel(role.scope)})`).join(' · ')}` : 'محدوده‌ای تعیین نشده است'}</span><dl className="permission-override-stats"><div><dt>پایه نقش‌ها</dt><dd>{basePermissions.length.toLocaleString('en-US')}</dd></div><div><dt>مستثناشده</dt><dd>{permissionDenials.filter((item) => basePermissions.includes(item)).length.toLocaleString('en-US')}</dd></div><div><dt>مجوز مستقیم</dt><dd>غیرفعال</dd></div></dl><div>{[...new Set(permissions)].slice(0, 12).map((permission) => <i key={permission}>{permissionLabel(permission)}</i>)}</div></div>
     </section>
   </div>;
 }
 
-function StatusConfirmDialog({user, onClose, onConfirm}: {user: LocalUser; onClose: () => void; onConfirm: () => void}) {
-  return <Modal onClose={onClose}><div className="danger-symbol"><UserX size={27} /></div><div className="centered-modal"><h2>غیرفعال‌سازی کاربر</h2><p>حساب «{user.name}» غیرفعال می‌شود و تا فعال‌سازی دوباره امکان ورود یا مشاهده دسترسی ندارد. داده‌های قبلی او حذف نمی‌شوند.</p><div className="modal-actions modal-actions--center"><button className="button button--secondary" onClick={onClose}>انصراف</button><button className="button button--danger" onClick={onConfirm}>تأیید غیرفعال‌سازی</button></div></div></Modal>;
+function StatusConfirmDialog({user, state, onClose, onConfirm}: {user: LocalUser; state: FoundationState; onClose: () => void; onConfirm: () => void}) {
+  return <Modal onClose={onClose}><div className="danger-symbol"><UserX size={27} /></div><div className="centered-modal"><h2>غیرفعال‌سازی کاربر</h2><p>حساب «{userDisplayLabel(user,state)}» غیرفعال می‌شود و تا فعال‌سازی دوباره امکان ورود یا مشاهده دسترسی ندارد. داده‌های قبلی او حذف نمی‌شوند.</p><div className="modal-actions modal-actions--center"><button className="button button--secondary" onClick={onClose}>انصراف</button><button className="button button--danger" onClick={onConfirm}>تأیید غیرفعال‌سازی</button></div></div></Modal>;
 }
 
 function IconAction({label, tone = 'neutral', large = false, disabled = false, onClick, children}: {label: string; tone?: 'neutral' | 'primary' | 'success' | 'danger' | 'qa'; large?: boolean; disabled?: boolean; onClick: () => void; children: ReactNode}) {
   return <button type="button" className={`icon-action icon-action--${tone} ${large ? 'icon-action--large' : ''}`} aria-label={label} data-tooltip={label} disabled={disabled} onClick={onClick}>{children}</button>;
 }
 
-function AccountSecurityPage({user, busy, onSubmit}: {user: LocalUser; busy: boolean; onSubmit: (input: SelfCredentialChangeInput) => Promise<void>}) {
+function AccountSecurityPage({user, busy, onSubmit, onRequestSecondaryOtp, onSecondarySubmit}: {user: LocalUser; busy: boolean; onSubmit: (input: SelfCredentialChangeInput) => Promise<boolean>; onRequestSecondaryOtp:()=>Promise<LocalSmsPreview>; onSecondarySubmit:(input:SecondaryPasswordChangeInput)=>Promise<boolean>}) {
   const [username, setUsername] = useState(user.username);
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -892,6 +1460,12 @@ function AccountSecurityPage({user, busy, onSubmit}: {user: LocalUser; busy: boo
   const [showCurrent, setShowCurrent] = useState(false);
   const [showNew, setShowNew] = useState(false);
   const [errors, setErrors] = useState<string[]>([]);
+  const [secondaryErrors,setSecondaryErrors]=useState<string[]>([]);
+  const [secondaryOtp,setSecondaryOtp]=useState('');
+  const [secondaryPassword,setSecondaryPassword]=useState('');
+  const [secondaryPasswordConfirm,setSecondaryPasswordConfirm]=useState('');
+  const [secondaryPreview,setSecondaryPreview]=useState<LocalSmsPreview>();
+  const [secondaryBusy,setSecondaryBusy]=useState(false);
   const usernameChanged = username.trim().toLowerCase() !== user.username.toLowerCase();
 
   const submit = () => {
@@ -904,6 +1478,8 @@ function AccountSecurityPage({user, busy, onSubmit}: {user: LocalUser; busy: boo
     setErrors(next);
     if (!next.length) void onSubmit({currentPassword, username, newPassword: newPassword || undefined});
   };
+  const requestSecondaryOtp=async()=>{if(secondaryBusy||busy)return;setSecondaryBusy(true);setSecondaryErrors([]);try{setSecondaryPreview(await onRequestSecondaryOtp());}catch(error){setSecondaryErrors([error instanceof Error?error.message:'دریافت کد تأیید ممکن نشد.']);}finally{setSecondaryBusy(false);}};
+  const submitSecondary=async()=>{if(secondaryBusy||busy)return;const next:string[]=[];if(!/^\d{6}$/.test(secondaryOtp))next.push('کد تأیید پیامکی باید ۶ رقم باشد.');if(!/^\d{4}$/.test(secondaryPassword))next.push('رمز دوم ثابت باید دقیقاً ۴ رقم باشد.');if(secondaryPassword!==secondaryPasswordConfirm)next.push('تکرار رمز دوم با مقدار واردشده یکسان نیست.');setSecondaryErrors(next);if(next.length)return;setSecondaryBusy(true);try{const ok=await onSecondarySubmit({verificationCode:secondaryOtp,secondaryPassword});if(ok){setSecondaryOtp('');setSecondaryPassword('');setSecondaryPasswordConfirm('');setSecondaryPreview(undefined);}}finally{setSecondaryBusy(false);}};
 
   return <div className="page-stack account-security-page">
     <PageIntro icon={LockKeyhole} eyebrow="تنظیمات / حساب شخصی" title="حساب و امنیت" description="نام کاربری و رمز عبور همین حساب را شخصاً مدیریت کنید. تغییرات در داده محلی امن ثبت و در ممیزی ثبت می‌شوند." />
@@ -911,13 +1487,27 @@ function AccountSecurityPage({user, busy, onSubmit}: {user: LocalUser; busy: boo
       <aside className="account-security-summary">
         <span className="persona-avatar persona-avatar--large" style={{background: user.accent}}>{user.initials}</span>
         <div><strong>{user.name}</strong><span>{user.roleTitle}</span><small dir="ltr">@{user.username}</small></div>
-        <dl><div><dt>وضعیت حساب</dt><dd><i className="status-badge status-badge--active">فعال</i></dd></div><div><dt>آخرین تغییر رمز</dt><dd>{formatDateTime(user.passwordUpdatedAt)}</dd></div></dl>
+        <dl><div><dt>وضعیت حساب</dt><dd><i className="status-badge status-badge--active">فعال</i></dd></div><div><dt>آخرین تغییر رمز</dt><dd>{formatDateTime(user.passwordUpdatedAt)}</dd></div><div><dt>رمز دوم ثابت</dt><dd>{user.hasSecondaryPassword?'فعال':'تعریف نشده'}</dd></div></dl>
       </aside>
       <div className="account-security-form">
         <FormValidationSummary errors={errors} />
         <section className="security-form-section">
           <SettingHeading icon={AtSign} title="نام کاربری" text="این نام در ورود بعدی استفاده می‌شود و ادمین آن را در فهرست کاربران مشاهده می‌کند." />
           <label className="field-label"><RequiredLabel>نام کاربری</RequiredLabel><input aria-required="true" dir="ltr" autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} placeholder="name.family" /><small>۳ تا ۳۲ نویسه لاتین، عدد، نقطه، خط تیره یا زیرخط</small></label>
+        </section>
+        <section className="security-form-section secondary-password-section">
+          <SettingHeading icon={Fingerprint} title="رمز دوم ثابت" text="یک رمز ۴ رقمی مستقل برای بازکردن نامه‌های خصوصی و محرمانه و برای تأیید یا ارسال نهایی نامه تعریف کنید." />
+          <FormValidationSummary errors={secondaryErrors}/>
+          <div className="secondary-password-status"><ShieldCheck size={20}/><span><strong>{user.hasSecondaryPassword?'رمز دوم شما فعال است':'هنوز رمز دوم تعریف نشده است'}</strong><small>برای تعریف، تغییر یا فراموشی رمز دوم، ابتدا کد یک‌بارمصرف شماره همراه ثبت‌شده در پرونده پرسنلی را بگیرید.</small></span></div>
+          {!secondaryPreview?<button type="button" className="button button--secondary" disabled={busy||secondaryBusy} onClick={()=>void requestSecondaryOtp()}><Phone size={18}/>{user.hasSecondaryPassword?'تغییر یا بازیابی رمز دوم':'دریافت کد و تعریف رمز دوم'}</button>:<>
+            <div className="local-sms-preview" role="status" aria-live="polite"><Phone size={18}/><span><strong>کد به {secondaryPreview.maskedMobile} ارسال شد</strong><small>{secondaryPreview.message}</small></span>{secondaryPreview.verificationCode&&<code dir="ltr">{secondaryPreview.verificationCode}</code>}</div>
+            <div className="security-password-grid">
+              <label className="field-label"><RequiredLabel>کد تأیید ۶ رقمی</RequiredLabel><input dir="ltr" inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={secondaryOtp} onChange={(event)=>setSecondaryOtp(digitsOnly(event.target.value).slice(0,6))}/></label>
+              <label className="field-label"><RequiredLabel>رمز دوم ثابت ۴ رقمی</RequiredLabel><input dir="ltr" type="password" inputMode="numeric" autoComplete="new-password" maxLength={4} value={secondaryPassword} onChange={(event)=>setSecondaryPassword(digitsOnly(event.target.value).slice(0,4))}/></label>
+              <label className="field-label"><RequiredLabel>تکرار رمز دوم</RequiredLabel><input dir="ltr" type="password" inputMode="numeric" autoComplete="new-password" maxLength={4} value={secondaryPasswordConfirm} onChange={(event)=>setSecondaryPasswordConfirm(digitsOnly(event.target.value).slice(0,4))}/></label>
+            </div>
+            <div className="account-security-actions"><button type="button" className="button button--primary" disabled={busy||secondaryBusy} onClick={()=>void submitSecondary()}><Fingerprint size={18}/> ذخیره رمز دوم ثابت</button><button type="button" className="button button--ghost" disabled={busy||secondaryBusy} onClick={()=>{setSecondaryPreview(undefined);setSecondaryErrors([]);}}>انصراف</button></div>
+          </>}
         </section>
         <section className="security-form-section">
           <SettingHeading icon={KeyRound} title="رمز عبور" text="برای تغییر نام کاربری یا رمز، ابتدا رمز فعلی را وارد کنید. رمز جدید اختیاری است." />
@@ -939,21 +1529,37 @@ function AppearancePage({preferences, onChange}: {preferences: UiPreferences; on
   return <div className="page-stack">
     <PageIntro icon={Palette} eyebrow="ترجیحات این دستگاه" title="تنظیمات ظاهری" description="این گزینه‌ها فقط برای ظاهر محصول‌اند، در localStorage همین مرورگر می‌مانند و وارد داده عملیاتی IndexedDB نمی‌شوند." />
     <section className="settings-panel">
+      <SettingHeading icon={Palette} title="رنگ سازمانی" text="رنگ برند را مستقل از حالت روشن، تیره یا خودکار انتخاب کنید." />
+      <div className="brand-palette-grid" role="group" aria-label="انتخاب رنگ سازمانی">
+        {([['classic', 'کلاسیک', 'بنفش آشنای فعلی'], ['navy-gold', 'شاهراه', 'سرمه‌ای و طلایی نشان شاهراه']] as const).map(([value, title, text]) => <button
+          key={value}
+          type="button"
+          className={`brand-palette-choice brand-palette-choice--${value} ${preferences.palette === value ? 'brand-palette-choice--active' : ''}`}
+          aria-pressed={preferences.palette === value}
+          onClick={() => update('palette', value)}
+        >
+          <span className="brand-palette-choice__preview"><i /><i /><i /></span>
+          <span><strong>{title}</strong><small>{text}</small></span>
+          {preferences.palette === value && <CheckCircle2 size={20} />}
+        </button>)}
+      </div>
+    </section>
+    <section className="settings-panel">
       <SettingHeading icon={SlidersHorizontal} title="اندازه نوشته‌ها" text="خوانایی همهٔ صفحه‌ها را بدون نیاز به Zoom مرورگر تنظیم کنید." />
       <div className="choice-grid choice-grid--font">
-        {([['standard', 'استاندارد', 'برای صفحه‌های کوچک و اطلاعات متراکم'], ['large', 'بزرگ', 'اندازه پیش‌فرض و پیشنهادی'], ['xlarge', 'خیلی بزرگ', 'خوانایی بیشتر در نمایشگرهای بزرگ']] as const).map(([value, title, text], index) => <button key={value} className={`preference-choice ${preferences.fontSize === value ? 'preference-choice--active' : ''}`} onClick={() => update('fontSize', value)}><span className={`font-sample font-sample--${index}`}>آ</span><strong>{title}</strong><small>{text}</small>{preferences.fontSize === value && <CheckCircle2 size={18} />}</button>)}
+        {([['standard', 'استاندارد', 'برای صفحه‌های کوچک و اطلاعات متراکم'], ['large', 'بزرگ', 'اندازه پیش‌فرض و پیشنهادی'], ['xlarge', 'خیلی بزرگ', 'خوانایی بیشتر در نمایشگرهای بزرگ']] as const).map(([value, title, text], index) => <button key={value} type="button" aria-pressed={preferences.fontSize === value} className={`preference-choice ${preferences.fontSize === value ? 'preference-choice--active' : ''}`} onClick={() => update('fontSize', value)}><span className={`font-sample font-sample--${index}`}>آ</span><strong>{title}</strong><small>{text}</small>{preferences.fontSize === value && <CheckCircle2 size={18} />}</button>)}
       </div>
     </section>
     <section className="settings-panel">
       <SettingHeading icon={Palette} title="پوسته" text="پوسته روشن، تیره یا هماهنگ با تنظیم سیستم‌عامل." />
       <div className="choice-grid">
-        {([['light', 'روشن', Sun], ['dark', 'تیره', Moon], ['system', 'سیستم', Monitor]] as const).map(([value, title, Icon]) => <button key={value} className={`preference-choice preference-choice--compact ${preferences.theme === value ? 'preference-choice--active' : ''}`} onClick={() => update('theme', value)}><Icon size={22} /><strong>{title}</strong><small>{value === 'system' ? 'هماهنگ با دستگاه' : `پوسته ${title}`}</small>{preferences.theme === value && <CheckCircle2 size={18} />}</button>)}
+        {([['light', 'روشن', Sun], ['dark', 'تیره', Moon], ['system', 'سیستم', Monitor]] as const).map(([value, title, Icon]) => <button key={value} type="button" aria-pressed={preferences.theme === value} className={`preference-choice preference-choice--compact ${preferences.theme === value ? 'preference-choice--active' : ''}`} onClick={() => update('theme', value)}><Icon size={22} /><strong>{title}</strong><small>{value === 'system' ? 'هماهنگ با دستگاه' : `پوسته ${title}`}</small>{preferences.theme === value && <CheckCircle2 size={18} />}</button>)}
       </div>
     </section>
     <section className="settings-panel">
       <SettingHeading icon={LayoutDashboard} title="تراکم نمایش" text="فاصلهٔ بین محتوا و ارتفاع ردیف‌ها را برای سبک کاری خود انتخاب کنید." />
       <div className="choice-grid">
-        {([['compact', 'فشرده', 'اطلاعات بیشتر'], ['comfortable', 'راحت', 'تعادل پیشنهادی'], ['spacious', 'باز', 'فاصله بیشتر']] as const).map(([value, title, text]) => <button key={value} className={`preference-choice preference-choice--compact ${preferences.density === value ? 'preference-choice--active' : ''}`} onClick={() => update('density', value)}><span className={`density-preview density-preview--${value}`}><i /><i /><i /></span><strong>{title}</strong><small>{text}</small>{preferences.density === value && <CheckCircle2 size={18} />}</button>)}
+        {([['compact', 'فشرده', 'اطلاعات بیشتر'], ['comfortable', 'راحت', 'تعادل پیشنهادی'], ['spacious', 'باز', 'فاصله بیشتر']] as const).map(([value, title, text]) => <button key={value} type="button" aria-pressed={preferences.density === value} className={`preference-choice preference-choice--compact ${preferences.density === value ? 'preference-choice--active' : ''}`} onClick={() => update('density', value)}><span className={`density-preview density-preview--${value}`}><i /><i /><i /></span><strong>{title}</strong><small>{text}</small>{preferences.density === value && <CheckCircle2 size={18} />}</button>)}
       </div>
     </section>
     <section className="settings-panel">
@@ -996,7 +1602,7 @@ function AccountMenu({user, inQaSession, onMyAccount, onAccountSecurity, onAppea
   return <><button className="account-scrim" aria-label="بستن منوی حساب" onClick={onClose} /><section className="account-menu">
     <div className="account-summary"><span className="persona-avatar persona-avatar--large" style={{background: user.accent}}>{user.initials}</span><div><strong>{user.name}</strong><span>{user.roleTitle}</span><small>{scopeLabel(user.scope)}</small></div></div>
     <button onClick={onMyAccount}><UserRound size={18} /><span><strong>حساب کاربری من</strong><small>مشاهده پرونده و درخواست تغییر اطلاعات</small></span><ArrowLeft size={16} /></button>
-    {!inQaSession && <button onClick={onAccountSecurity}><LockKeyhole size={18} /><span><strong>حساب و امنیت</strong><small>تغییر نام کاربری و رمز عبور شخصی</small></span><ArrowLeft size={16} /></button>}
+    {!inQaSession && <button onClick={onAccountSecurity}><LockKeyhole size={18} /><span><strong>حساب و امنیت</strong><small>نام کاربری، رمز عبور و رمز دوم ثابت</small></span><ArrowLeft size={16} /></button>}
     <button onClick={onAppearance}><Palette size={18} /><span><strong>تنظیمات ظاهری</strong><small>فونت، پوسته، تراکم و فاصله ستون‌ها</small></span><ArrowLeft size={16} /></button>
     {!inQaSession && <button onClick={onSwitchAccount}><LogIn size={18} /><span><strong>ورود با حساب دیگر</strong><small>نام کاربری و رمز عبور محلی</small></span><ArrowLeft size={16} /></button>}
     {inQaSession && <button className="account-menu-qa" onClick={onEndQa}><ShieldCheck size={18} /><span><strong>بازگشت به دسترسی ادمین</strong><small>پایان مشاهده دسترسی کاربر</small></span><ArrowLeft size={16} /></button>}
@@ -1021,7 +1627,7 @@ function PasswordDialog({title, description, actionLabel, busy, onClose, onSubmi
 
 type AuthMode = 'login' | 'password' | 'username';
 
-function AuthPortal({currentUser, busy, globalError, onClearError, onClose, onRegister, onSubmit}: {currentUser?: LocalUser; busy: boolean; globalError: string | null; onClearError: () => void; onClose?: () => void; onRegister: () => void; onSubmit: (username: string, password: string) => void}) {
+function AuthPortal({currentUser, busy, globalError, onClearError, onClose, onRegister, onApply, onSubmit}: {currentUser?: LocalUser; busy: boolean; globalError: string | null; onClearError: () => void; onClose?: () => void; onRegister: () => void; onApply: () => void; onSubmit: (username: string, password: string) => void}) {
   const [mode, setMode] = useState<AuthMode>('login');
   const [username, setUsername] = useState('');
   const [mobile, setMobile] = useState('');
@@ -1066,8 +1672,8 @@ function AuthPortal({currentUser, busy, globalError, onClearError, onClose, onRe
   };
 
   return <main className="auth-page" dir="rtl">
-    <section className="auth-showcase" aria-label="معرفی سامانه تپرا">
-      <div className="auth-brand"><span><Sparkles size={25} /></span><div><strong>تپرا</strong><small>سامانه یکپارچه مدیریت سازمان</small></div></div>
+    <section className="auth-showcase" aria-label={`معرفی سامانه ${PRODUCT_NAME}`}>
+      <BrandMark variant="lockup" tone="inverse" showTagline className="auth-brand" />
       <div className="auth-showcase-copy">
         <span className="auth-kicker"><i /> محیط امن و محلی سازمان</span>
         <h1>همه‌چیز برای یک<br/><em>روز کاری منظم</em></h1>
@@ -1083,7 +1689,7 @@ function AuthPortal({currentUser, busy, globalError, onClearError, onClose, onRe
     <section className="auth-workspace">
       {onClose && <button className="auth-close" onClick={onClose} aria-label="بازگشت به سامانه"><X size={20}/></button>}
       <div className="auth-card">
-        <div className="auth-mobile-brand"><span><Sparkles size={20}/></span><strong>تپرا</strong></div>
+        <BrandMark variant="lockup" className="auth-mobile-brand" />
         {mode !== 'login' && <button className="auth-back" onClick={() => changeMode('login')}><ArrowRight size={17}/> بازگشت به ورود</button>}
         <div className="auth-heading">
           <span>{mode === 'login' ? 'ورود به حساب کاربری' : mode === 'password' ? 'بازیابی رمز عبور' : 'یادآوری نام کاربری'}</span>
@@ -1122,7 +1728,7 @@ function AuthPortal({currentUser, busy, globalError, onClearError, onClose, onRe
           <button className="auth-primary" disabled={localBusy} onClick={requestUsername}><AtSign size={19}/>{localBusy ? 'در حال بررسی…' : 'ارسال نام کاربری با پیامک'}</button>
         </div>}
 
-        <div className="auth-register"><span>حساب کاربری ندارید؟</span><button onClick={onRegister}><UserPlus size={17}/> ثبت‌نام در سامانه</button></div>
+        <div className="auth-register"><span>حساب کاربری ندارید؟</span><button onClick={onRegister}><UserPlus size={17}/> ثبت‌نام در سامانه</button><button onClick={onApply}><BriefcaseBusiness size={17}/> ارسال رزومه برای همکاری</button></div>
         <div className="auth-security"><LockKeyhole size={15}/><span>رمزها به‌صورت متن ساده ذخیره یا در گزارش‌ها ثبت نمی‌شوند.</span></div>
       </div>
     </section>
@@ -1139,7 +1745,7 @@ function RestoreDialog({input, busy, onClose, onSubmit}: {input: SnapshotManifes
   const encrypted = isEncryptedSnapshot(input);
   const [password, setPassword] = useState('');
   const [errors,setErrors]=useState<string[]>([]);const submit=()=>{const next=encrypted?validateRequired([{label:'رمز فایل',value:password,valid:(value)=>String(value).length>=8,message:'فیلد «رمز فایل» الزامی است و باید حداقل ۸ نویسه داشته باشد.'}]):[];setErrors(next);if(!next.length)onSubmit(encrypted?password:undefined);};
-  return <Modal onClose={onClose}><div className="modal-heading"><div><span>بازیابی کنترل‌شده</span><h2>{encrypted ? 'پشتیبان رمزگذاری‌شده' : 'پشتیبان محلی تپرا'}</h2><p>داده فعلی با محتوای فایل جایگزین می‌شود و رخداد بازیابی در Audit ثبت خواهد شد.</p></div><button className="icon-button" onClick={onClose}><X size={20} /></button></div><FormValidationSummary errors={errors}/>{encrypted && <label className="field-label"><RequiredLabel>رمز فایل</RequiredLabel><input aria-required="true" type="password" autoFocus value={password} onChange={(event) => setPassword(event.target.value)} placeholder="رمز پشتیبان" /></label>}<div className="restore-summary"><FileJson size={21} /><div><strong>اعتبارسنجی Schema و checksum</strong><span>قبل از جایگزینی داده به‌صورت خودکار انجام می‌شود.</span></div></div><div className="modal-actions"><button className="button button--secondary" onClick={onClose}>انصراف</button><button className="button button--primary" disabled={busy} onClick={submit}>تأیید و بازیابی</button></div></Modal>;
+  return <Modal onClose={onClose}><div className="modal-heading"><div><span>بازیابی کنترل‌شده</span><h2>{encrypted ? 'پشتیبان رمزگذاری‌شده' : `پشتیبان محلی ${PRODUCT_NAME}`}</h2><p>داده فعلی با محتوای فایل جایگزین می‌شود و رخداد بازیابی در Audit ثبت خواهد شد.</p></div><button className="icon-button" onClick={onClose}><X size={20} /></button></div><FormValidationSummary errors={errors}/>{encrypted && <label className="field-label"><RequiredLabel>رمز فایل</RequiredLabel><input aria-required="true" type="password" autoFocus value={password} onChange={(event) => setPassword(event.target.value)} placeholder="رمز پشتیبان" /></label>}<div className="restore-summary"><FileJson size={21} /><div><strong>اعتبارسنجی Schema و checksum</strong><span>قبل از جایگزینی داده به‌صورت خودکار انجام می‌شود.</span></div></div><div className="modal-actions"><button className="button button--secondary" onClick={onClose}>انصراف</button><button className="button button--primary" disabled={busy} onClick={submit}>تأیید و بازیابی</button></div></Modal>;
 }
 
 function ProbeCard({title, scenario, request, decision, onRun}: {title: string; scenario: string; request: Parameters<typeof service.inspectAuthorization>[0]; decision: AuthorizationDecision; onRun: () => void}) {
@@ -1168,13 +1774,13 @@ function GuardDot({label, passed}: {label: string; passed: boolean}) { return <s
 function DataAction({icon: Icon, tone, title, text, action, disabled, onClick}: {icon: LucideIcon; tone: string; title: string; text: string; action: string; disabled: boolean; onClick: () => void}) { return <article className={`data-action data-action--${tone}`}><span><Icon size={22} /></span><h3>{title}</h3><p>{text}</p><button disabled={disabled} onClick={onClick}>{disabled ? 'برای این کاربر مجاز نیست' : action}<ArrowLeft size={16} /></button></article>; }
 function StorageDatum({label, value, mono = false}: {label: string; value: string; mono?: boolean}) { return <div className="storage-datum"><span>{label}</span><strong className={mono ? 'mono' : ''}>{value}</strong></div>; }
 function Modal({children, onClose, wide = false}: {children: ReactNode; onClose: () => void; wide?: boolean}) { return <div className="modal-layer" role="dialog" aria-modal="true"><button className="modal-scrim" onClick={onClose} aria-label="بستن" /><section className={`modal-card ${wide ? 'modal-card--wide' : ''}`}>{children}</section></div>; }
-function LoadingScreen() { return <div className="loading-screen" dir="rtl"><div className="brand-mark"><Sparkles size={25} /></div><strong>تپرا در حال آماده‌سازی بنیاد محلی است</strong><span>داده‌های این دستگاه بررسی می‌شوند…</span><i /></div>; }
+function LoadingScreen() { return <div className="loading-screen" dir="rtl"><BrandMark variant="lockup" showTagline /><strong>{PRODUCT_NAME} در حال آماده‌سازی است</strong><span>داده‌های این دستگاه بررسی می‌شوند…</span><i /></div>; }
 function FatalState({error}: {error: string}) { return <div className="fatal-state" dir="rtl"><CircleAlert size={30} /><h1>راه‌اندازی Foundation ممکن نشد</h1><p>{error}</p><button onClick={() => location.reload()}>تلاش دوباره</button></div>; }
 
 function scopeLabel(scope: QaPersona['scope']) { return ({COMPANY: 'کل شرکت', UNIT: 'واحد سازمانی', TEAM: 'تیم کاری', SELF: 'فقط خود', RECORD: 'رکورد مشخص'} as const)[scope]; }
 function unitLabel(unitId?: string) { return ({'unit-finance': 'مالی', 'unit-sales': 'فروش', 'unit-warehouse': 'انبار', 'unit-support': 'پشتیبانی'} as Record<string, string>)[unitId ?? ''] ?? 'تمام شرکت'; }
 function auditCategoryLabel(category: string) { return ({session: 'نشست کاربری', authorization: 'تصمیم دسترسی', data: 'مدیریت داده', system: 'سامانه'} as Record<string, string>)[category] ?? category; }
-function permissionLabel(permission: PermissionCode) { const labels: Partial<Record<PermissionCode, string>> = {'organization.overview.view': 'مشاهده نمای سازمان', 'organization.units.view': 'مشاهده واحدها', 'organization.units.manage': 'مدیریت واحدها', 'organization.positions.view': 'مشاهده سمت‌ها', 'organization.positions.manage': 'مدیریت سمت‌ها', 'organization.users.create': 'ایجاد کاربر', 'organization.users.password.manage': 'تنظیم رمز کاربران', 'organization.roles.view': 'مشاهده نقش‌ها', 'organization.roles.manage': 'مدیریت نقش‌ها', 'organization.roles.assign': 'انتساب نقش', 'organization.personnel.view': 'مشاهده پرسنل', 'organization.personnel.manage': 'مدیریت پرسنل', 'organization.personnel.changes.review': 'بررسی صف تغییرات پرسنل', 'organization.personnel.banking.view': 'مشاهده اطلاعات بانکی', 'organization.personnel.banking.manage': 'ویرایش اطلاعات بانکی', 'organization.personnel.account.manage': 'مدیریت حساب پرسنل', 'organization.registrations.view': 'مشاهده درخواست‌های ثبت‌نام', 'organization.registrations.review': 'بررسی درخواست‌های ثبت‌نام', 'crm.customers.view': 'مشاهده مشتریان', 'crm.customers.create': 'ایجاد مشتری', 'crm.customers.edit': 'ویرایش مشتری', 'crm.customers.status.manage': 'مدیریت وضعیت مشتری', 'crm.customers.merge': 'ادغام مشتری تکراری', 'crm.customers.import': 'ورود گروهی مشتری'}; if (labels[permission]) return labels[permission]!; const last = permission.split('.').slice(-2).join('.'); return ({'dashboard.view': 'مشاهده داشبورد', 'preferences.manage': 'تنظیم ظاهر', 'users.view': 'مشاهده کاربران', 'users.edit': 'ویرایش کاربران', 'status.manage': 'مدیریت وضعیت کاربران', 'users.qa_login': 'مشاهده دسترسی کاربر', 'registrations.view': 'مشاهده درخواست‌های ثبت‌نام', 'registrations.review': 'بررسی درخواست‌های ثبت‌نام', 'qa.view': 'راهنمای آزمون', 'policy.inspect': 'بازرسی دسترسی', 'audit.view': 'مشاهده ممیزی', 'data.export': 'خروجی داده', 'data.manage': 'مدیریت داده', 'request.create': 'ثبت درخواست', 'request.approve': 'تأیید درخواست', 'inventory.adjust': 'ثبت تعدیل', 'inventory.approve': 'تأیید تعدیل'} as Record<string, string>)[last] ?? last; }
+function permissionLabel(permission: PermissionCode) { const labels: Partial<Record<PermissionCode, string>> = {'organization.overview.view': 'مشاهده نمای سازمان', 'organization.units.view': 'مشاهده واحدها', 'organization.units.manage': 'مدیریت واحدها', 'organization.positions.view': 'مشاهده سمت‌ها', 'organization.positions.manage': 'مدیریت سمت‌ها', 'organization.users.create': 'ایجاد کاربر', 'organization.users.password.manage': 'تنظیم رمز کاربران', 'organization.roles.view': 'مشاهده نقش‌ها', 'organization.roles.manage': 'مدیریت نقش‌ها', 'organization.roles.assign': 'انتساب نقش', 'organization.personnel.view': 'مشاهده پرسنل', 'organization.personnel.manage': 'مدیریت پرسنل', 'organization.personnel.changes.review': 'بررسی صف تغییرات پرسنل', 'organization.personnel.banking.view': 'مشاهده اطلاعات بانکی', 'organization.personnel.banking.manage': 'ویرایش اطلاعات بانکی', 'organization.personnel.account.manage': 'مدیریت حساب پرسنل', 'organization.registrations.view': 'مشاهده درخواست‌های ثبت‌نام', 'organization.registrations.review': 'پیشنهاد نقش ثبت‌نام', 'organization.registrations.activate': 'فعال‌سازی نهایی ثبت‌نام', 'crm.customers.view': 'مشاهده مشتریان', 'crm.customers.create': 'ایجاد مشتری', 'crm.customers.edit': 'ویرایش مشتری', 'crm.customers.status.manage': 'مدیریت وضعیت مشتری', 'crm.customers.merge': 'ادغام مشتری تکراری', 'crm.customers.import': 'ورود گروهی مشتری'}; if (labels[permission]) return labels[permission]!; const last = permission.split('.').slice(-2).join('.'); return ({'dashboard.view': 'مشاهده داشبورد', 'preferences.manage': 'تنظیم ظاهر', 'users.view': 'مشاهده کاربران', 'users.edit': 'ویرایش کاربران', 'status.manage': 'مدیریت وضعیت کاربران', 'users.qa_login': 'مشاهده دسترسی کاربر', 'registrations.view': 'مشاهده درخواست‌های ثبت‌نام', 'registrations.review': 'پیشنهاد نقش ثبت‌نام', 'registrations.activate': 'فعال‌سازی نهایی ثبت‌نام', 'qa.view': 'راهنمای آزمون', 'policy.inspect': 'بازرسی دسترسی', 'audit.view': 'مشاهده ممیزی', 'data.export': 'خروجی داده', 'data.manage': 'مدیریت داده', 'request.create': 'ثبت درخواست', 'request.approve': 'تأیید درخواست', 'inventory.adjust': 'ثبت تعدیل', 'inventory.approve': 'تأیید تعدیل'} as Record<string, string>)[last] ?? last; }
 function actionLabel(action: string) { return ({'foundation.seed.completed': 'آماده‌سازی Seed قطعی', 'organization.foundation.migrated': 'ارتقای بنیاد سازمان', 'organization.session.signed_in': 'ورود با حساب محلی', 'organization.session.signed_out': 'خروج از سامانه', 'organization.session.password_recovery_requested': 'درخواست بازیابی رمز', 'organization.session.password_recovered': 'بازیابی رمز عبور', 'organization.session.username_reminder_requested': 'درخواست نام کاربری', 'organization.access_view.started': 'شروع مشاهده دسترسی کاربر', 'organization.access_view.ended': 'پایان مشاهده دسترسی کاربر', 'organization.unit.created': 'ایجاد واحد سازمانی', 'organization.unit.updated': 'ویرایش واحد سازمانی', 'organization.unit.status_changed': 'تغییر وضعیت واحد', 'organization.position.created': 'ایجاد سمت', 'organization.position.updated': 'ویرایش سمت', 'organization.position.deleted': 'حذف سمت سازمانی', 'organization.position.status_changed': 'تغییر وضعیت سمت', 'organization.personnel.profile_completed': 'تکمیل اطلاعات الزامی پرونده', 'organization.personnel.profile_change_requested': 'درخواست تغییر اطلاعات پرسنلی', 'organization.personnel.profile_change_approved': 'تأیید تغییر اطلاعات پرسنلی', 'organization.personnel.profile_change_rejected': 'رد تغییر اطلاعات پرسنلی', 'organization.personnel.unit_changed': 'تغییر واحد سازمانی پرسنل', 'organization.personnel.position_changed': 'تغییر سمت سازمانی پرسنل', 'organization.personnel.sales_hierarchy_changed': 'تغییر جایگاه در شبکه فروش', 'organization.personnel.branch_transferred': 'انتقال شعبه پرسنل', 'organization.personnel.exported': 'خروجی جامع پرسنل', 'organization.user.created': 'ایجاد کاربر', 'organization.user.updated': 'ویرایش کاربر', 'organization.user.credentials_changed': 'تغییر شخصی اطلاعات ورود', 'organization.user.activated': 'فعال‌سازی کاربر', 'organization.user.deactivated': 'غیرفعال‌سازی کاربر', 'organization.user.password_reset': 'تنظیم رمز کاربر', 'organization.role.created': 'ایجاد نقش', 'organization.role.updated': 'ویرایش نقش', 'organization.role.deleted': 'حذف نقش', 'organization.role.status_changed': 'تغییر وضعیت نقش', 'organization.role.permissions_changed': 'تغییر مجوزهای نقش', 'organization.role.assigned': 'انتساب نقش', 'organization.role.assignment_changed': 'تغییر انتساب نقش', 'foundation.qa.login_as_user': 'شروع مشاهده دسترسی کاربر', 'foundation.qa.return_to_admin': 'پایان مشاهده دسترسی کاربر', 'foundation.backup.export': 'خروجی پشتیبان', 'foundation.backup.encrypted': 'خروجی رمزگذاری‌شده', 'foundation.backup.restored': 'بازیابی پشتیبان', 'foundation.local.reset': 'بازنشانی محلی'} as Record<string, string>)[action] ?? action; }
 function formatDateTime(value: string) { return formatPersianDateTime(value); }
 function messageOf(error: unknown) { return error instanceof Error ? error.message : 'یک خطای پیش‌بینی‌نشده رخ داد.'; }

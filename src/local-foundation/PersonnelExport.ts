@@ -1,5 +1,6 @@
 import type {FoundationState, PersonnelMovement, PersonnelRecord} from './model';
 import {formatPersianDate, formatPersianDateTime} from './PersianDate';
+import {currentSalesCompensation, orderedSalesCompensationHistory, salesCompensationModeLabel} from './salesCompensation';
 
 type ExportCell = string | number;
 export type PersonnelExportRow = Record<string, ExportCell>;
@@ -7,11 +8,12 @@ export type PersonnelExportRow = Record<string, ExportCell>;
 export interface PersonnelExportData {
   personnelRows: PersonnelExportRow[];
   movementRows: PersonnelExportRow[];
+  compensationRows: PersonnelExportRow[];
 }
 
 const genderLabel = (value: PersonnelRecord['gender']) => value === 'female' ? 'زن' : value === 'male' ? 'مرد' : 'ثبت نشده';
 const maritalLabel = (value: PersonnelRecord['maritalStatus']) => value === 'single' ? 'مجرد' : value === 'married' ? 'متأهل' : 'ثبت نشده';
-const employmentLabel = (value: PersonnelRecord['employmentStatus']) => value === 'active' ? 'فعال' : 'خاتمه‌یافته';
+const employmentLabel = (value: PersonnelRecord['employmentStatus']) => value === 'active' ? 'فعال' : value === 'ending_scheduled' ? 'پایان زمان‌بندی‌شده' : value === 'rehire_scheduled' ? 'بازگشت زمان‌بندی‌شده' : 'خاتمه‌یافته';
 const accountStatusLabel = (value?: string) => value === 'active' ? 'فعال' : value === 'inactive' ? 'غیرفعال' : 'بدون حساب';
 const salesLevelLabel = (value?: PersonnelRecord['salesHierarchyLevel']) => ({sales_vice: 'معاونت فروش', sales_manager: 'مدیر فروش', senior_supervisor: 'سرپرست ارشد فروش', sales_supervisor: 'سرپرست فروش', seller: 'فروشنده'} as Record<string, string>)[value ?? ''] ?? '';
 const salesChannelLabel = (value?: PersonnelRecord['salesChannel']) => ({call_center: 'کال‌سنتر', branch: 'فروش شعبه', field: 'فروش میدانی', partner: 'شبکه پذیرندگان'} as Record<string, string>)[value ?? ''] ?? '';
@@ -28,6 +30,7 @@ export function buildPersonnelExportData(state: FoundationState, includeBanking:
     const branchTransfer = latestMovement(person, 'branch_transfer');
     const unitChange = latestMovement(person, 'unit_change');
     const positionChange = latestMovement(person, 'position_change');
+    const compensation = currentSalesCompensation(person);
     const row: PersonnelExportRow = {
       'کد پرسنلی': person.personnelCode,
       'نام': person.firstName,
@@ -56,8 +59,14 @@ export function buildPersonnelExportData(state: FoundationState, includeBanking:
       'شعبه محل استقرار / فروش': nameOfUnit(state, person.branchUnitId),
       'مدیر مستقیم': nameOfPersonnel(state, person.managerPersonnelId),
       'رده در شبکه فروش': salesLevelLabel(person.salesHierarchyLevel),
+      'تاریخ شروع نقش فروش (شمسی)': person.salesAssignmentStartDate ? formatPersianDate(person.salesAssignmentStartDate) : '',
       'کانال فروش': salesChannelLabel(person.salesChannel),
       'سرپرست مستقیم فروش': nameOfPersonnel(state, person.salesSupervisorPersonnelId),
+      'نوع پرداخت فروش فعلی': compensation ? salesCompensationModeLabel(compensation.mode) : '',
+      'حقوق ثابت ماهانه فعلی (ریال)': compensation?.monthlyFixedSalaryRial ?? '',
+      'درصد پورسانت فعلی': compensation?.commissionPercent ?? '',
+      'مبنای پورسانت فعلی': compensation ? 'وصول فاکتور' : '',
+      'تاریخ شروع شرایط مالی فعلی (شمسی)': compensation?.effectiveFrom ? formatPersianDate(compensation.effectiveFrom) : '',
       'محل کار': person.workLocation ?? '',
       'نام کاربری': user?.username ?? '',
       'نقش‌های حساب': user?.roles.join('، ') ?? '',
@@ -106,7 +115,24 @@ export function buildPersonnelExportData(state: FoundationState, includeBanking:
       'ثبت‌کننده': movement.actorName,
       'زمان ثبت رویداد (شمسی)': formatPersianDateTime(movement.recordedAt),
     })));
-  return {personnelRows, movementRows};
+  const compensationRows = state.personnel.flatMap((person) => orderedSalesCompensationHistory(person).map((item, index) => ({
+    'ردیف سابقه': index + 1,
+    'کد پرسنلی': person.personnelCode,
+    'نام و نام خانوادگی': `${person.firstName} ${person.lastName}`,
+    'واحد سازمانی اصلی': nameOfUnit(state, person.unitId),
+    'سمت سازمانی اصلی': nameOfPosition(state, person.positionId),
+    'رده در شبکه فروش': salesLevelLabel(person.salesHierarchyLevel),
+    'تاریخ شروع نقش فروش (شمسی)': person.salesAssignmentStartDate ? formatPersianDate(person.salesAssignmentStartDate) : '',
+    'نوع پرداخت': salesCompensationModeLabel(item.mode),
+    'حقوق ثابت ماهانه (ریال)': item.monthlyFixedSalaryRial ?? '',
+    'درصد پورسانت': item.commissionPercent ?? '',
+    'مبنای پورسانت': 'وصول فاکتور',
+    'تاریخ شروع اجرای شرایط (شمسی)': formatPersianDate(item.effectiveFrom),
+    'دلیل تغییر': item.reason,
+    'ثبت‌کننده': item.actorName,
+    'تاریخ و ساعت ثبت (شمسی)': formatPersianDateTime(item.recordedAt),
+  })));
+  return {personnelRows, movementRows, compensationRows};
 }
 
 function prepareSheet(XLSX: typeof import('xlsx'), rows: PersonnelExportRow[], fallbackHeaders: string[]) {
@@ -124,6 +150,7 @@ export async function downloadPersonnelWorkbook(state: FoundationState, includeB
   workbook.Workbook = {Views: [{RTL: true}]};
   XLSX.utils.book_append_sheet(workbook, prepareSheet(XLSX, data.personnelRows, ['کد پرسنلی', 'نام', 'نام خانوادگی']), 'اطلاعات جامع پرسنل');
   XLSX.utils.book_append_sheet(workbook, prepareSheet(XLSX, data.movementRows, ['کد پرسنلی', 'نام و نام خانوادگی', 'نوع گردش']), 'تاریخچه گردش');
+  XLSX.utils.book_append_sheet(workbook, prepareSheet(XLSX, data.compensationRows, ['کد پرسنلی', 'نام و نام خانوادگی', 'نوع پرداخت']), 'تاریخچه حقوق و پورسانت');
   const today = formatPersianDate(todayIsoDateForExport()).replaceAll('/', '-');
   XLSX.writeFile(workbook, `گزارش_جامع_پرسنل_${today}.xlsx`, {compression: true});
   return {personnelCount: data.personnelRows.length, movementCount: data.movementRows.length, includesBanking: includeBanking};

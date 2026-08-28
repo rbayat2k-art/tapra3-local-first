@@ -37,8 +37,8 @@ export function roleCartableCategories(moduleId: string, roleIds: string[], acti
   if (moduleId === 'purchase-request' && roleIds.includes('role-purchase-requester')) return [
     {id: 'requester-action', label: 'نیازمند اقدام من', matches: inStatuses('draft', 'needs_correction')},
     {id: 'requester-approval', label: 'در انتظار تأیید', matches: inStatuses('submitted', 'purchase_review', 'purchase_approved')},
-    {id: 'requester-treasury', label: 'ارسال‌شده به خزانه', matches: inStatuses('sent_to_treasury')},
-    {id: 'requester-closed', label: 'رد یا بسته‌شده', matches: inStatuses('rejected', 'cancelled')},
+    {id: 'requester-treasury', label: 'در خزانه', matches: inStatuses('sent_to_treasury')},
+    {id: 'requester-closed', label: 'پرداخت، رد یا بسته‌شده', matches: inStatuses('paid', 'rejected', 'cancelled')},
     {id: 'requester-all', label: 'همه درخواست‌های من', matches: all},
   ];
 
@@ -46,8 +46,8 @@ export function roleCartableCategories(moduleId: string, roleIds: string[], acti
     {id: 'approver-action', label: 'نیازمند بررسی من', matches: (record) => ['submitted', 'purchase_review', 'purchase_approved'].includes(record.status) && record.assigneeUserId === activeUserId},
     {id: 'approver-chain', label: 'در گردش تأیید', matches: (record) => ['submitted', 'purchase_review', 'purchase_approved'].includes(record.status) && record.assigneeUserId !== activeUserId},
     {id: 'approver-correction', label: 'نیازمند اصلاح', matches: inStatuses('needs_correction')},
-    {id: 'approver-treasury', label: 'ارسال‌شده به خزانه', matches: inStatuses('sent_to_treasury')},
-    {id: 'approver-closed', label: 'رد یا بسته‌شده', matches: inStatuses('rejected', 'cancelled')},
+    {id: 'approver-treasury', label: 'در خزانه', matches: inStatuses('sent_to_treasury')},
+    {id: 'approver-closed', label: 'پرداخت، رد یا بسته‌شده', matches: inStatuses('paid', 'rejected', 'cancelled')},
     {id: 'approver-all', label: 'همه درخواست‌ها', matches: all},
   ];
 

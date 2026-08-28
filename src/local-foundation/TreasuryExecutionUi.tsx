@@ -1,4 +1,4 @@
-import {useMemo, useState, type ReactNode} from 'react';
+import {useMemo, useRef, useState, type ReactNode} from 'react';
 import {CheckCircle2, Download, Eye, FileText, Pencil, Printer, ReceiptText, RotateCcw, Trash2, UploadCloud, X} from 'lucide-react';
 import {can} from './authorization';
 import {ERP_MODULES, permissionFor, stateLabel, type ErpModuleDefinition} from './erpCatalog';
@@ -7,13 +7,14 @@ import type {FoundationState, OperationalRecord} from './model';
 import {formatPersianDate, formatPersianDateTime, PersianDateInput} from './PersianDate';
 import {PurchaseRequestDetails} from './PurchaseRequestUi';
 import {readPurchaseRequestPayload} from './purchaseRequest';
-import type {LocalFoundationService, TreasuryPaymentInput} from './service';
+import type {LocalFoundationService, TreasuryPaymentInput, TreasurySourceInvariant} from './service';
 import {SortHeader, useSortableRows, type SortColumn} from './Sorting';
 import {formatPortalAmount} from '../utils/operationalFormat';
 import {EmployeeAdvanceDetails} from './EmployeeAdvanceUi';
 import {advanceBeneficiaryName, maskCard, readEmployeeAdvancePayload} from './employeeAdvance';
+import {RecordDialog} from './RecordDialog';
 
-type Execute = (label: string, work: () => Promise<FoundationState>, success: string) => Promise<void>;
+type Execute = (label: string, work: () => Promise<FoundationState>, success: string) => Promise<boolean>;
 type ReceiptFile = NonNullable<TreasuryPaymentInput['receipt']>;
 const MAX_RECEIPT_SIZE = 5 * 1024 * 1024;
 const ACCEPTED_RECEIPTS = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
@@ -22,6 +23,14 @@ const newId = () => `receipt-${globalThis.crypto?.randomUUID?.() ?? Date.now()}`
 const rial = (value?: string) => `${BigInt(value || '0').toLocaleString('en-US')} ریال`;
 const fileSize = (size: number) => size >= 1024 * 1024 ? `${(size / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(size / 1024)).toLocaleString('en-US')} KB`;
 const fileToDataUrl = (file: File) => new Promise<string>((resolve, reject) => {const reader = new FileReader(); reader.onload = () => resolve(String(reader.result ?? '')); reader.onerror = () => reject(new Error('خواندن فایل رسید ناموفق بود.')); reader.readAsDataURL(file);});
+
+function storedTreasurySourceInvariant(record: OperationalRecord): TreasurySourceInvariant | undefined {
+  const value=record.payload.sourceInvariant;
+  if(!value||typeof value!=='object'||Array.isArray(value))return undefined;
+  const candidate=value as Record<string,unknown>;
+  if(typeof candidate.id!=='string'||(candidate.moduleId!=='employee-advance'&&candidate.moduleId!=='purchase-request')||typeof candidate.version!=='number'||typeof candidate.status!=='string'||candidate.treasuryRecordId!==record.id)return undefined;
+  return {id:candidate.id,moduleId:candidate.moduleId,version:candidate.version,status:candidate.status,treasuryRecordId:record.id};
+}
 
 export function isTreasuryRecordVisibleToUser(record: OperationalRecord, state: FoundationState): boolean {
   if (state.activeUser.isAdmin) return true;
@@ -85,6 +94,8 @@ export function TreasuryExecutionDrawer({state, record, module, service, execute
   const [confirmingRevert, setConfirmingRevert] = useState(false);
   const [revertReason, setRevertReason] = useState('');
   const [errors, setErrors] = useState<string[]>([]);
+  const paymentCommand=useRef<{id:string;fingerprint:string}|undefined>(undefined);const revisionCommand=useRef<{id:string;fingerprint:string}|undefined>(undefined);const revertCommand=useRef<{id:string;fingerprint:string}|undefined>(undefined);const paymentBusy=useRef(false);const revisionBusy=useRef(false);const revertBusy=useRef(false);
+  const sourceInvariant: TreasurySourceInvariant|undefined=source&&(source.moduleId==='employee-advance'||source.moduleId==='purchase-request')?{id:source.id,moduleId:source.moduleId,version:source.version,status:source.status,treasuryRecordId:record.id}:storedTreasurySourceInvariant(record);
   const canRecordPayment = ['queued', 'claimed'].includes(record.status) && record.assigneeUserId === state.activeUser.id && can(state.activeUser, permissionFor('treasury-execution', 'transition'));
   const canManageRecordedPayment = record.status === 'payment_recorded' && record.assigneeUserId === state.activeUser.id && can(state.activeUser, permissionFor('treasury-execution', 'edit'));
 
@@ -100,18 +111,18 @@ export function TreasuryExecutionDrawer({state, record, module, service, execute
   };
   const submitPayment = () => {
     const next = !paidAt ? ['تاریخ پرداخت الزامی است.'] : [];
-    setErrors(next); if (next.length) return;
-    void execute('treasury-payment', () => service.recordTreasuryPayment(record.id, {paidAt, paymentReference, note, receipt}), 'پرداخت ثبت و برای راستی‌آزمایی ارسال شد.').then(() => setErrors([]));
+    setErrors(next); if (next.length||paymentBusy.current||!sourceInvariant) return;const input={paidAt,paymentReference,note,receipt};const fingerprint=JSON.stringify({recordId:record.id,version:record.version,input,sourceInvariant});if(!paymentCommand.current||paymentCommand.current.fingerprint!==fingerprint)paymentCommand.current={id:`ui-treasury-payment:${crypto.randomUUID()}`,fingerprint};paymentBusy.current=true;
+    void execute('treasury-payment', () => service.recordTreasuryPayment(record.id,input,record.version,paymentCommand.current!.id,sourceInvariant), 'پرداخت ثبت و برای راستی‌آزمایی ارسال شد.').then((succeeded) => {if (succeeded){paymentCommand.current=undefined;setErrors([]);}}).finally(()=>{paymentBusy.current=false;});
   };
   const savePaymentRevision = () => {
     const next = [...(!paidAt ? ['تاریخ پرداخت الزامی است.'] : []), ...(revisionReason.trim().length < 3 ? ['دلیل اصلاح اطلاعات پرداخت را وارد کنید.'] : [])];
-    setErrors(next); if (next.length) return;
-    void execute('treasury-payment-revision', () => service.reviseTreasuryPayment(record.id, {paidAt, paymentReference, note, receipt}, revisionReason), 'اصلاحات پرداخت با حفظ نسخه قبلی ثبت شد.').then(() => {setEditingPayment(false); setRevisionReason(''); setErrors([]);});
+    setErrors(next); if (next.length||revisionBusy.current||!sourceInvariant) return;const input={paidAt,paymentReference,note,receipt};const fingerprint=JSON.stringify({recordId:record.id,version:record.version,input,revisionReason,sourceInvariant});if(!revisionCommand.current||revisionCommand.current.fingerprint!==fingerprint)revisionCommand.current={id:`ui-treasury-revision:${crypto.randomUUID()}`,fingerprint};revisionBusy.current=true;
+    void execute('treasury-payment-revision', () => service.reviseTreasuryPayment(record.id,input,revisionReason,record.version,revisionCommand.current!.id,sourceInvariant), 'اصلاحات پرداخت با حفظ نسخه قبلی ثبت شد.').then((succeeded) => {if (succeeded) {revisionCommand.current=undefined;setEditingPayment(false); setRevisionReason(''); setErrors([]);}}).finally(()=>{revisionBusy.current=false;});
   };
   const revertPayment = () => {
     const next = revertReason.trim().length < 3 ? ['دلیل بازگشت از پرداخت را وارد کنید.'] : [];
-    setErrors(next); if (next.length) return;
-    void execute('treasury-payment-revert', () => service.revertTreasuryPayment(record.id, revertReason), 'پرداخت با حفظ سابقه به وضعیت «در اختیار مجری پرداخت» بازگشت.').then(() => {setConfirmingRevert(false); setRevertReason(''); setErrors([]);});
+    setErrors(next); if (next.length||revertBusy.current||!sourceInvariant) return;const fingerprint=JSON.stringify({recordId:record.id,version:record.version,revertReason,sourceInvariant});if(!revertCommand.current||revertCommand.current.fingerprint!==fingerprint)revertCommand.current={id:`ui-treasury-revert:${crypto.randomUUID()}`,fingerprint};revertBusy.current=true;
+    void execute('treasury-payment-revert', () => service.revertTreasuryPayment(record.id,revertReason,record.version,revertCommand.current!.id,sourceInvariant), 'پرداخت با حفظ سابقه به وضعیت «در اختیار مجری پرداخت» بازگشت.').then((succeeded) => {if (succeeded) {revertCommand.current=undefined;setConfirmingRevert(false); setRevertReason(''); setErrors([]);}}).finally(()=>{revertBusy.current=false;});
   };
   const cancelPaymentRevision = () => {
     setPaidAt(payment?.paidAt ?? today());
@@ -119,11 +130,12 @@ export function TreasuryExecutionDrawer({state, record, module, service, execute
     setNote(payment?.note ?? '');
     setReceipt(payment?.receipt);
     setRevisionReason('');
+    revisionCommand.current=undefined;
     setErrors([]);
     setEditingPayment(false);
   };
 
-  return <div className="drawer-scrim" onMouseDown={(event) => {if (event.currentTarget === event.target) onClose();}}><aside className="record-drawer purchase-drawer treasury-payment-drawer" aria-label={`پرونده پرداخت ${record.title}`}>
+  return <RecordDialog ariaLabel={`پرونده پرداخت ${record.title}`} className="purchase-drawer treasury-payment-drawer" onClose={onClose}>
     <header><div><span className="eyebrow">{record.trackingCode}</span><h2>{record.title}</h2><p>پرونده کامل درخواست و ثبت پرداخت خزانه</p></div><div className="treasury-drawer-actions">{canPrint && <button type="button" className="button button--secondary button--small" onClick={() => globalThis.print()}><Printer size={16}/> چاپ درخواست</button>}<button className="icon-button" onClick={onClose} aria-label="بستن"><X size={20}/></button></div></header>
     <div className="drawer-body">
       <div className="record-status-hero"><span className="state-badge state-badge--progress">{stateLabel(module.workflow, record.status)}</span><span>نسخه {record.version.toLocaleString('en-US')}</span><strong>{rial(record.amountRial)}</strong></div>
@@ -136,7 +148,7 @@ export function TreasuryExecutionDrawer({state, record, module, service, execute
           {receipt && <button type="button" className="button button--ghost button--small receipt-remove-button" onClick={() => setReceipt(undefined)}><Trash2 size={15}/> حذف رسید ثبت‌شده از نسخه جدید</button>}
           <div className="treasury-form-actions">{editingPayment && <button type="button" className="button button--secondary" onClick={cancelPaymentRevision}>انصراف از اصلاح</button>}<button type="button" className="button button--primary treasury-pay-button" onClick={editingPayment ? savePaymentRevision : submitPayment}><ReceiptText size={17}/>{editingPayment ? 'ذخیره اصلاحات پرداخت' : 'ثبت پرداخت'}</button></div>
         </div>}
-        {payment && !editingPayment && <><div className="payment-recorded-card"><CheckCircle2 size={22}/><div><strong>پرداخت ثبت شده است</strong><span>تاریخ پرداخت: {formatPersianDate(payment.paidAt)}{payment.paymentReference && <> · شماره پیگیری: <b dir="ltr">{payment.paymentReference}</b></>}</span>{payment.note && <small>{payment.note}</small>}</div><div className="payment-recorded-actions">{payment.receipt && <a className="button button--secondary button--small" href={payment.receipt.dataUrl} download={payment.receipt.fileName}><Download size={15}/> دریافت رسید</a>}{canManageRecordedPayment && <button type="button" className="button button--secondary button--small" onClick={() => {setEditingPayment(true);setConfirmingRevert(false);setErrors([]);}}><Pencil size={15}/> اصلاح اطلاعات پرداخت</button>}{canManageRecordedPayment && <button type="button" className="button button--danger button--small" onClick={() => {setConfirmingRevert(true);setErrors([]);}}><RotateCcw size={15}/> بازگشت از پرداخت</button>}</div></div>
+        {payment && !editingPayment && <><div className="payment-recorded-card"><CheckCircle2 size={22}/><div><strong>پرداخت ثبت شده است</strong><span>تاریخ پرداخت: {formatPersianDate(payment.paidAt)}{payment.financialDocumentNumber && <> · شماره سند: <b dir="ltr">{payment.financialDocumentNumber}</b></>}{payment.fiscalPeriod && <> · دوره مالی: <b dir="ltr">{payment.fiscalPeriod}</b></>}{payment.paymentReference && <> · شماره پیگیری: <b dir="ltr">{payment.paymentReference}</b></>}</span>{payment.note && <small>{payment.note}</small>}</div><div className="payment-recorded-actions">{payment.receipt && <a className="button button--secondary button--small" href={payment.receipt.dataUrl} download={payment.receipt.fileName}><Download size={15}/> دریافت رسید</a>}{canManageRecordedPayment && <button type="button" className="button button--secondary button--small" onClick={() => {setEditingPayment(true);setConfirmingRevert(false);setErrors([]);}}><Pencil size={15}/> اصلاح اطلاعات پرداخت</button>}{canManageRecordedPayment && <button type="button" className="button button--danger button--small" onClick={() => {setConfirmingRevert(true);setErrors([]);}}><RotateCcw size={15}/> بازگشت از پرداخت</button>}</div></div>
           {confirmingRevert && <div className="treasury-revert-box"><strong>بازگشت از ثبت پرداخت</strong><p>پرداخت فعلی حذف فیزیکی نمی‌شود؛ نسخه آن در تاریخچه می‌ماند و پرونده دوباره برای همین مجری قابل پرداخت خواهد شد.</p><label className="field"><RequiredLabel>دلیل بازگشت از پرداخت</RequiredLabel><textarea aria-required="true" value={revertReason} onChange={(event) => setRevertReason(event.target.value)} placeholder="دلیل اشتباه و نیاز به ثبت مجدد را بنویسید…"/></label><div><button type="button" className="button button--secondary" onClick={() => {setConfirmingRevert(false);setRevertReason('');setErrors([]);}}>انصراف</button><button type="button" className="button button--danger" onClick={revertPayment}><RotateCcw size={16}/> تأیید بازگشت از پرداخت</button></div></div>}</>}
         {!canRecordPayment && !payment && <div className="quiet-state"><CheckCircle2 size={18}/>در این مرحله اقدام اجرایی برای این حساب وجود ندارد.</div>}
       </section>
@@ -144,7 +156,7 @@ export function TreasuryExecutionDrawer({state, record, module, service, execute
       {source?.moduleId === 'purchase-request' && purchaseModule && <TreasuryPrintSheet state={state} source={source} purchaseModule={purchaseModule} treasuryModule={module} treasuryRecords={linkedTreasuryRecords}/>} 
       {source?.moduleId === 'employee-advance' && advanceModule && <EmployeeAdvancePrintSheet state={state} source={source} advanceModule={advanceModule} treasuryModule={module} treasuryRecords={linkedTreasuryRecords}/>} 
     </div><footer>{canPrint && <button type="button" className="button button--secondary" onClick={() => globalThis.print()}><Printer size={17}/> چاپ کامل درخواست</button>}<button className="button button--ghost" onClick={onClose}>بستن</button></footer>
-  </aside></div>;
+  </RecordDialog>;
 }
 
 function readPayment(record: OperationalRecord): TreasuryPaymentInput | undefined {
@@ -170,13 +182,13 @@ function EmployeeAdvancePrintSheet({state, source, advanceModule, treasuryModule
   ];
   const paymentRows = treasuryRecords.map((record) => ({record, executor: state.users.find((user) => user.id === record.assigneeUserId), payment: readPayment(record)}));
   return <article className="treasury-print-sheet advance-print-sheet" aria-hidden="true">
-    <header className="print-document-header"><div><strong>تپرا — فرم کامل مساعده پرسنلی</strong><span>نسخه قابل بایگانی فیزیکی خزانه</span></div><div><span>شماره درخواست</span><b dir="ltr">{source.trackingCode}</b><small>زمان چاپ: {formatPersianDateTime(printedAt)}</small></div></header>
+    <header className="print-document-header"><div><strong>شاهراه — فرم کامل مساعده پرسنلی</strong><span>نسخه قابل بایگانی فیزیکی خزانه</span></div><div><span>شماره درخواست</span><b dir="ltr">{source.trackingCode}</b><small>زمان چاپ: {formatPersianDateTime(printedAt)}</small></div></header>
     <section className="print-title"><h1>{source.title}</h1><p>{source.description || 'بدون توضیحات'}</p><div><span>وضعیت فعلی<strong>{stateLabel(advanceModule.workflow, source.status)}</strong></span><span>تاریخ و ساعت درخواست<strong>{formatPersianDateTime(source.createdAt)}</strong></span><span>مبلغ اولیه<strong>{rial(payload.originalAmountRial)}</strong></span><span>مبلغ فعلی مصوب<strong>{rial(source.amountRial)}</strong></span></div></section>
     <PrintSection title="مشخصات پرسنل و جایگاه سازمانی"><div className="print-advance-facts"><span>نام و نام خانوادگی<strong>{payload.firstName} {payload.lastName}</strong></span><span>کد پرسنلی<strong dir="ltr">{payload.personnelCode}</strong></span><span>کد ملی<strong dir="ltr">{payload.nationalId || personnel?.nationalId || '—'}</strong></span><span>شماره همراه<strong dir="ltr">{payload.primaryMobile || personnel?.primaryMobile || '—'}</strong></span><span>شعبه<strong>{payload.branchName}</strong></span><span>واحد سازمانی<strong>{payload.unitName}</strong></span><span>سمت سازمانی<strong>{payload.positionName}</strong></span><span>نوع ثبت<strong>{payload.submittedOnBehalf ? `نیابتی توسط ${payload.proxyByName}` : 'توسط خود پرسنل'}</strong></span></div></PrintSection>
     <PrintSection title="اطلاعات بانکی و امضای دیجیتال"><div className="print-advance-facts"><span>نام بانک<strong>{payload.bankName || '—'}</strong></span><span>شماره کارت مقصد<strong dir="ltr">{maskCard(payload.cardNumber)}</strong></span><span>امضاکننده نسخه جاری<strong>{payload.signedByName || '—'}</strong></span><span>زمان آخرین امضا<strong>{payload.signedAt ? formatPersianDateTime(payload.signedAt) : '—'}</strong></span></div></PrintSection>
     <PrintSection title="گردش کامل از ثبت تا خزانه"><table className="print-actors-table"><thead><tr><th>ردیف</th><th>مرحله</th><th>نام شخص</th><th>وضعیت / اقدام</th><th>تاریخ و ساعت</th><th>توضیحات</th><th>امضا / مهر</th></tr></thead><tbody>{actorRows.map((item, index) => <tr key={item.id}><td>{(index + 1).toLocaleString('en-US')}</td><td>{item.stage}</td><td>{item.name}</td><td>{item.status}</td><td>{formatPersianDateTime(item.occurredAt)}</td><td>{item.reason}</td><td className="print-signature-cell"/></tr>)}</tbody></table></PrintSection>
     <PrintSection title="نتیجه اجرای پرداخت"><table><thead><tr><th>ردیف</th><th>مجری خزانه</th><th>وضعیت</th><th>تاریخ پرداخت</th><th>شماره پیگیری</th><th>توضیحات</th></tr></thead><tbody>{paymentRows.map(({record, executor, payment}, index) => <tr key={record.id}><td>{(index + 1).toLocaleString('en-US')}</td><td>{executor?.name || '—'}</td><td>{stateLabel(treasuryModule.workflow, record.status)}</td><td>{payment?.paidAt ? formatPersianDate(payment.paidAt) : 'ثبت نشده'}</td><td dir="ltr">{payment?.paymentReference || 'اختیاری / ثبت نشده'}</td><td>{payment?.note || record.description || '—'}</td></tr>)}</tbody></table></PrintSection>
-    <footer className="print-document-footer"><span>این سند از نسخه جاری و تاریخچه غیرقابل حذف گردش مساعده در سامانه تپرا تولید شده است.</span><b dir="ltr">{source.trackingCode}</b></footer>
+    <footer className="print-document-footer"><span>این سند از نسخه جاری و تاریخچه غیرقابل حذف گردش مساعده در سامانه شاهراه تولید شده است.</span><b dir="ltr">{source.trackingCode}</b></footer>
   </article>;
 }
 
@@ -192,7 +204,7 @@ function TreasuryPrintSheet({state, source, purchaseModule, treasuryModule, trea
   ];
   const paymentReceipts = treasuryRecords.map((item) => ({record: item, payment: readPayment(item)})).filter((item): item is {record: OperationalRecord; payment: TreasuryPaymentInput & {receipt: NonNullable<TreasuryPaymentInput['receipt']>}} => Boolean(item.payment?.receipt));
   return <article className="treasury-print-sheet" aria-hidden="true">
-    <header className="print-document-header"><div><strong>تپرا — پرونده درخواست خرید</strong><span>نسخه قابل بایگانی فیزیکی</span></div><div><span>شماره درخواست</span><b dir="ltr">{source.trackingCode}</b><small>زمان چاپ: {formatPersianDateTime(printedAt)}</small></div></header>
+    <header className="print-document-header"><div><strong>شاهراه — پرونده درخواست خرید</strong><span>نسخه قابل بایگانی فیزیکی</span></div><div><span>شماره درخواست</span><b dir="ltr">{source.trackingCode}</b><small>زمان چاپ: {formatPersianDateTime(printedAt)}</small></div></header>
     <section className="print-title"><h1>{source.title}</h1><p>{source.description || 'بدون توضیحات'}</p><div><span>وضعیت نهایی گردش<strong>{stateLabel(purchaseModule.workflow, source.status)}</strong></span><span>تاریخ درخواست<strong>{formatPersianDate(payload.requestDate || source.createdAt)}</strong></span><span>تاریخ موردنیاز<strong>{source.dueAt ? formatPersianDate(source.dueAt) : 'اختیاری / ثبت نشده'}</strong></span><span>جمع کل<strong>{rial(source.amountRial)}</strong></span></div></section>
     <PrintSection title="ردیف‌های خرید"><table><thead><tr><th>ردیف</th><th>شرح کالا / خدمت</th><th>گروه و مشخصات</th><th>مقدار</th><th>قیمت واحد</th><th>جمع</th></tr></thead><tbody>{payload.lines.map((line, index) => <tr key={line.id}><td>{(index + 1).toLocaleString('en-US')}</td><td>{line.title}</td><td>{line.category}<small>{line.specification}</small></td><td>{Number(line.quantity).toLocaleString('en-US')} {line.unit}</td><td>{rial(line.estimatedUnitPriceRial)}</td><td>{rial((BigInt(line.estimatedUnitPriceRial || '0') * BigInt(line.quantity || '0')).toString())}</td></tr>)}</tbody></table></PrintSection>
     <PrintSection title="تقسیم مالی شعب و مراکز هزینه"><table><thead><tr><th>ردیف</th><th>شعبه</th><th>مرکز هزینه</th><th>مبلغ سهم</th><th>یادداشت</th></tr></thead><tbody>{payload.allocations.map((item, index) => <tr key={item.id}><td>{(index + 1).toLocaleString('en-US')}</td><td>{state.units.find((unit) => unit.id === item.branchUnitId)?.name ?? '—'}</td><td>{state.units.find((unit) => unit.id === item.costCenterUnitId)?.name ?? '—'}</td><td>{rial(item.amountRial)}</td><td>{item.note || '—'}</td></tr>)}</tbody></table></PrintSection>
@@ -200,7 +212,7 @@ function TreasuryPrintSheet({state, source, purchaseModule, treasuryModule, trea
     <PrintSection title="پیش‌فاکتورها و پیوست‌های درخواست"><div className="print-attachments">{payload.quotationAttachments.map((attachment) => <figure key={attachment.id}>{attachment.mimeType.startsWith('image/') && attachment.dataUrl ? <img src={attachment.dataUrl} alt={attachment.fileName}/> : <div className="print-file-placeholder"><FileText size={25}/><span>فایل PDF</span></div>}<figcaption>{attachment.fileName}</figcaption></figure>)}{!payload.quotationAttachments.length && <p>پیوستی ثبت نشده است.</p>}</div></PrintSection>
     {paymentReceipts.length > 0 && <PrintSection title="رسیدهای پرداخت"><div className="print-attachments">{paymentReceipts.map(({record: item, payment: itemPayment}) => <figure key={item.id}>{itemPayment.receipt.mimeType.startsWith('image/') ? <img src={itemPayment.receipt.dataUrl} alt={itemPayment.receipt.fileName}/> : <div className="print-file-placeholder"><ReceiptText size={25}/><span>رسید PDF</span></div>}<figcaption>{itemPayment.receipt.fileName}<small>{rial(item.amountRial)} · {itemPayment.paymentReference}</small></figcaption></figure>)}</div></PrintSection>}
     <PrintSection title="درخواست‌کننده، تأییدکنندگان و پرداخت‌کنندگان"><table className="print-actors-table"><thead><tr><th>ردیف</th><th>سمت در گردش</th><th>نام شخص</th><th>وضعیت / اقدام</th><th>تاریخ و ساعت</th><th>توضیحات</th><th>امضا / مهر</th></tr></thead><tbody>{actorRows.map((item, index) => <tr key={item.id}><td>{(index + 1).toLocaleString('en-US')}</td><td>{item.stage}</td><td>{item.name}</td><td>{item.status}</td><td>{formatPersianDateTime(item.occurredAt)}</td><td>{item.reason}</td><td className="print-signature-cell"/></tr>)}</tbody></table></PrintSection>
-    <footer className="print-document-footer"><span>این سند از داده‌های ثبت‌شده و تاریخچه غیرقابل حذف سامانه تپرا تولید شده است.</span><b dir="ltr">{source.trackingCode}</b></footer>
+    <footer className="print-document-footer"><span>این سند از داده‌های ثبت‌شده و تاریخچه غیرقابل حذف سامانه شاهراه تولید شده است.</span><b dir="ltr">{source.trackingCode}</b></footer>
   </article>;
 }
 

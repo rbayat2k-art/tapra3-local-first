@@ -12,4 +12,4 @@
 - [معماری فعلی](architecture/current-system.md)
 - [وضعیت API](architecture/api-status.md)
 - [معماری آینده DRAFT](architecture/future-platform.md)
-- [Pre-migration copy](archive/pre-migration-snapshot/2026-08-10-stable-f271cca7/docs/SYSTEM_ARCHITECTURE.md)
+- Pre-migration copy در snapshot فعلی موجود نیست (`Deprecated` link removed).

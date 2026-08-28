@@ -1,5 +1,7 @@
 # مدل داده فعلی
 
+> **Deprecated / Conflict:** این سند مدل PostgreSQL نسخه تاریخی را شرح می‌دهد. مدل فعال IndexedDB در [`../06-DATABASE.md`](../06-DATABASE.md) و [`../23-DATA-DICTIONARY.md`](../23-DATA-DICTIONARY.md) است.
+
 > Status: CURRENT
 > Source of truth: This document for current conceptual data model
 > Owner: Data Owner

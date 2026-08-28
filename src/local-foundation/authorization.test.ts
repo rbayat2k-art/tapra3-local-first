@@ -1,6 +1,8 @@
 import {describe, expect, it} from 'vitest';
-import {authorize} from './authorization';
-import {QA_PERSONAS} from './seed';
+import {authorize, operationalRecordResource} from './authorization';
+import type {OperationalRecord} from './model';
+import {QA_PERSONAS, resolveUserAccess} from './seed';
+import type {SecurityRole} from './model';
 
 const persona = (id: string) => QA_PERSONAS.find((item) => item.id === id)!;
 
@@ -9,6 +11,30 @@ describe('local permission engine', () => {
     const result = authorize({persona: persona('persona-seller'), permission: 'foundation.dashboard.view'});
     expect(result.allowed).toBe(true);
     expect(result.code).toBe('authorization.allowed');
+  });
+
+  it('denies every permission when the account is inactive, including an admin account', () => {
+    const inactiveAdmin = {...persona('persona-product-owner'), status: 'inactive' as const};
+    const result = authorize({persona: inactiveAdmin, permission: 'foundation.dashboard.view'});
+    expect(result.allowed).toBe(false);
+    expect(result.code).toBe('account.inactive');
+  });
+
+  it('lets a SELF-scoped assignee see work assigned to them without changing the immutable creator', () => {
+    const seller = persona('persona-seller');
+    const record: OperationalRecord = {
+      id: 'assigned-work', moduleId: 'sale', domain: 'sales', trackingCode: 'SALE-TEST-1',
+      title: 'کار ارجاع‌شده', description: '', status: 'open', priority: 'normal',
+      companyId: seller.companyId, unitId: seller.unitId, assigneeUserId: seller.id,
+      createdByActorId: 'actor-another-user', createdByUserId: 'persona-another-user',
+      updatedByActorId: 'actor-another-user', version: 1, payload: {},
+      createdAt: '2026-08-23T08:00:00.000Z', updatedAt: '2026-08-23T08:00:00.000Z',
+    };
+    const resource = operationalRecordResource(seller, record);
+    const result = authorize({persona: seller, permission: 'foundation.dashboard.view', action: 'view', resource});
+    expect(result.allowed).toBe(true);
+    expect(resource.ownerId).toBe(seller.actorId);
+    expect(resource.createdBy).toBe('actor-another-user');
   });
 
   it('models the protected admin exception explicitly without granting it to similar roles', () => {
@@ -84,5 +110,25 @@ describe('local permission engine', () => {
     });
     expect(result.allowed).toBe(false);
     expect(result.code).toBe('workflow.transition_denied');
+  });
+
+  it('evaluates each role permission with that roles own scope', () => {
+    const permission = 'crm.lead.view';
+    const roles: SecurityRole[] = [
+      {id: 'company-role', name: 'شرکتی', description: '', status: 'active', protected: false, scope: 'COMPANY', permissions: ['foundation.dashboard.view'], createdAt: '', updatedAt: ''},
+      {id: 'self-role', name: 'شخصی', description: '', status: 'active', protected: false, scope: 'SELF', permissions: [permission], createdAt: '', updatedAt: ''},
+    ];
+    const mixed = resolveUserAccess({...persona('persona-sales-advance-approver'), roleId: 'company-role', roleIds: ['company-role', 'self-role'], isAdmin: false}, roles);
+    const anotherPersonsRecord = {id: 'other', companyId: mixed.companyId, unitId: mixed.unitId, ownerId: 'another-actor', createdBy: 'another-actor', state: 'open'};
+    const ownRecord = {...anotherPersonsRecord, id: 'own', ownerId: mixed.actorId};
+    expect(authorize({persona: mixed, permission, resource: anotherPersonsRecord, action: 'view'}).allowed).toBe(false);
+    expect(authorize({persona: mixed, permission, resource: ownRecord, action: 'view'}).allowed).toBe(true);
+  });
+
+  it('fails closed when a stale non-admin user has no derived entitlements', () => {
+    const stale = {...persona('persona-seller'), isAdmin: false, permissionEntitlements: undefined};
+    const result = authorize({persona: stale, permission: 'foundation.dashboard.view'});
+    expect(result.allowed).toBe(false);
+    expect(result.code).toBe('permission.missing');
   });
 });

@@ -1,6 +1,8 @@
-import DatePicker, {type DateObject} from 'react-multi-date-picker';
+import {useCallback, useEffect, useRef} from 'react';
+import DatePicker, {type DateObject, type DatePickerRef} from 'react-multi-date-picker';
 import persian from 'react-date-object/calendars/persian';
 import persianEn from 'react-date-object/locales/persian_en';
+import {useRecordDialogPortal} from './recordDialogPortal';
 
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -15,8 +17,10 @@ export function toIsoDate(value: Date): string {
   return `${year}-${month}-${day}`;
 }
 
-export function todayIsoDate(): string {
-  return toIsoDate(new Date());
+export function todayIsoDate(value = new Date(), timeZone = 'Asia/Tehran'): string {
+  const parts = new Intl.DateTimeFormat('en-CA', {timeZone, year:'numeric', month:'2-digit', day:'2-digit'}).formatToParts(value);
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === type)?.value ?? '';
+  return `${part('year')}-${part('month')}-${part('day')}`;
 }
 
 export function formatPersianDate(value?: string): string {
@@ -44,17 +48,50 @@ interface PersianDateInputProps {
   required?: boolean;
   invalid?: boolean;
   ariaLabel?: string;
+  min?: string;
 }
 
-export function PersianDateInput({value = '', onChange, disabled = false, required = false, invalid = false, ariaLabel = 'انتخاب تاریخ شمسی'}: PersianDateInputProps) {
+export function PersianDateInput({value = '', onChange, disabled = false, required = false, invalid = false, ariaLabel = 'انتخاب تاریخ شمسی', min}: PersianDateInputProps) {
   const pickerValue = value && !Number.isNaN(parseDate(value).getTime()) ? parseDate(value) : null;
+  const pickerRef = useRef<DatePickerRef>(null);
+  const calendarOpenRef = useRef(false);
+  const suppressFocusOpenRef = useRef(false);
+  const unregisterOverlayRef = useRef<(() => void) | null>(null);
+  const dialogPortal = useRecordDialogPortal();
+  const closeCalendar = useCallback(() => {
+    // react-multi-date-picker blurs its input while closing. Restoring focus on
+    // the following frame would normally trigger its onFocus handler and open
+    // the calendar again, which made Escape nondeterministic inside dialogs.
+    suppressFocusOpenRef.current = true;
+    pickerRef.current?.closeCalendar();
+    requestAnimationFrame(() => {
+      pickerRef.current?.querySelector<HTMLElement>('input')?.focus({preventScroll: true});
+      setTimeout(() => {suppressFocusOpenRef.current = false;}, 0);
+    });
+  }, []);
+  useEffect(() => {
+    const closeCalendarBeforeParentDialog = (event: KeyboardEvent) => {
+      const calendarVisible = pickerRef.current?.isOpen;
+      if (event.key !== 'Escape' || (!calendarOpenRef.current && !calendarVisible)) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      closeCalendar();
+    };
+    window.addEventListener('keydown', closeCalendarBeforeParentDialog, true);
+    return () => {
+      window.removeEventListener('keydown', closeCalendarBeforeParentDialog, true);
+      unregisterOverlayRef.current?.();
+    };
+  }, [closeCalendar, dialogPortal?.portalTarget]);
   return <DatePicker
+    ref={pickerRef}
     value={pickerValue}
     onChange={(selected: DateObject | null) => onChange(selected ? toIsoDate(selected.toDate()) : '')}
     calendar={persian}
     locale={persianEn}
     format="YYYY/MM/DD"
     calendarPosition="bottom-right"
+    minDate={min && !Number.isNaN(parseDate(min).getTime()) ? parseDate(min) : undefined}
     containerClassName="persian-date-container"
     inputClass="persian-date-input"
     className="tapra-persian-calendar"
@@ -62,6 +99,21 @@ export function PersianDateInput({value = '', onChange, disabled = false, requir
     disabled={disabled}
     editable={!disabled}
     portal
+    portalTarget={dialogPortal?.portalTarget}
+    onOpen={() => {
+      if (suppressFocusOpenRef.current) {
+        suppressFocusOpenRef.current = false;
+        return false;
+      }
+      calendarOpenRef.current = true;
+      unregisterOverlayRef.current?.();
+      unregisterOverlayRef.current = dialogPortal?.registerOverlay(closeCalendar) ?? null;
+    }}
+    onClose={() => {
+      calendarOpenRef.current = false;
+      unregisterOverlayRef.current?.();
+      unregisterOverlayRef.current = null;
+    }}
     aria-label={ariaLabel}
     aria-required={required}
     aria-invalid={invalid}

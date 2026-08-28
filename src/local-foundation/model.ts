@@ -1,14 +1,36 @@
-export const FOUNDATION_SCHEMA_VERSION = 8;
+export const FOUNDATION_SCHEMA_VERSION = 14;
 export const FOUNDATION_DB_NAME = 'tapra2_local';
-export const FOUNDATION_SEED_VERSION = 'complete-local-erp-v1.15-employee-advance-workflow';
+export const FOUNDATION_SEED_VERSION = 'complete-local-erp-v1.41-letter-policy-repair';
 
 export type ScopeType = 'COMPANY' | 'UNIT' | 'TEAM' | 'SELF' | 'RECORD';
 /** Permission codes are registry-driven and always use domain.resource.action. */
 export type PermissionCode = string;
 
+export interface PermissionEntitlement {
+  permission: PermissionCode;
+  scope: ScopeType;
+  source: 'role' | 'user-grant' | 'admin';
+  sourceRoleId?: string;
+}
+
 export type UserStatus = 'active' | 'inactive';
 export type SalesHierarchyLevel = 'sales_vice' | 'sales_manager' | 'senior_supervisor' | 'sales_supervisor' | 'seller';
 export type SalesChannel = 'call_center' | 'branch' | 'field' | 'partner';
+export type SalesCompensationMode = 'fixed_salary' | 'commission_only' | 'fixed_salary_plus_commission';
+export type SalesCommissionBasis = 'invoice_collection';
+
+export interface SalesCompensationRecord {
+  id: string;
+  mode: SalesCompensationMode;
+  monthlyFixedSalaryRial?: string;
+  commissionPercent?: string;
+  commissionBasis: SalesCommissionBasis;
+  effectiveFrom: string;
+  reason: string;
+  actorId: string;
+  actorName: string;
+  recordedAt: string;
+}
 
 export interface LocalUser {
   id: string;
@@ -22,6 +44,16 @@ export interface LocalUser {
   username: string;
   passwordHash: string;
   passwordUpdatedAt: string;
+  /** Stored only in the local user record; projected UI users receive only hasSecondaryPassword. */
+  secondaryPasswordHash?: string;
+  secondaryPasswordUpdatedAt?: string;
+  secondaryPasswordOtpHash?: string;
+  secondaryPasswordOtpExpiresAt?: string;
+  secondaryPasswordOtpRequestedAt?: string;
+  secondaryPasswordOtpAttempts?: number;
+  secondaryPasswordFailedAttempts?: number;
+  secondaryPasswordLockedUntil?: string;
+  hasSecondaryPassword?: boolean;
   positionId?: string;
   managerUserId?: string;
   personnelId?: string;
@@ -32,6 +64,8 @@ export interface LocalUser {
   teamId?: string;
   scope: ScopeType;
   permissions: PermissionCode[];
+  /** Effective permission sources. Authorization evaluates the scope of each source separately. */
+  permissionEntitlements?: PermissionEntitlement[];
   /** Explicit permissions granted only to this user, without changing assigned roles. */
   permissionGrants?: PermissionCode[];
   /** Explicit permissions denied only to this user; denial wins over every assigned role. */
@@ -45,9 +79,137 @@ export interface LocalUser {
   qaGenerated?: boolean;
 }
 
-export type PersonnelEmploymentStatus = 'active' | 'ended';
+export type PersonnelEmploymentStatus = 'active' | 'ending_scheduled' | 'ended' | 'rehire_scheduled';
+export type PersonnelDepartureInitiator = 'employee' | 'organization';
 export type PersonnelGender = 'female' | 'male' | 'unspecified';
 export type PersonnelMaritalStatus = 'single' | 'married' | 'unspecified';
+
+export type PersonnelLifecycleEventKind =
+  | 'employment_started'
+  | 'employment_end_scheduled'
+  | 'employment_end_cancelled'
+  | 'employment_ended'
+  | 'rehire_scheduled'
+  | 'rehired';
+
+export interface PersonnelLifecycleEvent {
+  id: string;
+  kind: PersonnelLifecycleEventKind;
+  effectiveDate: string;
+  reason: string;
+  handoffNotes?: string;
+  departureInitiator?: PersonnelDepartureInitiator;
+  actorId: string;
+  actorName: string;
+  recordedAt: string;
+  previousEmploymentType?: string;
+  employmentType?: string;
+  unitId?: string;
+  positionId?: string;
+  branchUnitId?: string;
+  managerPersonnelId?: string;
+  roleIds?: string[];
+}
+
+export interface PendingPersonnelLifecycleChange {
+  kind: 'end' | 'rehire';
+  effectiveDate: string;
+  reason: string;
+  handoffNotes?: string;
+  departureInitiator?: PersonnelDepartureInitiator;
+  employmentType?: string;
+  unitId?: string;
+  positionId?: string;
+  branchUnitId?: string;
+  managerPersonnelId?: string;
+  roleIds?: string[];
+  scheduledByActorId: string;
+  scheduledByActorName: string;
+  scheduledAt: string;
+  /**
+   * Snapshot of the approved continuity intent. Execution always re-discovers
+   * current responsibilities and revalidates every replacement.
+   */
+  continuityPlan?: WorkContinuityPlan;
+}
+
+export type WorkContinuityResponsibilityKind =
+  | 'direct_report'
+  | 'personnel_manager'
+  | 'sales_supervisor'
+  | 'unit_manager'
+  | 'unit_acting_manager'
+  | 'project_owner'
+  | 'project_member'
+  | 'project_task_assignee'
+  | 'chat_owner'
+  | 'chat_admin'
+  | 'chat_member'
+  | 'letter_assignee'
+  | 'letter_recipient'
+  | 'letter_reviewer'
+  | 'recruitment_assignee'
+  | 'recruitment_correction_recipient'
+  | 'workflow_correction_recipient'
+  | 'workflow_approval_voter'
+  | 'workflow_assignee'
+  | 'treasury_executor'
+  | 'offboarding_assignee';
+
+export type WorkContinuityResolutionMode =
+  | 'replacement_required'
+  | 'replacement_or_needs_reassignment'
+  | 'return_to_role_queue'
+  | 'remove_membership'
+  | 'preserve_history';
+
+export interface WorkContinuityResponsibility {
+  id: string;
+  kind: WorkContinuityResponsibilityKind;
+  mode: WorkContinuityResolutionMode;
+  title: string;
+  resourceId: string;
+  moduleId?: string;
+  store?: FoundationStoreName;
+  companyId: string;
+  unitId?: string;
+  version?: number;
+  roleIds?: string[];
+  approvalRoundId?: string;
+}
+
+export interface WorkContinuityDependencyPreview {
+  targetUserId: string;
+  targetUserName: string;
+  generatedAt: string;
+  responsibilities: WorkContinuityResponsibility[];
+  counts: Record<WorkContinuityResponsibilityKind, number>;
+  blockingCount: number;
+}
+
+export interface WorkContinuityResolution {
+  responsibilityId: string;
+  action: 'replace' | 'mark_needs_reassignment' | 'return_to_queue' | 'remove_membership' | 'preserve_history';
+  replacementUserId?: string;
+}
+
+export interface WorkContinuityPlan {
+  schemaVersion: 1;
+  targetUserId: string;
+  targetUserVersionToken: string;
+  generatedAt: string;
+  reason: string;
+  responsibilityIds: string[];
+  resolutions: WorkContinuityResolution[];
+}
+
+export interface WorkContinuityExecutionResult {
+  targetUserId: string;
+  appliedResponsibilityIds: string[];
+  changedResourceIds: string[];
+  needsReassignmentResourceIds: string[];
+  invalidatedSession: boolean;
+}
 
 export type PersonnelMovementKind = 'branch_transfer' | 'unit_change' | 'position_change' | 'sales_transfer';
 
@@ -79,8 +241,12 @@ export interface PersonnelMovement {
   recordedAt: string;
 }
 
+export type AdvanceEligibilityStatus = 'eligible' | 'suspended' | 'ineligible';
+
 export interface PersonnelRecord {
   id: string;
+  /** Persisted tenant provenance. Legacy records may omit it and are resolved fail-closed. */
+  companyId?: string;
   personnelCode: string;
   firstName: string;
   lastName: string;
@@ -111,18 +277,33 @@ export interface PersonnelRecord {
   accountNumber?: string;
   cardNumber?: string;
   iban?: string;
+  /** Business eligibility for creating a new employee-advance request. Missing legacy values mean eligible. */
+  advanceEligibilityStatus?: AdvanceEligibilityStatus;
+  advanceEligibilityReason?: string;
+  advanceEligibilityEffectiveFrom?: string;
+  advanceEligibilityEffectiveUntil?: string;
   emergencyName?: string;
   emergencyRelation?: string;
   emergencyPhone?: string;
   linkedUserId?: string;
+  /** Stable provenance for a person whose employment started from recruitment. */
+  sourceRecruitmentRecordId?: string;
   branchUnitId?: string;
   salesHierarchyLevel?: SalesHierarchyLevel;
+  /** Independent effective start of the person's current sales-network role. */
+  salesAssignmentStartDate?: string;
   salesChannel?: SalesChannel;
   salesSupervisorPersonnelId?: string;
   salesBranchUnitId?: string;
   salesStructureId?: string;
+  /** Append-only dated compensation terms for members of the sales hierarchy. */
+  salesCompensationHistory?: SalesCompensationRecord[];
   qaGenerated?: boolean;
   movements?: PersonnelMovement[];
+  /** Append-only employment lifecycle history. Existing personnel codes and identity are never recreated. */
+  lifecycleHistory?: PersonnelLifecycleEvent[];
+  /** A future-dated end or rehire waiting to become effective. */
+  pendingLifecycleChange?: PendingPersonnelLifecycleChange;
   createdAt: string;
   updatedAt: string;
 }
@@ -164,6 +345,9 @@ export interface CustomerTimelineItem {id: string; type: 'note' | 'identity' | '
 
 export interface CustomerRecord {
   id: string;
+  /** Persisted tenant and scope provenance for per-entitlement CRM authorization. */
+  companyId?: string;
+  unitId?: string;
   type: CustomerType;
   displayName: string;
   firstName?: string;
@@ -189,6 +373,10 @@ export interface CustomerRecord {
 
 export interface CustomerImportJob {
   id: string;
+  /** Scope provenance of the import command; legacy jobs without it are hidden fail-closed. */
+  companyId?: string;
+  unitId?: string;
+  ownerPersonnelId?: string;
   fileName: string;
   totalRows: number;
   importedRows: number;
@@ -200,12 +388,24 @@ export interface CustomerImportJob {
 
 export type OrganizationRecordStatus = 'active' | 'inactive';
 
+export interface ActingUnitManagerAssignment {
+  userId: string;
+  reason: string;
+  startsOn: string;
+  endsOn: string;
+  assignedAt: string;
+  assignedByActorId: string;
+}
+
 export interface OrganizationalUnit {
   id: string;
+  /** Tenant binding; absent only on legacy single-company snapshots. */
+  companyId?: string;
   name: string;
   type: string;
   parentId?: string;
   managerUserId?: string;
+  actingManager?: ActingUnitManagerAssignment;
   status: OrganizationRecordStatus;
   order: number;
   description: string;
@@ -217,6 +417,8 @@ export interface OrganizationalPosition {
   id: string;
   title: string;
   description: string;
+  /** Units in which this position may be assigned. Branches are not organizational units. */
+  unitIds: string[];
   status: OrganizationRecordStatus;
   createdAt: string;
   updatedAt: string;
@@ -251,9 +453,31 @@ export interface FoundationSession {
   activeUserId: string;
   actingAdminUserId?: string;
   qaStartedAt?: string;
+  /** Per-user reminder deferral; it never grants permissions or changes completion truth. */
+  profileCompletionDeferredUntil?: string;
   signedOutAt?: string;
   switchedAt: string;
   version: number;
+  /** Transient projection: another tab changed the shared browser-profile identity. */
+  stale?: boolean;
+}
+
+/**
+ * Durable command receipt. Older rows only contain id/recordId/createdAt; the
+ * optional fields keep those snapshots readable while new commands can detect
+ * accidental command-id reuse with a different payload.
+ */
+export interface IdempotencyRecord {
+  id: string;
+  recordId: string;
+  requestHash?: string;
+  result?: {
+    recordId: string;
+    version: number;
+    status: string;
+    handoffRecordId?: string;
+  };
+  createdAt: string;
 }
 
 export type AuditCategory = 'session' | 'authorization' | 'data' | 'system';
@@ -287,7 +511,7 @@ export interface DomainEvent {
   payload: Record<string, unknown>;
 }
 
-export type UserNotificationKind = 'treasury_follow_up' | 'workflow' | 'system';
+export type UserNotificationKind = 'treasury_follow_up' | 'chat_message' | 'letter_received' | 'workflow' | 'system';
 
 export interface UserNotification {
   id: string;
@@ -312,7 +536,7 @@ export interface PolicyDefinition {
   enabled: boolean;
 }
 
-export type OperationalDomain = 'hr' | 'crm' | 'sales' | 'marketing' | 'catalog' | 'procurement' | 'supplier' | 'finance' | 'treasury' | 'accounting' | 'warehouse' | 'logistics' | 'service' | 'support' | 'contract' | 'asset' | 'task' | 'communications' | 'letter' | 'document' | 'workflow' | 'report';
+export type OperationalDomain = 'hr' | 'crm' | 'sales' | 'marketing' | 'catalog' | 'procurement' | 'supplier' | 'finance' | 'treasury' | 'accounting' | 'warehouse' | 'logistics' | 'service' | 'support' | 'contract' | 'asset' | 'project' | 'task' | 'communications' | 'letter' | 'document' | 'workflow' | 'report';
 export type RecordPriority = 'low' | 'normal' | 'high' | 'critical';
 export type OperationalPayloadValue = string | number | boolean | null | OperationalPayloadValue[] | {[key: string]: OperationalPayloadValue};
 
@@ -328,6 +552,121 @@ export interface WorkflowTransitionDefinition {
   handoffModuleId?: string;
 }
 
+export type WorkflowStageScope = 'COMPANY' | 'UNIT' | 'BRANCH' | 'SELF';
+export type WorkflowStageDecision = 'approve' | 'reject' | 'needs_correction' | 'return_previous' | 'handoff';
+export type WorkflowStageAssignmentMode = 'role_queue' | 'specific_user' | 'branch_manager';
+export type WorkflowApprovalMode = 'ANY' | 'ALL' | 'N_OF_M';
+
+/**
+ * Editable routing policy layered on top of the approved, immutable state machine.
+ * Ordering, responsible roles, scope and allowed decisions are versioned. State
+ * ids and transitions themselves remain owned by the product definition.
+ */
+export interface WorkflowApprovalStageDefinition {
+  id: string;
+  title: string;
+  stateId: string;
+  roleIds: string[];
+  scope: WorkflowStageScope;
+  decisions: WorkflowStageDecision[];
+  required: boolean;
+  allowSelfApproval: boolean;
+  /** How the concrete user responsible for this stage is resolved at runtime. */
+  assignmentMode?: WorkflowStageAssignmentMode;
+  /** Required only when assignmentMode is specific_user. */
+  assigneeUserId?: string;
+  /** Legacy stages omit this field and retain first-valid-approval (ANY) behavior. */
+  approvalMode?: WorkflowApprovalMode;
+  /** Required only for N_OF_M and validated against the frozen electorate size. */
+  requiredApprovals?: number;
+  description?: string;
+}
+
+export type WorkflowApprovalRoundStatus = 'open' | 'approved' | 'rejected' | 'correction' | 'needs_reassignment';
+export type WorkflowApprovalVoteDecision = 'approve' | 'reject' | 'needs_correction';
+
+export interface WorkflowApprovalVote {
+  id: string;
+  userId: string;
+  actorId: string;
+  decision: WorkflowApprovalVoteDecision;
+  reason: string;
+  occurredAt: string;
+  commandId: string;
+}
+
+/**
+ * Immutable-stage electorate plus append-only votes for one record entry into an
+ * approval state. Re-entering the same state creates a new round because the
+ * entryRecordVersion is different.
+ */
+export interface WorkflowApprovalRound {
+  id: string;
+  recordId: string;
+  moduleId: string;
+  companyId: string;
+  workflowVersion: number;
+  workflowRouteId: string;
+  stageId: string;
+  stateId: string;
+  entryRecordVersion: number;
+  mode: WorkflowApprovalMode;
+  requiredCount: number;
+  eligibleUserIds: string[];
+  /** Hash of amount/target/transition data frozen by the first approval vote. */
+  completionIntentHash?: string;
+  /** Frozen seats awaiting an explicit continuity replacement. */
+  blockedUserIds?: string[];
+  votes: WorkflowApprovalVote[];
+  status: WorkflowApprovalRoundStatus;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+  closedAt?: string;
+  /** Explicitly records first-decision bootstrap for records created before schema 14. */
+  legacyBootstrap?: boolean;
+}
+
+/** Read model intentionally omits the frozen electorate, raw votes and command hashes. */
+export interface WorkflowApprovalRoundProjection {
+  id: string;
+  recordId: string;
+  moduleId: string;
+  workflowVersion: number;
+  workflowRouteId: string;
+  stageId: string;
+  stateId: string;
+  entryRecordVersion: number;
+  mode: WorkflowApprovalMode;
+  requiredCount: number;
+  approvedCount: number;
+  electorateSize: number;
+  pendingUserIds: string[];
+  status: WorkflowApprovalRoundStatus;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+  legacyBootstrap?: boolean;
+  currentVote?: Pick<WorkflowApprovalVote, 'decision' | 'reason' | 'occurredAt'>;
+}
+
+/**
+ * A branch-specific routing override. The base approvalStages remain the
+ * company-wide fallback. Active variants are matched by branch and priority;
+ * the selected id is frozen on the operational record at creation time.
+ */
+export interface WorkflowRouteVariantDefinition {
+  id: string;
+  title: string;
+  branchUnitIds: string[];
+  priority: number;
+  status: 'active' | 'inactive';
+  /** Branch policy for employee self-service. Defaults to true for legacy routes. */
+  allowSelfSubmission?: boolean;
+  approvalStages: WorkflowApprovalStageDefinition[];
+  description?: string;
+}
+
 export interface WorkflowDefinition {
   id: string;
   moduleId: string;
@@ -340,6 +679,11 @@ export interface WorkflowDefinition {
   queueStrategy: 'owner' | 'assignee' | 'unit' | 'company';
   assignmentPolicy: string;
   approvalPolicyId?: string;
+  approvalStages?: WorkflowApprovalStageDefinition[];
+  routeVariants?: WorkflowRouteVariantDefinition[];
+  /** Company-wide fallback for employee self-service. Defaults to true. */
+  allowSelfSubmission?: boolean;
+  changeSummary?: string;
   productDecisionRequired?: string;
   createdAt: string;
   updatedAt: string;
@@ -368,6 +712,10 @@ export interface OperationalRecord {
   createdByActorId: string;
   createdByUserId: string;
   updatedByActorId: string;
+  /** نسخه گردش‌کاری که این پرونده با آن آغاز شده است؛ تا پایان عمر پرونده ثابت می‌ماند. */
+  workflowVersion?: number;
+  /** مسیر پایه یا استثنای شعبه‌ای انتخاب‌شده هنگام ایجاد؛ تا پایان پرونده ثابت است. */
+  workflowRouteId?: string;
   version: number;
   payload: Record<string, OperationalPayloadValue>;
   createdAt: string;
@@ -379,7 +727,7 @@ export interface OperationalRecordHistory {
   recordId: string;
   moduleId: string;
   sequence: number;
-  eventType: 'created' | 'edited' | 'transitioned' | 'assigned' | 'handoff' | 'comment' | 'corrected';
+  eventType: 'created' | 'edited' | 'transitioned' | 'assigned' | 'handoff' | 'comment' | 'corrected' | 'viewed' | 'archived_for_user' | 'restored_for_user' | 'approval_round_opened' | 'approval_vote' | 'approval_electorate_replaced';
   fromState?: string;
   toState?: string;
   actorId: string;
@@ -388,6 +736,53 @@ export interface OperationalRecordHistory {
   reason?: string;
   snapshot: Record<string, unknown>;
   occurredAt: string;
+}
+
+/** Per-user conversation state. The composite id is `${chatId}:${userId}`. */
+export interface ChatPreference {
+  id: string;
+  chatId: string;
+  userId: string;
+  companyId: string;
+  pinned: boolean;
+  muted: boolean;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Raw identity-document content. It is intentionally excluded from FoundationState. */
+export interface PersonnelDocumentFile {
+  id: string;
+  recordId: string;
+  personnelId: string;
+  companyId: string;
+  mimeType: string;
+  size: number;
+  checksumSha256: string;
+  dataUrl: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Raw recruitment resume/document content. It is never projected into FoundationState. */
+export interface RecruitmentCandidateFile {
+  id: string;
+  recordId: string;
+  companyId: string;
+  kind: 'resume' | 'education' | 'work_certificate' | 'portfolio' | 'other';
+  fileName: string;
+  mimeType: string;
+  size: number;
+  checksumSha256: string;
+  dataUrl: string;
+  status: 'active' | 'replaced';
+  replacedByFileId?: string;
+  uploadedBy: 'applicant' | 'hr';
+  uploadedByUserId?: string;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface RegistrationRequest {
@@ -409,6 +804,11 @@ export interface RegistrationRequest {
   selfDeclaration: Record<string, string>;
   status: 'submitted' | 'in_review' | 'needs_correction' | 'approved' | 'rejected' | 'activated';
   reviewReason?: string;
+  proposedRoleIds?: string[];
+  proposedByUserId?: string;
+  proposedAt?: string;
+  activatedByUserId?: string;
+  activatedAt?: string;
   linkedPersonnelId?: string;
   linkedUserId?: string;
   version: number;
@@ -488,6 +888,7 @@ export const FOUNDATION_STORES = [
   'foundation_records',
   'workflow_definitions',
   'workflow_versions',
+  'workflow_approval_rounds',
   'workflow_history',
   'registration_requests',
   'registration_reviews',
@@ -509,6 +910,9 @@ export const FOUNDATION_STORES = [
   'performance_reviews',
   'training_records',
   'personnel_documents',
+  'personnel_document_files',
+  'recruitment_cases',
+  'recruitment_candidate_files',
   'leads',
   'lead_assignments',
   'calls',
@@ -559,8 +963,10 @@ export const FOUNDATION_STORES = [
   'fixed_assets',
   'asset_transfers',
   'asset_maintenance',
+  'projects',
   'tasks',
   'chats',
+  'chat_preferences',
   'messages',
   'letters',
   'documents',
@@ -600,8 +1006,13 @@ export interface FoundationState {
   customers: CustomerRecord[];
   customerImports: CustomerImportJob[];
   workflows: WorkflowDefinition[];
+  workflowVersions: WorkflowDefinition[];
+  /** Added in schema 14; optional only for older in-memory test fixtures. */
+  approvalRounds?: WorkflowApprovalRoundProjection[];
   operationalRecords: OperationalRecord[];
   operationalHistory: OperationalRecordHistory[];
+  /** Added in schema 12; optional only for in-memory fixtures built against schema 11. */
+  chatPreferences?: ChatPreference[];
   notifications: UserNotification[];
   registrationRequests: RegistrationRequest[];
   qaDataset: QaDatasetManifest;

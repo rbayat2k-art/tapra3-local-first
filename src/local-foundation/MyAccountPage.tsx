@@ -1,7 +1,7 @@
 import {useMemo, useState, type ReactNode} from 'react';
 import {
-  Banknote, BriefcaseBusiness, Check, ChevronDown, CircleAlert, Clock3, ContactRound,
-  FileClock, IdCard, MapPin, PencilLine, Phone, Send, ShieldCheck, UserRound, X, type LucideIcon,
+  BadgeDollarSign, Banknote, BriefcaseBusiness, Check, ChevronDown, CircleAlert, Clock3, ContactRound,
+  FileClock, Files, IdCard, MapPin, PackageCheck, PencilLine, Phone, Send, ShieldCheck, UserRound, X, type LucideIcon,
 } from 'lucide-react';
 import type {
   FoundationState, PersonnelProfileChangeField, PersonnelProfileChangeRequest, PersonnelProfileChangeValues, PersonnelRecord,
@@ -12,9 +12,13 @@ import type {LocalFoundationService, OwnProfileChangeInput} from './service';
 import {
   digitsOnly, isValidBankCard, isValidIranianIban, isValidIranianMobile, isValidPostalCode,
   normalizeBankCard, normalizeIranianIban, normalizeIranianLandline, normalizeIranianMobile, normalizePostalCode,
+  formatPortalAmount,
 } from '../utils/operationalFormat';
+import {currentSalesCompensation, orderedSalesCompensationHistory, salesCompensationModeLabel} from './salesCompensation';
+import {MyAssetsSection} from './MyAssetsSection';
+import {PersonnelDocumentsSection} from './PersonnelDocumentsSection';
 
-type Execute = (label: string, work: () => Promise<FoundationState>, success: string) => Promise<void>;
+type Execute = (label: string, work: () => Promise<FoundationState>, success: string) => Promise<boolean>;
 
 export const FIELD_LABELS: Record<PersonnelProfileChangeField, string> = {
   firstName: 'نام', lastName: 'نام خانوادگی', fatherName: 'نام پدر', nationalId: 'کد ملی', identityNumber: 'شماره شناسنامه',
@@ -39,6 +43,7 @@ export function MyAccountPage({state, service, execute}: {state: FoundationState
   const position = state.positions.find((item) => item.id === personnel.positionId)?.title ?? 'تعیین نشده';
   const branch = state.units.find((item) => item.id === personnel.branchUnitId)?.name ?? 'تعیین نشده';
   const manager = state.personnel.find((item) => item.id === personnel.managerPersonnelId);
+  const compensation = currentSalesCompensation(personnel);
 
   return <div className="page-stack my-account-page">
     <section className="my-account-hero">
@@ -61,8 +66,18 @@ export function MyAccountPage({state, service, execute}: {state: FoundationState
           <FactGrid><Fact label="همراه اصلی" value={personnel.primaryMobile} ltr/><Fact label="شماره تماس دوم" value={personnel.secondaryMobile} ltr/><Fact label="تلفن ثابت" value={personnel.phone} ltr/><Fact label="ایمیل شخصی" value={personnel.personalEmail} ltr/><Fact label="استان" value={personnel.province}/><Fact label="شهر" value={personnel.city}/><Fact label="نشانی" value={personnel.address} wide/><Fact label="کد پستی" value={personnel.postalCode} ltr/></FactGrid>
         </AccountSection>
         <AccountSection icon={BriefcaseBusiness} title="همکاری و جایگاه" subtitle="اطلاعات خواندنی سازمانی">
-          <FactGrid><Fact label="وضعیت همکاری" value={personnel.employmentStatus === 'active' ? 'فعال' : 'خاتمه‌یافته'}/><Fact label="نوع همکاری" value={personnel.employmentType}/><Fact label="تاریخ شروع" value={formatPersianDate(personnel.startDate)}/><Fact label="واحد سازمانی" value={unit}/><Fact label="سمت سازمانی" value={position}/><Fact label="شعبه استقرار" value={branch}/><Fact label="مدیر مستقیم" value={manager ? `${manager.firstName} ${manager.lastName}` : undefined}/><Fact label="محل کار" value={personnel.workLocation}/></FactGrid>
+          <FactGrid><Fact label="وضعیت همکاری" value={personnel.employmentStatus === 'active' ? 'فعال' : personnel.employmentStatus === 'ending_scheduled' ? 'پایان زمان‌بندی‌شده' : personnel.employmentStatus === 'rehire_scheduled' ? 'بازگشت زمان‌بندی‌شده' : 'خاتمه‌یافته'}/><Fact label="نوع همکاری" value={personnel.employmentType}/><Fact label="تاریخ شروع" value={formatPersianDate(personnel.startDate)}/><Fact label="واحد سازمانی" value={unit}/><Fact label="سمت سازمانی" value={position}/><Fact label="شعبه استقرار" value={branch}/><Fact label="مدیر مستقیم" value={manager ? `${manager.firstName} ${manager.lastName}` : undefined}/><Fact label="محل کار" value={personnel.workLocation}/></FactGrid>
         </AccountSection>
+        <AccountSection icon={Files} title="مدارک و تصویر پرسنلی" subtitle="مدارک اجباری، عکس و فایل‌های تکمیلی" open>
+          <PersonnelDocumentsSection state={state} service={service} execute={execute} personnelId={personnel.id}/>
+        </AccountSection>
+        <AccountSection icon={PackageCheck} title="دارایی‌ها و اموال من" subtitle="دارایی‌های تحت اختیار، تأییدها و سابقه عودت" open={state.operationalRecords.some((item) => item.ownerPersonnelId === personnel.id && ['fixed-asset', 'asset-transfer', 'asset-maintenance'].includes(item.moduleId))}>
+          <MyAssetsSection state={state} service={service} execute={execute} personnelId={personnel.id} readOnly={Boolean(state.session.actingAdminUserId)}/>
+        </AccountSection>
+        {personnel.salesHierarchyLevel && <AccountSection icon={BadgeDollarSign} title="حقوق و پورسانت فروش" subtitle="شرایط جاری و سابقه تغییرات مالی من">
+          <FactGrid><Fact label="تاریخ شروع نقش فروش" value={personnel.salesAssignmentStartDate ? formatPersianDate(personnel.salesAssignmentStartDate) : undefined}/><Fact label="تاریخ شروع همکاری" value={formatPersianDate(personnel.startDate)}/></FactGrid>
+          <div className="my-compensation-summary"><FactGrid><Fact label="نوع پرداخت" value={compensation ? salesCompensationModeLabel(compensation.mode) : undefined}/><Fact label="حقوق ثابت ماهانه" value={compensation?.monthlyFixedSalaryRial ? `${formatPortalAmount(compensation.monthlyFixedSalaryRial)} ریال` : 'ندارد'} ltr/><Fact label="درصد پورسانت" value={compensation?.commissionPercent ? `${compensation.commissionPercent}٪` : 'ندارد'} ltr/><Fact label="مبنای پورسانت" value="وصول فاکتور (محاسبه در مرحله بعد)"/><Fact label="تاریخ شروع اجرا" value={compensation?.effectiveFrom ? formatPersianDate(compensation.effectiveFrom) : undefined}/></FactGrid><div className="my-compensation-history"><strong>سابقه تغییرات</strong>{orderedSalesCompensationHistory(personnel).map((item) => <article key={item.id}><span>{formatPersianDate(item.effectiveFrom)}</span><div><b>{salesCompensationModeLabel(item.mode)}</b><small>{item.monthlyFixedSalaryRial ? `${formatPortalAmount(item.monthlyFixedSalaryRial)} ریال` : 'بدون حقوق ثابت'} · {item.commissionPercent ? `${item.commissionPercent}٪` : 'بدون پورسانت'}</small></div></article>)}</div></div>
+        </AccountSection>}
         <AccountSection icon={Banknote} title="اطلاعات بانکی" subtitle="نمایش فقط برای صاحب حساب و بازبین مجاز">
           <FactGrid><Fact label="نام بانک" value={personnel.bankName}/><Fact label="شماره حساب" value={personnel.accountNumber} ltr/><Fact label="شماره کارت" value={personnel.cardNumber} ltr/><Fact label="شماره شبا" value={personnel.iban} ltr wide/></FactGrid>
         </AccountSection>
@@ -70,7 +85,7 @@ export function MyAccountPage({state, service, execute}: {state: FoundationState
           <FactGrid><Fact label="نام" value={personnel.emergencyName}/><Fact label="نسبت" value={personnel.emergencyRelation}/><Fact label="شماره تماس" value={personnel.emergencyPhone} ltr/></FactGrid>
         </AccountSection>
         <AccountSection icon={ShieldCheck} title="حساب و دسترسی" subtitle="اطلاعات ورود و نقش‌های مؤثر">
-          <FactGrid><Fact label="نام کاربری" value={`@${user.username}`} ltr/><Fact label="نقش اصلی" value={user.roleTitle}/><Fact label="نقش‌ها" value={user.roles.join('، ')} wide/><Fact label="آخرین تغییر رمز" value={formatPersianDateTime(user.passwordUpdatedAt)}/></FactGrid>
+          <FactGrid><Fact label="نام کاربری" value={`@${user.username}`} ltr/><Fact label="نقش اصلی" value={user.roleTitle}/><Fact label="نقش‌ها" value={user.roles.join('، ')} wide/><Fact label="آخرین تغییر رمز" value={formatPersianDateTime(user.passwordUpdatedAt)}/><Fact label="رمز دوم ثابت" value={user.hasSecondaryPassword?'فعال':'تعریف نشده'}/></FactGrid>
         </AccountSection>
       </section>
 

@@ -9,8 +9,7 @@
 
 این مسیر فقط برای compatibility/history باقی مانده است. متن تاریخی بدون تغییر در archive دائمی نگهداری می‌شود.
 
-- [نسخه تاریخی byte-identical](archive/sales/SALES_ARCHITECTURE_DRAFT.md)
-- [Archive provenance](archive/sales/README.md)
+- نسخه تاریخی و provenance در snapshot فعلی موجود نیستند (`Deprecated` links removed).
 - [Customer فعلی](domains/sales/current-customer.md)
 - [طراحی پذیرفته‌شده آینده](domains/sales/approved-design.md)
 - [پرسش‌های باز](domains/sales/open-questions.md)

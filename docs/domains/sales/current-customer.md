@@ -1,5 +1,7 @@
 # رفتار فعلی مشتری فروش
 
+> **Deprecated / Conflict:** این سند Customer 360 سروری نسخه تاریخی است. مرجع جریان محلی جاری: [`../../21-USER-FLOWS.md`](../../21-USER-FLOWS.md).
+
 > Status: CURRENT
 > Source of truth: این سند برای قابلیت پیاده‌سازی‌شده Customer identity/profile و relationship شرکت است.
 > Owner: Sales Domain Owner
@@ -71,7 +73,7 @@ fuzzy matching، ارتباط هویت میان Workspaceها، import انبو�
 - tab visible «مشتریان» همیشه `SaasCustomerWorkspace` را باز می‌کند؛ permission و داده Customer در Foundation مستقل و server-side است.
 - کاربران نمونه فروش، `User.role: 'requestor'` و `customPermissions: ['sales_access']` دارند؛ `UserRole` مخصوص فروش اضافه نشده است.
 
-هیچ داده `localStorage` به‌طور خودکار migrate یا حذف نشده است. طراحی ادامه فروش در [approved design](approved-design.md) و ابهام‌های آن در [open questions](open-questions.md) است. منبع تاریخی کامل در [Sales Draft archive](../../archive/sales/SALES_ARCHITECTURE_DRAFT.md) و Snapshot باقی می‌ماند.
+هیچ داده `localStorage` به‌طور خودکار migrate یا حذف نشده است. طراحی ادامه فروش در [approved design](approved-design.md) و ابهام‌های آن در [open questions](open-questions.md) است. Sales Draft archive اشاره‌شده در نسخه قدیمی در snapshot فعلی وجود ندارد.
 
 ## Customer Import فعلی
 

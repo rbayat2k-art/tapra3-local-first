@@ -1,6 +1,6 @@
 import {describe, expect, it} from 'vitest';
 import {FOUNDATION_STORES} from './model';
-import {createSeedData, LOCAL_USERS, ORGANIZATIONAL_POSITIONS, ORGANIZATIONAL_UNITS, PERSONNEL_RECORDS, QA_PERSONAS, resolveUserAccess, SALES_STRUCTURES, SECURITY_ROLES, SEED_TIME} from './seed';
+import {ADMINISTRATIVE_ADVANCE_REQUESTER_USER_IDS, createSeedData, LOCAL_USERS, ORGANIZATIONAL_POSITIONS, ORGANIZATIONAL_UNITS, PERSONNEL_RECORDS, QA_PERSONAS, resolveUserAccess, SALES_STRUCTURES, SECURITY_ROLES, SEED_TIME} from './seed';
 import {salesStructureHasAssignmentHistory, salesStructureSupervisorName} from './salesStructureIdentity';
 import {positionIdForSalesHierarchy} from './salesPersonnelIdentity';
 import {isValidQaNationalId} from './qaPersonnelCompletion';
@@ -27,23 +27,48 @@ describe('deterministic local seed', () => {
 
   it('models QA identities as users with product status and admin-only QA login', () => {
     const admin = LOCAL_USERS.find((item) => item.roleId === 'role-admin')!;
-    const seller = LOCAL_USERS.find((item) => item.roleId === 'role-seller')!;
+    const seller = LOCAL_USERS.find((item) => item.id === 'persona-laleh')!;
     expect(admin.roleTitle).toBe('ادمین');
     expect(admin.permissions).toContain('foundation.users.qa_login');
     expect(seller.permissions).not.toContain('foundation.users.qa_login');
-    expect(LOCAL_USERS.some((item) => item.status === 'inactive')).toBe(true);
+    expect(LOCAL_USERS.filter((item) => item.personnelId).every((item) => item.status === 'active')).toBe(true);
   });
 
-  it('applies per-user permission grants and denials without mutating the role bundle', () => {
-    const seller = LOCAL_USERS.find((item) => item.roleId === 'role-seller')!;
+  it('applies denials but quarantines legacy direct grants without mutating the role bundle', () => {
+    const seller = LOCAL_USERS.find((item) => item.id === 'persona-laleh')!;
     const sellerRole = SECURITY_ROLES.find((item) => item.id === seller.roleId)!;
     const denied = sellerRole.permissions[0];
     const granted = 'foundation.audit.view';
     const roleSnapshot = [...sellerRole.permissions];
     const resolved = resolveUserAccess({...seller, permissionGrants: [granted], permissionDenials: [denied]}, SECURITY_ROLES);
     expect(resolved.permissions).not.toContain(denied);
-    expect(resolved.permissions).toContain(granted);
+    expect(resolved.permissions).not.toContain(granted);
+    expect(resolved.permissionEntitlements?.some((item) => item.source === 'user-grant')).toBe(false);
     expect(sellerRole.permissions).toEqual(roleSnapshot);
+  });
+
+  it('uses one official seller role with both base and sales permissions', () => {
+    const sellerRole = SECURITY_ROLES.find((item) => item.id === 'role-sales-seller')!;
+    expect(SECURITY_ROLES.some((item) => item.id === 'role-seller')).toBe(false);
+    expect(sellerRole.name).toBe('فروشنده');
+    expect(sellerRole.permissions).toContain('foundation.dashboard.view');
+    expect(sellerRole.permissions).toContain('foundation.preferences.manage');
+    expect(sellerRole.permissions).toContain('crm.lead.view');
+    expect(sellerRole.permissions).toContain('sales.sale.create');
+  });
+
+  it('ships every active sales-network personnel with an active linked login', () => {
+    const salesPersonnel = PERSONNEL_RECORDS.filter((item) => item.employmentStatus === 'active' && item.salesHierarchyLevel);
+    expect(salesPersonnel.length).toBeGreaterThan(0);
+    for (const person of salesPersonnel) {
+      const linkedUser = LOCAL_USERS.find((user) => user.id === person.linkedUserId);
+      expect(linkedUser, `${person.personnelCode} باید حساب متصل داشته باشد`).toBeDefined();
+      expect(linkedUser?.status).toBe('active');
+      expect(linkedUser?.personnelId).toBe(person.id);
+      const roleByLevel = {sales_vice: 'role-sales-vice', sales_manager: 'role-sales-manager', senior_supervisor: 'role-senior-sales-supervisor', sales_supervisor: 'role-sales-supervisor', seller: 'role-sales-seller'} as const;
+      expect(linkedUser?.roleIds).toContain(roleByLevel[person.salesHierarchyLevel!]);
+      expect(linkedUser?.salesHierarchyLevel).toBe(person.salesHierarchyLevel);
+    }
   });
 
   it('keeps positions separate from security roles and the unit tree acyclic', () => {
@@ -76,6 +101,59 @@ describe('deterministic local seed', () => {
     }
   });
 
+  it('models a working trainee as linked personnel with restricted access', () => {
+    const trainee = PERSONNEL_RECORDS.find((item) => item.id === 'personnel-training-yasin')!;
+    const user = LOCAL_USERS.find((item) => item.id === trainee.linkedUserId)!;
+    const role = SECURITY_ROLES.find((item) => item.id === 'role-training-personnel')!;
+    expect(trainee).toMatchObject({
+      employmentStatus: 'active', employmentType: 'آموزشی', personnelCode: 'P-6105',
+      sourceRecruitmentRecordId: 'recruitment-case-005', advanceEligibilityStatus: 'ineligible',
+    });
+    expect(user).toMatchObject({status: 'active', personnelId: trainee.id, roleId: role.id});
+    expect(role.permissions).toEqual(expect.arrayContaining(['foundation.dashboard.view', 'task.task.view', 'task.task.edit', 'task.task.transition']));
+    expect(role.permissions).not.toContain('finance.employee-advance.create');
+    expect(role.permissions).not.toContain('organization.personnel.manage');
+  });
+
+  it('gives every approved administrative employee own-only advance access', () => {
+    const requesterRole = SECURITY_ROLES.find((role) => role.id === 'role-employee-advance-requester')!;
+    expect(requesterRole.scope).toBe('SELF');
+    for (const userId of ADMINISTRATIVE_ADVANCE_REQUESTER_USER_IDS) {
+      const user = LOCAL_USERS.find((item) => item.id === userId);
+      expect(user, `${userId} باید در داده نمونه وجود داشته باشد`).toBeDefined();
+      expect(user?.status).toBe('active');
+      expect(user?.roleIds).toContain('role-employee-advance-requester');
+      expect(user?.permissionEntitlements?.some((item) => item.sourceRoleId === 'role-employee-advance-requester' && item.scope === 'SELF')).toBe(true);
+    }
+    expect(LOCAL_USERS.find((item) => item.id === 'persona-auditor')?.roleIds).not.toContain('role-employee-advance-requester');
+  });
+
+  it('has a valid active responsible user for every staffed unit and every branch', () => {
+    const staffedUnitIds = new Set(PERSONNEL_RECORDS.filter((person) => person.employmentStatus === 'active').map((person) => person.unitId));
+    for (const unit of ORGANIZATIONAL_UNITS.filter((item) => item.type === 'شعبه' || staffedUnitIds.has(item.id))) {
+      const manager = LOCAL_USERS.find((user) => user.id === unit.managerUserId);
+      expect(manager, `${unit.name} باید مسئول مشخص داشته باشد`).toBeDefined();
+      expect(manager?.status).toBe('active');
+      if (unit.type === 'شعبه') expect(manager?.roleIds).toContain('role-advance-branch-manager');
+      else expect(PERSONNEL_RECORDS.find((person) => person.id === manager?.personnelId)?.unitId).toBe(unit.id);
+    }
+  });
+
+  it('keeps people with the same name as distinct linked identities', () => {
+    const users = LOCAL_USERS.filter((user) => user.name === 'سودابه مرادی');
+    expect(users).toHaveLength(2);
+    expect(new Set(users.map((user) => user.id)).size).toBe(2);
+    expect(new Set(users.map((user) => user.actorId)).size).toBe(2);
+    expect(new Set(users.map((user) => user.username)).size).toBe(2);
+    expect(new Set(users.map((user) => user.personnelId)).size).toBe(2);
+    for (const user of users) expect(PERSONNEL_RECORDS.find((person) => person.id === user.personnelId)?.linkedUserId).toBe(user.id);
+  });
+
+  it('assigns deterministic sales access roles from the approved sales hierarchy', () => {
+    const expected = {sales_vice: 'role-sales-vice', sales_manager: 'role-sales-manager', senior_supervisor: 'role-senior-sales-supervisor', sales_supervisor: 'role-sales-supervisor', seller: 'role-sales-seller'} as const;
+    for (const user of LOCAL_USERS.filter((item) => item.salesHierarchyLevel)) expect(user.roleIds).toContain(expected[user.salesHierarchyLevel!]);
+  });
+
   it('identifies every sales structure by its call-center supervisor, not a separate name', () => {
     for (const structure of SALES_STRUCTURES) {
       expect('name' in structure).toBe(false);
@@ -95,6 +173,8 @@ describe('deterministic local seed', () => {
     for (const person of PERSONNEL_RECORDS.filter((item) => item.salesHierarchyLevel)) {
       expect(person.positionId).toBe(positionIdForSalesHierarchy(person.salesHierarchyLevel));
       expect(person.salesBranchUnitId).toBe(person.branchUnitId);
+      expect(person.salesAssignmentStartDate).toBe(person.startDate);
+      if (person.salesCompensationHistory?.length) expect(person.salesCompensationHistory[0].effectiveFrom).toBe(person.salesAssignmentStartDate);
     }
   });
 

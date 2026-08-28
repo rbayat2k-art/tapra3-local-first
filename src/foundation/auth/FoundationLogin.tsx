@@ -20,7 +20,7 @@ export function FoundationLogin() {
       <form onSubmit={submit} className="w-full max-w-md rounded-3xl border border-slate-800 bg-slate-900 p-7 shadow-2xl space-y-5">
         <div className="flex items-center gap-3">
           <div className="w-12 h-12 rounded-2xl bg-emerald-600 flex items-center justify-center"><Building2 /></div>
-          <div><h1 className="text-xl font-extrabold">ورود امن به تپرا</h1><p className="text-xs text-slate-400 mt-1">سامانه یکپارچه عملیات</p></div>
+          <div><h1 className="text-xl font-extrabold">ورود امن به شاهراه</h1><p className="text-xs text-slate-400 mt-1">سامانه یکپارچه عملیات</p></div>
         </div>
         <label className="block text-sm font-bold">ایمیل
           <input aria-label="ایمیل" dir="ltr" value={email} onChange={(e) => setEmail(e.target.value)} type="email" required className="mt-2 w-full rounded-xl border border-slate-700 bg-slate-950 p-3 text-left" />

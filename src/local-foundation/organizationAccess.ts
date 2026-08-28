@@ -16,18 +16,23 @@ export const ORGANIZATION_ROLE_GRANTS: Record<string, PermissionCode[]> = {
     'organization.units.view', 'organization.positions.view',
     'organization.personnel.view', 'organization.personnel.manage',
     'organization.personnel.banking.view', 'organization.personnel.banking.manage',
+    'organization.personnel.documents.queue.view', 'organization.personnel.documents.content.read',
+    'organization.personnel.documents.manage',
   ],
   'role-hr-manager': [
     'foundation.dashboard.view', 'foundation.preferences.manage', 'organization.overview.view',
     'organization.units.view', 'organization.positions.view', 'foundation.users.view', 'organization.roles.view',
     'organization.personnel.view', 'organization.personnel.manage', 'organization.personnel.changes.review',
     'organization.personnel.banking.view', 'organization.personnel.banking.manage',
+    'organization.personnel.documents.queue.view', 'organization.personnel.documents.content.read',
+    'organization.personnel.documents.manage',
   ],
   'role-personnel-reviewer': [
     'foundation.dashboard.view', 'foundation.preferences.manage', 'organization.overview.view',
     'organization.units.view', 'organization.positions.view',
     'organization.personnel.view', 'organization.personnel.changes.review',
     'organization.personnel.banking.view',
+    'organization.personnel.documents.queue.view', 'organization.personnel.documents.content.read',
   ],
   'role-user-manager': [
     'foundation.dashboard.view', 'foundation.preferences.manage', 'organization.overview.view',
@@ -46,7 +51,7 @@ export const ORGANIZATION_ROLE_GRANTS: Record<string, PermissionCode[]> = {
 };
 
 export interface DashboardCapability {
-  id: 'organization' | 'structure' | 'personnel' | 'personnel-review' | 'users' | 'registrations' | 'roles' | 'procurement' | 'treasury';
+  id: 'organization' | 'structure' | 'personnel' | 'personnel-review' | 'users' | 'registrations' | 'roles' | 'recruitment' | 'procurement' | 'treasury';
   page: string;
   title: string;
   description: string;
@@ -61,6 +66,7 @@ export const DASHBOARD_CAPABILITIES: DashboardCapability[] = [
   {id: 'users', page: 'users', title: 'حساب‌های کاربری', description: 'ساخت حساب، وضعیت ورود، رمز و نقش‌ها', anyPermissions: ['organization.users.create', 'foundation.users.edit', 'foundation.users.status.manage']},
   {id: 'registrations', page: 'registrations', title: 'درخواست‌های ثبت‌نام', description: 'بررسی هویت و تصمیم‌گیری درباره ثبت‌نام', anyPermissions: ['organization.registrations.review']},
   {id: 'roles', page: 'roles', title: 'نقش‌ها و تخصیص دسترسی', description: 'مشاهده، تعریف یا تخصیص کنترل‌شده نقش‌ها', anyPermissions: ['organization.roles.manage', 'organization.roles.assign']},
+  {id: 'recruitment', page: 'recruitment', title: 'جذب و شروع همکاری', description: 'اعلام نیاز، جذب، مصاحبه، پیشنهاد، شروع آموزشی و تبدیل قراردادی', anyPermissions: ['hr.recruitment_case.view', 'hr.recruitment_case.create']},
   {id: 'procurement', page: 'procurement', title: 'درخواست‌های خرید', description: 'ثبت، اصلاح، بررسی و ارجاع خرید چندشعبه‌ای', anyPermissions: ['procurement.purchase_request.view']},
   {id: 'treasury', page: 'treasury', title: 'صف پرداخت خزانه', description: 'دریافت و اجرای سهم‌های مالی تأییدشده', anyPermissions: ['treasury.treasury_execution.view']},
 ];

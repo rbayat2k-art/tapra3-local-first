@@ -5,18 +5,36 @@ import type {LocalFoundationService, RegistrationInput} from './service';
 import {formatPersianDateTime} from './PersianDate';
 import {digitsOnly, normalizeBankCard, normalizeIranianMobile} from '../utils/operationalFormat';
 import {FormValidationSummary, OptionalLabel, RequiredLabel} from './FormValidation';
+import {REGISTRATION_ASSIGNABLE_ROLE_IDS} from './accessPolicy';
+import {RecordDialog} from './RecordDialog';
+import {registrationQueueInsight, registrationQueueLaneLabel, type RegistrationQueueLane} from './registrationQueue';
 
-interface ReviewProps {state: FoundationState; service: LocalFoundationService; execute: (label: string, work: () => Promise<FoundationState>, success: string) => Promise<void>}
+interface ReviewProps {state: FoundationState; service: LocalFoundationService; execute: (label: string, work: () => Promise<FoundationState>, success: string) => Promise<boolean>}
 
 export function RegistrationPage({state, service, execute}: ReviewProps) {
   const [query, setQuery] = useState('');
+  const [filter, setFilter] = useState<'all' | RegistrationQueueLane | 'stale'>('all');
   const [selected, setSelected] = useState<RegistrationRequest | null>(null);
   const normalized = query.trim().toLocaleLowerCase('fa-IR');
-  const rows = state.registrationRequests.filter((item) => `${item.fullName} ${item.mobile} ${item.nationalId} ${item.requestedUsername} ${item.trackingCode}`.toLocaleLowerCase('fa-IR').includes(normalized));
+  const queueInsights = useMemo(() => state.registrationRequests.map((item) => registrationQueueInsight(item)), [state.registrationRequests]);
+  const counts = useMemo(() => ({
+    all: queueInsights.length,
+    hr: queueInsights.filter((item) => item.lane === 'hr').length,
+    applicant: queueInsights.filter((item) => item.lane === 'applicant').length,
+    activation: queueInsights.filter((item) => item.lane === 'activation').length,
+    closed: queueInsights.filter((item) => item.lane === 'closed').length,
+    stale: queueInsights.filter((item) => item.stale).length,
+  }), [queueInsights]);
+  const rows = queueInsights.filter((insight) => {
+    if (filter === 'stale' ? !insight.stale : filter !== 'all' && insight.lane !== filter) return false;
+    const item = insight.request;
+    return `${item.fullName} ${item.mobile} ${item.nationalId} ${item.requestedUsername} ${item.trackingCode} ${insight.nextAction} ${registrationQueueLaneLabel(insight.lane)}`.toLocaleLowerCase('fa-IR').includes(normalized);
+  });
   return <div className="page-stack">
     <section className="page-intro"><div className="page-intro__icon"><ClipboardCheck size={24}/></div><div><span className="eyebrow">گردش ثبت‌نام</span><h2>درخواست‌های ثبت‌نام</h2><p>هویت، کد ملی، موبایل و نام کاربری پیش از ثبت و دوباره هنگام فعال‌سازی کنترل می‌شوند.</p></div></section>
-    <section className="panel"><div className="operational-toolbar"><div><span className="eyebrow">صف بررسی</span><h3>{rows.length.toLocaleString('en-US')} درخواست</h3></div><label className="search-field"><Search size={17}/><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="نام، موبایل، کد ملی، نام کاربری یا کد پیگیری…"/></label></div><div className="registration-list">{rows.map((item) => <button key={item.id} onClick={() => setSelected(item)}><span className={`state-badge state-badge--${item.status === 'rejected' ? 'danger' : item.status === 'activated' ? 'good' : 'progress'}`}>{registrationLabel(item.status)}</span><div><strong>{item.fullName}</strong><small>{item.trackingCode} · {item.mobile} · @{item.requestedUsername}</small><time>ثبت در {formatPersianDateTime(item.createdAt)}</time></div><ArrowLeft size={17}/></button>)}{!rows.length && <div className="empty-state"><UserPlus size={28}/><strong>درخواستی مطابق جست‌وجو پیدا نشد.</strong></div>}</div></section>
-    {selected && <ReviewDialog request={selected} state={state} onClose={() => setSelected(null)} onReview={(decision, reason, roleIds, initialPassword) => execute('registration-review', () => service.reviewRegistration(selected.id, decision, reason, roleIds, initialPassword), 'تصمیم ثبت‌نام ذخیره شد.').then(() => setSelected(null))}/>} 
+    <section className="registration-queue-metrics" aria-label="خلاصه صف ثبت‌نام"><article><UserRound size={18}/><span><strong>{counts.hr.toLocaleString('en-US')}</strong><small>اقدام منابع انسانی</small></span></article><article><CircleAlert size={18}/><span><strong>{counts.applicant.toLocaleString('en-US')}</strong><small>منتظر متقاضی</small></span></article><article><ShieldCheck size={18}/><span><strong>{counts.activation.toLocaleString('en-US')}</strong><small>فعال‌سازی مدیر سامانه</small></span></article><article className={counts.stale?'has-issue':''}><ClipboardCheck size={18}/><span><strong>{counts.stale.toLocaleString('en-US')}</strong><small>بیش از سه روز بدون تغییر</small></span></article></section>
+    <section className="panel registration-queue-panel"><div className="registration-queue-filters" role="group" aria-label="فیلتر صف ثبت‌نام">{([['all','همه'],['hr','منابع انسانی'],['applicant','متقاضی'],['activation','فعال‌سازی'],['closed','بسته‌شده'],['stale','معطل‌مانده']] as const).map(([id,label])=><button key={id} aria-pressed={filter===id} className={filter===id?'active':''} onClick={()=>setFilter(id)}><span>{label}</span><b>{counts[id].toLocaleString('en-US')}</b></button>)}</div><div className="operational-toolbar"><div><span className="eyebrow">صف اقدام</span><h3>{rows.length.toLocaleString('en-US')} درخواست</h3></div><label className="search-field"><Search size={17}/><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="نام، موبایل، کد ملی، نام کاربری یا کد پیگیری…"/></label></div><div className="registration-list">{rows.map(({request:item,lane,nextAction,ageDays,stale}) => <button key={item.id} onClick={() => setSelected(item)}><span className={`state-badge state-badge--${item.status === 'rejected' ? 'danger' : item.status === 'activated' ? 'good' : 'progress'}`}>{registrationLabel(item.status)}</span><div><strong>{item.fullName}</strong><small>{item.trackingCode} · {item.mobile} · @{item.requestedUsername}</small><span className={`registration-next-action ${stale?'registration-next-action--stale':''}`}><b>{registrationQueueLaneLabel(lane)}</b>{nextAction}{ageDays>0&&<em>{ageDays.toLocaleString('en-US')} روز بدون تغییر</em>}</span><time>ثبت در {formatPersianDateTime(item.createdAt)}</time></div><ArrowLeft size={17}/></button>)}{!rows.length && <div className="empty-state"><UserPlus size={28}/><strong>{filter==='all'&&!query?'هنوز درخواست ثبت‌نامی در این دستگاه وجود ندارد.':'درخواستی مطابق این فیلتر و جست‌وجو پیدا نشد.'}</strong></div>}</div></section>
+    {selected && <ReviewDialog request={selected} state={state} onClose={() => setSelected(null)} onReview={(decision, reason, roleIds) => execute('registration-review', () => service.reviewRegistration(selected.id, selected.version, decision, reason, roleIds), 'تصمیم منابع انسانی ذخیره شد.').then((succeeded) => {if (succeeded) setSelected(null);})} onActivate={(password) => execute('registration-activate', () => service.activateRegistration(selected.id, selected.version, password), 'حساب ثبت‌نام فعال شد.').then((succeeded) => {if (succeeded) setSelected(null);})}/>}
   </div>;
 }
 
@@ -29,7 +47,7 @@ export function RegistrationDialog({service, onClose, onDone}: {service: LocalFo
   const update = <K extends keyof RegistrationInput>(key: K, value: RegistrationInput[K]) => setForm((current) => ({...current, [key]: value}));
   async function submit() {setBusy(true); setError(''); try {onDone(await service.submitRegistration(form));} catch (cause) {setError(cause instanceof Error ? cause.message : 'ثبت درخواست ممکن نشد.'); setBusy(false);}}
   return <div className="modal-scrim"><form className="dialog dialog--registration" onSubmit={(event) => {event.preventDefault(); void submit();}}>
-    <header><div><span className="eyebrow">درخواست دسترسی سازمانی</span><h2>ثبت‌نام کامل در تپرا</h2><p>تمام موارد ستاره‌دار برای ایجاد درخواست الزامی هستند.</p></div><button className="icon-button" type="button" onClick={onClose} aria-label="بستن"><X size={20}/></button></header>
+    <header><div><span className="eyebrow">درخواست دسترسی سازمانی</span><h2>ثبت‌نام کامل در شاهراه</h2><p>تمام موارد ستاره‌دار برای ایجاد درخواست الزامی هستند.</p></div><button className="icon-button" type="button" onClick={onClose} aria-label="بستن"><X size={20}/></button></header>
     <div className="dialog-body registration-form-body">
       {error && <div className="notice notice--danger"><CircleAlert size={18}/><span>{error}</span></div>}
       <RegistrationSection icon={<UserRound size={18}/>} title="هویت و حساب">
@@ -57,7 +75,7 @@ export function RegistrationDialog({service, onClose, onDone}: {service: LocalFo
   </form></div>;
 }
 
-function ReviewDialog({request, state, onClose, onReview}: {request: RegistrationRequest; state: FoundationState; onClose: () => void; onReview: (decision: 'in_review'|'needs_correction'|'rejected'|'approved', reason: string, roles: string[], initialPassword: string) => Promise<void>}) {
+function ReviewDialog({request, state, onClose, onReview, onActivate}: {request: RegistrationRequest; state: FoundationState; onClose: () => void; onReview: (decision: 'in_review'|'needs_correction'|'rejected'|'approved', reason: string, roles: string[]) => Promise<unknown>; onActivate: (password: string) => Promise<unknown>}) {
   const [reason, setReason] = useState(request.reviewReason ?? '');
   const [roles, setRoles] = useState<string[]>([]);
   const [roleQuery, setRoleQuery] = useState('');
@@ -66,27 +84,37 @@ function ReviewDialog({request, state, onClose, onReview}: {request: Registratio
   const [passwordConfirm, setPasswordConfirm] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [errors, setErrors] = useState<string[]>([]);
-  const visibleRoles = useMemo(() => {const query = roleQuery.trim().toLocaleLowerCase('fa-IR'); return state.roles.filter((role) => role.status === 'active' && role.id !== 'role-admin' && (!query || `${role.name} ${role.description}`.toLocaleLowerCase('fa-IR').includes(query)));}, [roleQuery, state.roles]);
+  const [busy, setBusy] = useState(false);
+  const visibleRoles = useMemo(() => {const query = roleQuery.trim().toLocaleLowerCase('fa-IR'); return state.roles.filter((role) => role.status === 'active' && REGISTRATION_ASSIGNABLE_ROLE_IDS.has(role.id) && (!query || `${role.name} ${role.description}`.toLocaleLowerCase('fa-IR').includes(query)));}, [roleQuery, state.roles]);
   const activated = request.status === 'activated';
-  const submit = () => {const next: string[] = []; if (['needs_correction','rejected'].includes(decision) && reason.trim().length < 3) next.push('برای اصلاح یا رد درخواست، دلیل را وارد کنید.'); if (decision === 'approved' && !roles.length) next.push('حداقل یک نقش دسترسی انتخاب کنید.'); if (decision === 'approved' && password.length < 8) next.push('رمز عبور اولیه باید حداقل ۸ نویسه باشد.'); if (decision === 'approved' && password !== passwordConfirm) next.push('تکرار رمز عبور اولیه یکسان نیست.'); setErrors(next); if (!next.length) void onReview(decision, reason, roles, password);};
-  return <div className="modal-scrim"><div className="dialog dialog--registration-review">
-    <header><div><span className="eyebrow">{request.trackingCode}</span><h2>{request.fullName}</h2><p>ثبت در {formatPersianDateTime(request.createdAt)}</p></div><button className="icon-button" onClick={onClose} aria-label="بستن"><X size={20}/></button></header>
-    <div className="dialog-body registration-review-body">
+  const mayReview = state.activeUser.permissions.includes('organization.registrations.review');
+  const mayActivate = state.activeUser.permissions.includes('organization.registrations.activate');
+  const submit = async () => {if (busy) return; const next: string[] = []; if (['needs_correction','rejected'].includes(decision) && reason.trim().length < 3) next.push('برای اصلاح یا رد درخواست، دلیل را وارد کنید.'); if (decision === 'approved' && !roles.length) next.push('حداقل یک نقش ورودی مجاز پیشنهاد کنید.'); setErrors(next); if (!next.length) {setBusy(true); try {await onReview(decision, reason, roles);} finally {setBusy(false);}}};
+  const activate = async () => {if (busy) return; const next: string[] = []; if (password.length < 8) next.push('رمز عبور اولیه باید حداقل ۸ نویسه باشد.'); if (password !== passwordConfirm) next.push('تکرار رمز عبور اولیه یکسان نیست.'); setErrors(next); if (!next.length) {setBusy(true); try {await onActivate(password);} finally {setBusy(false);}}};
+  return <RecordDialog ariaLabel={`بررسی درخواست ثبت‌نام ${request.fullName}، ${request.trackingCode}`} className="dialog--registration-review" onClose={() => {if (!busy) onClose();}}>
+    <header><div><span className="eyebrow">{request.trackingCode}</span><h2>{request.fullName}</h2><p>ثبت در {formatPersianDateTime(request.createdAt)}</p></div><button className="icon-button" disabled={busy} onClick={onClose} aria-label="بستن"><X size={20}/></button></header>
+    <fieldset className="dialog-body registration-review-body" disabled={busy} aria-busy={busy}>
       <div className="record-facts registration-review-facts"><div><span>موبایل اصلی<strong dir="ltr">{request.mobile}</strong></span></div><div><span>کد ملی<strong dir="ltr">{request.nationalId || 'ثبت نشده'}</strong></span></div><div><span>نام کاربری<strong dir="ltr">@{request.requestedUsername}</strong></span></div><div><span>تاریخ و ساعت ثبت<strong>{formatPersianDateTime(request.createdAt)}</strong></span></div><div><span>وضعیت<strong>{registrationLabel(request.status)}</strong></span></div></div>
       <div className="registration-review-details"><span><b>تماس دوم</b><strong dir="ltr">{request.secondaryMobile || '—'}</strong></span><span><b>نشانی</b><strong>{[request.province, request.city, request.address].filter(Boolean).join('، ') || '—'}</strong></span><span><b>بانک</b><strong>{request.bankName || '—'} · {maskCard(request.cardNumber)}</strong></span></div>
       {activated ? <div className="notice notice--success"><Check size={18}/><span>این درخواست در {formatPersianDateTime(request.updatedAt)} فعال شده و حساب آن ساخته شده است.</span></div> : <>
-        <div className="segmented-control">{([['in_review','در حال بررسی'],['needs_correction','نیازمند اصلاح'],['rejected','رد'],['approved','تأیید و فعال‌سازی']] as const).map(([id, label]) => <button className={decision === id ? 'active' : ''} key={id} onClick={() => setDecision(id)}>{label}</button>)}</div>
+        {request.status === 'approved' && <div className="notice notice--success"><ShieldCheck size={18}/><span>منابع انسانی نقش‌های ورودی را پیشنهاد داده است. فعال‌سازی نهایی و ساخت رمز فقط توسط مدیر سامانه انجام می‌شود.</span></div>}
+        {mayReview && request.status !== 'approved' && <>
+        <div className="segmented-control" role="group" aria-label="تصمیم منابع انسانی">{([['in_review','در حال بررسی'],['needs_correction','نیازمند اصلاح'],['rejected','رد'],['approved','تأیید پیشنهاد نقش']] as const).map(([id, label]) => <button type="button" className={decision === id ? 'active' : ''} aria-pressed={decision===id} disabled={busy} key={id} onClick={() => setDecision(id)}>{label}</button>)}</div>
         <FormValidationSummary errors={errors}/>
         {decision === 'approved' && <div className="registration-activation-panel">
-          <div className="activation-heading"><KeyRound size={19}/><div><strong>ساخت حساب و تخصیص دسترسی</strong><span>نقش و رمز عبور اولیه برای همین حساب تعیین می‌شوند.</span></div></div>
+          <div className="activation-heading"><ShieldCheck size={19}/><div><strong>پیشنهاد نقش ورودی</strong><span>فقط نقش‌های شروع همکاری قابل انتخاب‌اند؛ حساب در مرحله بعد ساخته می‌شود.</span></div></div>
           <details className="registration-role-picker"><summary><span>{roles.length.toLocaleString('en-US')} نقش انتخاب‌شده</span><small>بازکردن فهرست نقش‌ها</small><ChevronDown size={17}/></summary><div><label className="compact-role-search"><Search size={16}/><input value={roleQuery} onChange={(event) => setRoleQuery(event.target.value)} placeholder="جست‌وجوی نقش…"/></label><div className="registration-role-list">{visibleRoles.map((role) => <label key={role.id} className={roles.includes(role.id) ? 'selected' : ''}><input type="checkbox" checked={roles.includes(role.id)} onChange={(event) => setRoles((current) => event.target.checked ? [...current, role.id] : current.filter((id) => id !== role.id))}/><span>{roles.includes(role.id) && <Check size={13}/>}</span><div><strong>{role.name}</strong><small>{role.description}</small></div><b>{role.permissions.length.toLocaleString('en-US')} مجوز</b></label>)}{!visibleRoles.length && <p>نقشی پیدا نشد.</p>}</div></div></details>
-          <div className="registration-password-grid"><label className="field"><RequiredLabel>رمز عبور اولیه</RequiredLabel><span className="password-field"><input type={showPassword ? 'text' : 'password'} autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="حداقل ۸ نویسه"/><button type="button" aria-label={showPassword ? 'پنهان‌کردن رمز' : 'نمایش رمز'} onClick={() => setShowPassword((value) => !value)}>{showPassword ? <EyeOff size={17}/> : <Eye size={17}/>}</button></span></label><label className="field"><RequiredLabel>تکرار رمز عبور</RequiredLabel><input type="password" autoComplete="new-password" value={passwordConfirm} onChange={(event) => setPasswordConfirm(event.target.value)}/></label></div>
         </div>}
         <label className="field"><OptionalLabel>دلیل / یادداشت بررسی</OptionalLabel><textarea rows={3} value={reason} onChange={(event) => setReason(event.target.value)}/></label>
+        </>}
+        {request.status === 'approved' && <div className="registration-activation-panel">
+          <div className="activation-heading"><KeyRound size={19}/><div><strong>فعال‌سازی نهایی حساب</strong><span>نقش‌های پیشنهادی: {(request.proposedRoleIds ?? []).map((id) => state.roles.find((role) => role.id === id)?.name ?? id).join('، ') || 'ثبت نشده'}</span></div></div>
+          {mayActivate ? <><FormValidationSummary errors={errors}/><div className="registration-password-grid"><label className="field"><RequiredLabel>رمز عبور اولیه</RequiredLabel><span className="password-field"><input type={showPassword ? 'text' : 'password'} autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="حداقل ۸ نویسه"/><button type="button" aria-label={showPassword ? 'پنهان‌کردن رمز' : 'نمایش رمز'} onClick={() => setShowPassword((value) => !value)}>{showPassword ? <EyeOff size={17}/> : <Eye size={17}/>}</button></span></label><label className="field"><RequiredLabel>تکرار رمز عبور</RequiredLabel><input type="password" autoComplete="new-password" value={passwordConfirm} onChange={(event) => setPasswordConfirm(event.target.value)}/></label></div></> : <p>این مرحله در انتظار مدیر سامانه است.</p>}
+        </div>}
       </>}
-    </div>
-    <footer><button className="button button--ghost" onClick={onClose}>{activated ? 'بستن' : 'انصراف'}</button>{!activated && <button className="button button--primary" onClick={submit}><Check size={17}/> ثبت تصمیم</button>}</footer>
-  </div></div>;
+    </fieldset>
+    <footer>{busy && <span className="registration-review-status" role="status" aria-live="polite">در حال ثبت امن؛ تا پایان عملیات پنجره باز می‌ماند.</span>}<button className="button button--ghost" disabled={busy} onClick={onClose}>{activated ? 'بستن' : 'انصراف'}</button>{!activated && mayReview && request.status !== 'approved' && <button className="button button--primary" disabled={busy} onClick={()=>void submit()}><Check size={17}/> {busy?'در حال ثبت…':'ثبت تصمیم منابع انسانی'}</button>}{request.status === 'approved' && mayActivate && <button className="button button--primary" disabled={busy} onClick={()=>void activate()}><KeyRound size={17}/> {busy?'در حال فعال‌سازی…':'فعال‌سازی حساب'}</button>}</footer>
+  </RecordDialog>;
 }
 
 function RegistrationSection({icon, title, children}: {icon: React.ReactNode; title: string; children: React.ReactNode}) {return <section className="registration-form-section"><div className="registration-form-heading"><span>{icon}</span><strong>{title}</strong></div><div className="registration-form-grid">{children}</div></section>;}

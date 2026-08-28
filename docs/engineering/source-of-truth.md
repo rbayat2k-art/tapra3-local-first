@@ -1,36 +1,37 @@
-# منبع Canonical توسعه Tapra2
+# منبع رسمی توسعه TAPRA3
 
-> Status: CURRENT
-> Source of truth: این سند برای Git lineage، محل شروع توسعه و سیاست بازسازی Tapra2 است.
-> Owner: Engineering Owner
-> Last validated: 2026-08-11 by fresh clone of GitHub `stable@fcc3523c`
-> Supersedes: استفاده از checkoutهای قدیمی یا ZIP به‌عنوان منبع فعال توسعه
-> Superseded by: none
+> **Status:** `CURRENT`
+> **Last validated:** 2026-08-24
 
-## منبع رسمی
+## Repository رسمی
 
-تنها منبع رسمی کد و مستندات فعال Tapra2 این repository است:
+- Remote: `https://github.com/rbayat2k-art/tapra3-local-first.git`
+- Default/protected merge target: `main`
+- Runtime جاری: React/TypeScript/Vite، `LocalFoundationService`، `StorageAdapter` و IndexedDB مرورگر.
+- Branch `feature/workflow-management` شاخه فعال توسعه‌ای است که اصلاحات این مرحله از commit `a0f02dd` آن منشعب شده‌اند.
+- Branch `fix/ocr-blockers-20260824` یک شاخه بازبینی/اصلاح مستقل است و تا زمان PR و تأیید کاربر، canonical تولید نیست.
 
-- Remote: `https://github.com/rbayat2k-art/tapra2.git`
-- Canonical branch: `stable`
-- مسیر محلی پیشنهادی: `C:\Users\iLia\Documents\Tapra2\canonical`
+نام‌های تاریخی `Tapra2` در package، نام دیتابیس و بعضی اسناد هنوز وجود دارند. Rename کردن IndexedDB یا شناسه‌های persisted یک تغییر داده‌ای است و بدون تصمیم محصول و migration انجام نمی‌شود.
 
-در 2026-08-11 یک clone تازه فقط از GitHub `stable` ساخته شد. نصب dependencyها از lockfile، migration تکرارشونده، typecheck Web/Backend، build، `416/416` test و بررسی بصری Login، context، Dashboard، Customer 360، Import، Sales، Finance، Support و RBAC موفق بودند. بنابراین GitHub `stable` به‌تنهایی برای بازسازی محصول کافی است؛ secretهای محلی و داده PostgreSQL عمداً بخشی از Git نیستند.
+## ترتیب authority
 
-## قاعده شروع کار آینده
+1. رفتار قابل اجرا و تست‌های موفق فعلی.
+2. کد فعال، schema، configuration و CI همین Repository.
+3. اسناد شماره‌گذاری‌شده `docs/01...27` با برچسب جاری، مخصوصاً 02، 03، 05، 06، 08، 09، 14، 15، 22، 24، 26 و 27.
+4. تصمیم‌های تصویب‌شده و اسناد دامنه‌ای که صریحاً `CURRENT` هستند.
+5. اسناد `Planned`, `Deprecated`, `Conflict` و snapshotهای تاریخی فقط برای traceability.
 
-1. ابتدا آخرین `origin/stable` fetch یا clone شود.
-2. branch کاری جدید مستقیماً از همان commit ساخته شود، مگر stack صریح و تأییدشده‌ای وجود داشته باشد.
-3. تغییر فقط از Pull Request با check اجباری `quality` وارد `stable` شود.
-4. checkout قدیمی، Codex workspace قبلی یا branch بسته‌شده نباید به‌عنوان base کار جدید استفاده شود.
-5. `.env.local` فقط محلی و ignored است؛ مقدارهای secret هرگز commit یا در گزارش چاپ نمی‌شوند.
+اگر کد و سند تاریخی تعارض دارند، اجرای فعلی مرجع واقعیت فنی است؛ اگر موضوع نیازمند تصمیم کسب‌وکار است، Implementation متوقف و `NEEDS PRODUCT DECISION` ثبت می‌شود.
 
-## جایگاه Legacy
+## قاعده شروع و تحویل کار
 
-- `C:\Users\iLia\tapra2.zip` و forensic extraction فقط archive/recovery evidence هستند.
-- هیچ فایل legacy مستقیماً روی canonical overwrite نمی‌شود.
-- بازیابی احتمالی ابتدا با [Preservation Matrix](../archive/legacy-product-preservation-matrix.md) تطبیق داده شده و از مسیر branch/PR مستقل انجام می‌شود.
+1. Remote و base مورد تأیید Task مشخص شود؛ از ZIP، checkout قدیمی یا branch بسته‌شده شروع نشود.
+2. تغییر روی branch/worktree غیرمحافظت‌شده انجام و baseline ثبت شود.
+3. کامیت‌ها کوچک، هدف‌دار و قابل‌بازگشت باشند.
+4. Gateهای `docs/engineering/testing-policy.md` اجرا شوند.
+5. ورود به `main` فقط با PR، بررسی مستقل، تست کاربر و اجازه Merge انجام شود.
+6. Force push، حذف branch محافظت‌شده، secret commit و Merge خودکار ممنوع است مگر بازیابی اضطراری با مجوز صریح.
 
-## Branch protection
+## اسناد تاریخی
 
-`stable` به Pull Request و check به‌روز `quality` نیاز دارد. force push و branch deletion ممنوع‌اند. admin bypass فقط برای بازیابی اضطراری حفظ شده و مسیر عادی توسعه محسوب نمی‌شود.
+هر سندی که `tapra2.git/stable`، Backend/PostgreSQL فعال یا schema قدیمی را وضعیت جاری معرفی کند، canonical این Repository نیست؛ تا زمان پاک‌سازی کامل باید برچسب `Deprecated/Conflict` و لینک به این سند داشته باشد.

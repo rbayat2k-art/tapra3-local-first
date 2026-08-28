@@ -12,4 +12,4 @@
 - [وضعیت API فعلی](architecture/api-status.md)
 - [قرارداد DRAFT آینده](future/api-contract-draft.md)
 - [معماری آینده](architecture/future-platform.md)
-- [Pre-migration copy](archive/pre-migration-snapshot/2026-08-10-stable-f271cca7/docs/API_DOCUMENTATION.md)
+- Pre-migration copy در snapshot فعلی موجود نیست (`Deprecated` link removed).

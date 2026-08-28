@@ -118,6 +118,10 @@ export class IndexedDBAdapter implements StorageAdapter {
       return result;
     } catch (error) {
       try { nativeTransaction.abort(); } catch { /* transaction already completed or aborted */ }
+      // The work error is the actionable domain failure. Still observe the
+      // native abort promise so rejected IDB completion never leaks as an
+      // unhandled rejection in the browser or the test runner.
+      await done.catch(() => undefined);
       throw error;
     }
   }
@@ -166,17 +170,23 @@ export class IndexedDBAdapter implements StorageAdapter {
     const {checksum, ...payload} = snapshot;
     const actualChecksum = await sha256(JSON.stringify(payload));
     if (checksum !== actualChecksum) throw new Error('صحت فایل پشتیبان تأیید نشد؛ فایل ممکن است تغییر کرده باشد.');
-    await this.replaceAll(snapshot.stores);
+    const stores = Object.fromEntries(FOUNDATION_STORES.map((store) => [store, snapshot.stores[store] ?? []])) as Record<FoundationStoreName, unknown[]>;
+    const meta = (stores.meta as Array<{id?: unknown; value?: unknown}>).filter((item) => item.id !== 'schemaVersion');
+    stores.meta = [...meta, {id: 'schemaVersion', value: FOUNDATION_SCHEMA_VERSION}];
+    await this.replaceAll(stores);
   }
 }
 
 export function validateSnapshotShape(value: unknown): asserts value is SnapshotManifest {
   if (!value || typeof value !== 'object') throw new Error('ساختار فایل پشتیبان معتبر نیست.');
   const snapshot = value as Partial<SnapshotManifest>;
-  if (snapshot.format !== 'tapra2-local-snapshot') throw new Error('این فایل، پشتیبان معتبر تپرا نیست.');
-  if (snapshot.schemaVersion !== FOUNDATION_SCHEMA_VERSION) throw new Error('نسخه این پشتیبان با نسخه فعلی سازگار نیست.');
+  if (snapshot.format !== 'tapra2-local-snapshot') throw new Error('این فایل، پشتیبان معتبر شاهراه نیست.');
+  if (![11, 12, 13, FOUNDATION_SCHEMA_VERSION].includes(snapshot.schemaVersion)) throw new Error('نسخه این پشتیبان با نسخه فعلی سازگار نیست.');
   if (!snapshot.stores || typeof snapshot.stores !== 'object') throw new Error('داده‌های فایل پشتیبان ناقص است.');
   for (const store of FOUNDATION_STORES) {
+    if (snapshot.schemaVersion === 11 && (store === 'projects' || store === 'chat_preferences' || store === 'recruitment_candidate_files')) continue;
+    if (snapshot.schemaVersion === 12 && store === 'recruitment_candidate_files') continue;
+    if (snapshot.schemaVersion <= 13 && store === 'workflow_approval_rounds') continue;
     if (!Array.isArray(snapshot.stores[store])) throw new Error(`بخش ${store} در فایل پشتیبان وجود ندارد.`);
   }
   if (typeof snapshot.checksum !== 'string') throw new Error('کد صحت فایل پشتیبان وجود ندارد.');

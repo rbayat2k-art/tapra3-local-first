@@ -1,5 +1,7 @@
 # وضعیت فعلی API
 
+> **Deprecated / Conflict:** endpointهای این سند متعلق به معماری تاریخی‌اند. runtime جاری HTTP API ندارد؛ مرجع فعال: [`../07-API.md`](../07-API.md) و [`../24-LOCAL-SERVICE-REFERENCE.md`](../24-LOCAL-SERVICE-REFERENCE.md).
+
 > Status: CURRENT
 > Source of truth: This document for current API and backend status
 > Owner: Architecture Owner
