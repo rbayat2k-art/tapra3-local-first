@@ -101,6 +101,20 @@ describe('deterministic local seed', () => {
     }
   });
 
+  it('models a working trainee as linked personnel with restricted access', () => {
+    const trainee = PERSONNEL_RECORDS.find((item) => item.id === 'personnel-training-yasin')!;
+    const user = LOCAL_USERS.find((item) => item.id === trainee.linkedUserId)!;
+    const role = SECURITY_ROLES.find((item) => item.id === 'role-training-personnel')!;
+    expect(trainee).toMatchObject({
+      employmentStatus: 'active', employmentType: 'آموزشی', personnelCode: 'P-6105',
+      sourceRecruitmentRecordId: 'recruitment-case-005', advanceEligibilityStatus: 'ineligible',
+    });
+    expect(user).toMatchObject({status: 'active', personnelId: trainee.id, roleId: role.id});
+    expect(role.permissions).toEqual(expect.arrayContaining(['foundation.dashboard.view', 'task.task.view', 'task.task.edit', 'task.task.transition']));
+    expect(role.permissions).not.toContain('finance.employee-advance.create');
+    expect(role.permissions).not.toContain('organization.personnel.manage');
+  });
+
   it('gives every approved administrative employee own-only advance access', () => {
     const requesterRole = SECURITY_ROLES.find((role) => role.id === 'role-employee-advance-requester')!;
     expect(requesterRole.scope).toBe('SELF');

@@ -1,6 +1,6 @@
-export const FOUNDATION_SCHEMA_VERSION = 12;
+export const FOUNDATION_SCHEMA_VERSION = 14;
 export const FOUNDATION_DB_NAME = 'tapra2_local';
-export const FOUNDATION_SEED_VERSION = 'complete-local-erp-v1.35-collaboration-domain';
+export const FOUNDATION_SEED_VERSION = 'complete-local-erp-v1.41-letter-policy-repair';
 
 export type ScopeType = 'COMPANY' | 'UNIT' | 'TEAM' | 'SELF' | 'RECORD';
 /** Permission codes are registry-driven and always use domain.resource.action. */
@@ -126,6 +126,89 @@ export interface PendingPersonnelLifecycleChange {
   scheduledByActorId: string;
   scheduledByActorName: string;
   scheduledAt: string;
+  /**
+   * Snapshot of the approved continuity intent. Execution always re-discovers
+   * current responsibilities and revalidates every replacement.
+   */
+  continuityPlan?: WorkContinuityPlan;
+}
+
+export type WorkContinuityResponsibilityKind =
+  | 'direct_report'
+  | 'personnel_manager'
+  | 'sales_supervisor'
+  | 'unit_manager'
+  | 'unit_acting_manager'
+  | 'project_owner'
+  | 'project_member'
+  | 'project_task_assignee'
+  | 'chat_owner'
+  | 'chat_admin'
+  | 'chat_member'
+  | 'letter_assignee'
+  | 'letter_recipient'
+  | 'letter_reviewer'
+  | 'recruitment_assignee'
+  | 'recruitment_correction_recipient'
+  | 'workflow_correction_recipient'
+  | 'workflow_approval_voter'
+  | 'workflow_assignee'
+  | 'treasury_executor'
+  | 'offboarding_assignee';
+
+export type WorkContinuityResolutionMode =
+  | 'replacement_required'
+  | 'replacement_or_needs_reassignment'
+  | 'return_to_role_queue'
+  | 'remove_membership'
+  | 'preserve_history';
+
+export interface WorkContinuityResponsibility {
+  id: string;
+  kind: WorkContinuityResponsibilityKind;
+  mode: WorkContinuityResolutionMode;
+  title: string;
+  resourceId: string;
+  moduleId?: string;
+  store?: FoundationStoreName;
+  companyId: string;
+  unitId?: string;
+  version?: number;
+  roleIds?: string[];
+  approvalRoundId?: string;
+}
+
+export interface WorkContinuityDependencyPreview {
+  targetUserId: string;
+  targetUserName: string;
+  generatedAt: string;
+  responsibilities: WorkContinuityResponsibility[];
+  counts: Record<WorkContinuityResponsibilityKind, number>;
+  blockingCount: number;
+}
+
+export interface WorkContinuityResolution {
+  responsibilityId: string;
+  action: 'replace' | 'mark_needs_reassignment' | 'return_to_queue' | 'remove_membership' | 'preserve_history';
+  replacementUserId?: string;
+}
+
+export interface WorkContinuityPlan {
+  schemaVersion: 1;
+  targetUserId: string;
+  targetUserVersionToken: string;
+  generatedAt: string;
+  reason: string;
+  responsibilityIds: string[];
+  resolutions: WorkContinuityResolution[];
+}
+
+export interface WorkContinuityExecutionResult {
+  targetUserId: string;
+  appliedResponsibilityIds: string[];
+  changedResourceIds: string[];
+  needsReassignmentResourceIds: string[];
+  invalidatedSession: boolean;
 }
 
 export type PersonnelMovementKind = 'branch_transfer' | 'unit_change' | 'position_change' | 'sales_transfer';
@@ -203,6 +286,8 @@ export interface PersonnelRecord {
   emergencyRelation?: string;
   emergencyPhone?: string;
   linkedUserId?: string;
+  /** Stable provenance for a person whose employment started from recruitment. */
+  sourceRecruitmentRecordId?: string;
   branchUnitId?: string;
   salesHierarchyLevel?: SalesHierarchyLevel;
   /** Independent effective start of the person's current sales-network role. */
@@ -260,6 +345,9 @@ export interface CustomerTimelineItem {id: string; type: 'note' | 'identity' | '
 
 export interface CustomerRecord {
   id: string;
+  /** Persisted tenant and scope provenance for per-entitlement CRM authorization. */
+  companyId?: string;
+  unitId?: string;
   type: CustomerType;
   displayName: string;
   firstName?: string;
@@ -285,6 +373,10 @@ export interface CustomerRecord {
 
 export interface CustomerImportJob {
   id: string;
+  /** Scope provenance of the import command; legacy jobs without it are hidden fail-closed. */
+  companyId?: string;
+  unitId?: string;
+  ownerPersonnelId?: string;
   fileName: string;
   totalRows: number;
   importedRows: number;
@@ -307,6 +399,8 @@ export interface ActingUnitManagerAssignment {
 
 export interface OrganizationalUnit {
   id: string;
+  /** Tenant binding; absent only on legacy single-company snapshots. */
+  companyId?: string;
   name: string;
   type: string;
   parentId?: string;
@@ -364,6 +458,26 @@ export interface FoundationSession {
   signedOutAt?: string;
   switchedAt: string;
   version: number;
+  /** Transient projection: another tab changed the shared browser-profile identity. */
+  stale?: boolean;
+}
+
+/**
+ * Durable command receipt. Older rows only contain id/recordId/createdAt; the
+ * optional fields keep those snapshots readable while new commands can detect
+ * accidental command-id reuse with a different payload.
+ */
+export interface IdempotencyRecord {
+  id: string;
+  recordId: string;
+  requestHash?: string;
+  result?: {
+    recordId: string;
+    version: number;
+    status: string;
+    handoffRecordId?: string;
+  };
+  createdAt: string;
 }
 
 export type AuditCategory = 'session' | 'authorization' | 'data' | 'system';
@@ -441,6 +555,7 @@ export interface WorkflowTransitionDefinition {
 export type WorkflowStageScope = 'COMPANY' | 'UNIT' | 'BRANCH' | 'SELF';
 export type WorkflowStageDecision = 'approve' | 'reject' | 'needs_correction' | 'return_previous' | 'handoff';
 export type WorkflowStageAssignmentMode = 'role_queue' | 'specific_user' | 'branch_manager';
+export type WorkflowApprovalMode = 'ANY' | 'ALL' | 'N_OF_M';
 
 /**
  * Editable routing policy layered on top of the approved, immutable state machine.
@@ -460,7 +575,79 @@ export interface WorkflowApprovalStageDefinition {
   assignmentMode?: WorkflowStageAssignmentMode;
   /** Required only when assignmentMode is specific_user. */
   assigneeUserId?: string;
+  /** Legacy stages omit this field and retain first-valid-approval (ANY) behavior. */
+  approvalMode?: WorkflowApprovalMode;
+  /** Required only for N_OF_M and validated against the frozen electorate size. */
+  requiredApprovals?: number;
   description?: string;
+}
+
+export type WorkflowApprovalRoundStatus = 'open' | 'approved' | 'rejected' | 'correction' | 'needs_reassignment';
+export type WorkflowApprovalVoteDecision = 'approve' | 'reject' | 'needs_correction';
+
+export interface WorkflowApprovalVote {
+  id: string;
+  userId: string;
+  actorId: string;
+  decision: WorkflowApprovalVoteDecision;
+  reason: string;
+  occurredAt: string;
+  commandId: string;
+}
+
+/**
+ * Immutable-stage electorate plus append-only votes for one record entry into an
+ * approval state. Re-entering the same state creates a new round because the
+ * entryRecordVersion is different.
+ */
+export interface WorkflowApprovalRound {
+  id: string;
+  recordId: string;
+  moduleId: string;
+  companyId: string;
+  workflowVersion: number;
+  workflowRouteId: string;
+  stageId: string;
+  stateId: string;
+  entryRecordVersion: number;
+  mode: WorkflowApprovalMode;
+  requiredCount: number;
+  eligibleUserIds: string[];
+  /** Hash of amount/target/transition data frozen by the first approval vote. */
+  completionIntentHash?: string;
+  /** Frozen seats awaiting an explicit continuity replacement. */
+  blockedUserIds?: string[];
+  votes: WorkflowApprovalVote[];
+  status: WorkflowApprovalRoundStatus;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+  closedAt?: string;
+  /** Explicitly records first-decision bootstrap for records created before schema 14. */
+  legacyBootstrap?: boolean;
+}
+
+/** Read model intentionally omits the frozen electorate, raw votes and command hashes. */
+export interface WorkflowApprovalRoundProjection {
+  id: string;
+  recordId: string;
+  moduleId: string;
+  workflowVersion: number;
+  workflowRouteId: string;
+  stageId: string;
+  stateId: string;
+  entryRecordVersion: number;
+  mode: WorkflowApprovalMode;
+  requiredCount: number;
+  approvedCount: number;
+  electorateSize: number;
+  pendingUserIds: string[];
+  status: WorkflowApprovalRoundStatus;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+  legacyBootstrap?: boolean;
+  currentVote?: Pick<WorkflowApprovalVote, 'decision' | 'reason' | 'occurredAt'>;
 }
 
 /**
@@ -540,7 +727,7 @@ export interface OperationalRecordHistory {
   recordId: string;
   moduleId: string;
   sequence: number;
-  eventType: 'created' | 'edited' | 'transitioned' | 'assigned' | 'handoff' | 'comment' | 'corrected' | 'viewed' | 'archived_for_user' | 'restored_for_user';
+  eventType: 'created' | 'edited' | 'transitioned' | 'assigned' | 'handoff' | 'comment' | 'corrected' | 'viewed' | 'archived_for_user' | 'restored_for_user' | 'approval_round_opened' | 'approval_vote' | 'approval_electorate_replaced';
   fromState?: string;
   toState?: string;
   actorId: string;
@@ -574,6 +761,26 @@ export interface PersonnelDocumentFile {
   size: number;
   checksumSha256: string;
   dataUrl: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Raw recruitment resume/document content. It is never projected into FoundationState. */
+export interface RecruitmentCandidateFile {
+  id: string;
+  recordId: string;
+  companyId: string;
+  kind: 'resume' | 'education' | 'work_certificate' | 'portfolio' | 'other';
+  fileName: string;
+  mimeType: string;
+  size: number;
+  checksumSha256: string;
+  dataUrl: string;
+  status: 'active' | 'replaced';
+  replacedByFileId?: string;
+  uploadedBy: 'applicant' | 'hr';
+  uploadedByUserId?: string;
+  version: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -681,6 +888,7 @@ export const FOUNDATION_STORES = [
   'foundation_records',
   'workflow_definitions',
   'workflow_versions',
+  'workflow_approval_rounds',
   'workflow_history',
   'registration_requests',
   'registration_reviews',
@@ -704,6 +912,7 @@ export const FOUNDATION_STORES = [
   'personnel_documents',
   'personnel_document_files',
   'recruitment_cases',
+  'recruitment_candidate_files',
   'leads',
   'lead_assignments',
   'calls',
@@ -798,6 +1007,8 @@ export interface FoundationState {
   customerImports: CustomerImportJob[];
   workflows: WorkflowDefinition[];
   workflowVersions: WorkflowDefinition[];
+  /** Added in schema 14; optional only for older in-memory test fixtures. */
+  approvalRounds?: WorkflowApprovalRoundProjection[];
   operationalRecords: OperationalRecord[];
   operationalHistory: OperationalRecordHistory[];
   /** Added in schema 12; optional only for in-memory fixtures built against schema 11. */

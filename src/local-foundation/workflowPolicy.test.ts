@@ -51,6 +51,14 @@ describe('versioned workflow management policy', () => {
       .toThrow('نسخه تاریخی 1');
   });
 
+  it('seeds a self-validating letter review policy on the real in-review state',()=>{
+    const seed=createSeedData();
+    const letter=(seed.workflow_definitions as WorkflowDefinition[]).find((item)=>item.moduleId==='letter')!;
+    const stages=approvalStagesFor(letter,seed.security_roles);
+    expect(stages).toMatchObject([{stateId:'in_review',roleIds:['role-letter-reviewer'],assignmentMode:'role_queue'}]);
+    expect(validateWorkflowPolicy(letter,stages,seed.security_roles,letter.routeVariants??[],seed.users)).toEqual([]);
+  });
+
   it('fails closed when a frozen route is missing from the pinned workflow', () => {
     const seed = createSeedData();
     const workflow = (seed.workflow_definitions as WorkflowDefinition[]).find((item) => item.moduleId === 'employee-advance')!;
@@ -93,7 +101,7 @@ describe('versioned workflow management policy', () => {
   it('resolves the registered manager of the same branch for a branch-manager stage', () => {
     const seed = createSeedData();
     const workflow = (seed.workflow_definitions as WorkflowDefinition[]).find((item) => item.moduleId === 'employee-advance')!;
-    const state = {users:seed.users, units:seed.organizational_units, roles:seed.security_roles};
+    const state = {users:seed.users, units:seed.organizational_units, personnel:seed.personnel, roles:seed.security_roles};
     const assignee = resolveAdvanceStageAssignee(state, workflow, 'base', 'branch_review', {
       branchUnitId:'unit-branch-central', unitId:'unit-sales', beneficiaryUserId:'persona-seller',
     });
@@ -108,9 +116,9 @@ describe('versioned workflow management policy', () => {
       : stage);
     const configured = {...workflow, approvalStages:stages};
     const context = {branchUnitId:'unit-branch-central', unitId:'unit-sales', beneficiaryUserId:'persona-seller'};
-    expect(resolveAdvanceStageAssignee({users:seed.users, units:seed.organizational_units, roles:seed.security_roles}, configured, 'base', 'accounting_review', context)?.id).toBe('persona-advance-accounting');
+    expect(resolveAdvanceStageAssignee({users:seed.users, units:seed.organizational_units, personnel:seed.personnel, roles:seed.security_roles}, configured, 'base', 'accounting_review', context)?.id).toBe('persona-advance-accounting');
     const inactiveUsers = seed.users.map((user) => user.id === 'persona-advance-accounting' ? {...user, status:'inactive' as const} : user);
-    expect(resolveAdvanceStageAssignee({users:inactiveUsers, units:seed.organizational_units, roles:seed.security_roles}, configured, 'base', 'accounting_review', context)).toBeUndefined();
+    expect(resolveAdvanceStageAssignee({users:inactiveUsers, units:seed.organizational_units, personnel:seed.personnel, roles:seed.security_roles}, configured, 'base', 'accounting_review', context)).toBeUndefined();
   });
 
   it('applies branch self-service policy only to the matching active route', () => {

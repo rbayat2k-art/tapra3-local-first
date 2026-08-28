@@ -1,5 +1,6 @@
 import type {FoundationState, LocalUser, OrganizationalUnit, PersonnelRecord} from './model';
 import {todayIsoDate} from './PersianDate';
+import {actingAssignmentIsCurrent, resolveEffectiveUnitManager} from './workflowRouting';
 
 export interface OrganizationPerson {
   id: string;
@@ -14,9 +15,10 @@ type OrganizationState = Pick<FoundationState, 'personnel' | 'positions' | 'unit
 
 export function activeActingManager(unit: OrganizationalUnit, today = todayIsoDate()) {
   const assignment = unit.actingManager;
-  return assignment && assignment.startsOn <= today && assignment.endsOn >= today ? assignment : undefined;
+  return assignment && actingAssignmentIsCurrent(unit, today) ? assignment : undefined;
 }
 
+/** @deprecated Date-only display compatibility. Never use for authorization or workflow routing; use resolveEffectiveUnitManager with full state. */
 export function effectiveUnitManagerUserId(unit: OrganizationalUnit, today = todayIsoDate()) {
   return activeActingManager(unit, today)?.userId ?? unit.managerUserId;
 }
@@ -55,8 +57,8 @@ export function organizationStructureHealth(state: OrganizationState) {
     return !state.positions.some((position) => position.id === person.positionId && position.status === 'active' && position.unitIds.includes(person.unitId!));
   }).length;
   const unitsWithoutActiveManager = units.filter((unit) => {
-    const managerUserId = effectiveUnitManagerUserId(unit);
-    return unit.status === 'active' && (!managerUserId || !state.users.some((user) => user.id === managerUserId && user.status === 'active'));
+    const managerUserId = resolveEffectiveUnitManager(state, unit)?.effectiveManager?.id;
+    return unit.status === 'active' && !managerUserId;
   }).length;
   const invalidParents = units.filter((unit) => unit.parentId && !units.some((parent) => parent.id === unit.parentId && parent.status === 'active')).length;
   return {people, missingUnit, missingPosition, unitsWithoutActiveManager, invalidParents};

@@ -10,7 +10,9 @@ import {isWorkspaceRecordVisible} from './ErpWorkspacePage';
 
 class MemoryStorage implements StorageAdapter {
   private stores = new Map<FoundationStoreName, Map<IDBValidKey, unknown>>(FOUNDATION_STORES.map((store)=>[store,new Map()]));
-  async transaction<T>(stores:FoundationStoreName[],_mode:IDBTransactionMode,work:(transaction:StorageTransaction)=>Promise<T>):Promise<T>{const snapshots=new Map(stores.map((store)=>[store,new Map(this.stores.get(store)!)]));const tx:StorageTransaction={get:async<V>(store,id)=>this.stores.get(store)?.get(id) as V|undefined,getAll:async<V>(store)=>[...(this.stores.get(store)?.values()??[])] as V[],put:async(store,value)=>{this.stores.get(store)!.set((value as {id:IDBValidKey}).id,structuredClone(value));},delete:async(store,id)=>{this.stores.get(store)!.delete(id);},clear:async(store)=>{this.stores.get(store)!.clear();}};try{return await work(tx);}catch(error){for(const [store,snapshot] of snapshots)this.stores.set(store,snapshot);throw error;}}
+  failReadAfterCommandId?:string;
+  private failNextReadonly=false;
+  async transaction<T>(stores:FoundationStoreName[],_mode:IDBTransactionMode,work:(transaction:StorageTransaction)=>Promise<T>):Promise<T>{if(_mode==='readonly'&&this.failNextReadonly){this.failNextReadonly=false;throw new Error('injected post-commit read failure');}const snapshots=new Map(stores.map((store)=>[store,new Map(this.stores.get(store)!)]));const tx:StorageTransaction={get:async<V>(store,id)=>this.stores.get(store)?.get(id) as V|undefined,getAll:async<V>(store)=>[...(this.stores.get(store)?.values()??[])] as V[],put:async(store,value)=>{this.stores.get(store)!.set((value as {id:IDBValidKey}).id,structuredClone(value));if(store==='idempotency_keys'&&(value as {id?:string}).id===this.failReadAfterCommandId){this.failReadAfterCommandId=undefined;this.failNextReadonly=true;}},delete:async(store,id)=>{this.stores.get(store)!.delete(id);},clear:async(store)=>{this.stores.get(store)!.clear();}};try{return await work(tx);}catch(error){for(const [store,snapshot] of snapshots)this.stores.set(store,snapshot);throw error;}}
   get<T>(store:FoundationStoreName,id:IDBValidKey){return this.transaction([store],'readonly',(tx)=>tx.get<T>(store,id));}
   getAll<T>(store:FoundationStoreName){return this.transaction([store],'readonly',(tx)=>tx.getAll<T>(store));}
   put<T>(store:FoundationStoreName,value:T){return this.transaction([store],'readwrite',(tx)=>tx.put(store,value));}
@@ -24,6 +26,29 @@ async function addRole(storage:MemoryStorage,userId:string,roleId:string){const 
 async function appendRole(storage:MemoryStorage,userId:string,roleId:string){const user=await storage.get<LocalUser>('users',userId);await storage.put('users',{...user!,roleIds:[...new Set([...(user!.roleIds??[user!.roleId]),roleId])]});}
 
 describe('collaboration project domain',()=>{
+  it('replays project and group creation after a post-commit state refresh failure',async()=>{
+    const storage=new MemoryStorage();await storage.replaceAll(createSeedData());const service=new LocalFoundationService(storage);await sessionAs(storage,'persona-product-owner');
+    const projectInput={title:'پروژه فرمان پایدار',memberUserIds:['persona-system-admin'],createChat:true};
+    storage.failReadAfterCommandId='project-stable-command';
+    await expect(service.createProject(projectInput,'project-stable-command')).rejects.toThrow('post-commit');
+    await expect(service.createProject(projectInput,'project-stable-command')).resolves.toBeTruthy();
+    expect((await storage.getAll<OperationalRecord>('projects')).filter((item)=>item.title===projectInput.title)).toHaveLength(1);
+
+    const groupInput={kind:'group' as const,title:'گروه فرمان پایدار',memberUserIds:['persona-system-admin']};
+    storage.failReadAfterCommandId='group-stable-command';
+    await expect(service.createChatConversation(groupInput,'group-stable-command')).rejects.toThrow('post-commit');
+    await expect(service.createChatConversation(groupInput,'group-stable-command')).resolves.toBeTruthy();
+    expect((await storage.getAll<OperationalRecord>('chats')).filter((item)=>item.title===groupInput.title)).toHaveLength(1);
+
+    const project=(await storage.getAll<OperationalRecord>('projects')).find((item)=>item.title===projectInput.title)!;
+    const taskInput={title:'وظیفه فرمان پایدار',projectId:project.id,assigneeUserIds:['persona-product-owner'],labels:['ایمن']};
+    storage.failReadAfterCommandId='task-batch-stable-command';
+    await expect(service.createProjectTasksBatch(taskInput,'task-batch-stable-command')).rejects.toThrow('post-commit');
+    await expect(service.createProjectTasksBatch(taskInput,'task-batch-stable-command')).resolves.toBeTruthy();
+    expect((await storage.getAll<OperationalRecord>('tasks')).filter((item)=>item.title===taskInput.title)).toHaveLength(1);
+    await expect(service.createProjectTasksBatch({...taskInput,title:'استفاده متفاوت از فرمان'},'task-batch-stable-command')).rejects.toThrow('شناسه این فرمان');
+  });
+
   it('creates a private project and optional chat atomically and removes future access with membership',async()=>{
     const storage=new MemoryStorage();await storage.replaceAll(createSeedData());const service=new LocalFoundationService(storage);
     await sessionAs(storage,'persona-product-owner');
@@ -151,8 +176,9 @@ describe('collaboration project domain',()=>{
     state=await service.updateProject(project.id,{title:project.title,memberUserIds:['persona-product-owner'],createChat:true},project.version);project=state.operationalRecords.find((record)=>record.id===project.id)!;
     task=(await storage.get<OperationalRecord>('tasks',task.id))!;
     expect(task.payload).toMatchObject({needsReassignment:true,removedAssigneeUserId:'persona-system-admin'});expect(projectChatId(project)).toBeTruthy();
-    state=await service.updateProjectTask(task.id,{title:task.title,assigneeUserId:'persona-product-owner'},task.version);task=state.operationalRecords.find((record)=>record.id===task.id)!;
-    expect(task.assigneeUserId).toBe('persona-product-owner');expect(task.payload.needsReassignment).toBe(false);
+    await expect(service.updateProjectTask(task.id,{title:task.title,assigneeUserId:'persona-product-owner'},task.version)).rejects.toThrow('تعیین همه مسئولان');
+    state=await service.resolveContinuityReassignment('task',task.id,'project_task_assignee','persona-product-owner',task.version,'تعیین مسئول تازه پس از حذف عضو پروژه');task=state.operationalRecords.find((record)=>record.id===task.id)!;
+    expect(task.assigneeUserId).toBe('persona-product-owner');expect(task.payload.needsReassignment).toBe(false);expect(task.payload.removedAssigneeUserId).toBeNull();
   });
 
   it('fails closed for project tasks whose parent is missing or no longer visible',async()=>{
@@ -193,8 +219,8 @@ describe('collaboration project domain',()=>{
     await expect(service.updateOperationalRecord('document',document.id,document.version,{payload:{...document.payload,projectId:project.id}})).rejects.toThrow('پرونده پروژه');
     await expect(service.transitionOperationalRecord('project',project.id,'project.activate')).rejects.toThrow('مسیر تخصصی');
     await expect(service.transitionOperationalRecord('task',task.id,'task.in_progress')).rejects.toThrow('میز همکاری');
-    await expect(service.assignOperationalRecord('project',project.id,'persona-system-admin','دورزدن مالکیت')).rejects.toThrow('میز همکاری');
-    await expect(service.assignOperationalRecord('task',task.id,'persona-system-admin','دورزدن عضویت')).rejects.toThrow('میز همکاری');
+    await expect(service.assignOperationalRecord('project',project.id,'persona-system-admin','دورزدن مالکیت',project.version)).rejects.toThrow('مسیر تخصصی');
+    await expect(service.assignOperationalRecord('task',task.id,'persona-system-admin','دورزدن عضویت',task.version)).rejects.toThrow('میز همکاری');
   });
 
   it('rejects mismatched, out-of-scope, and cross-company generic assignments and direct record opening',async()=>{
@@ -202,12 +228,12 @@ describe('collaboration project domain',()=>{
     let state=await service.createOperationalRecord('document',{title:'سند کنترل محدوده ارجاع'});
     let document=state.operationalRecords.find((record)=>record.moduleId==='document'&&record.title==='سند کنترل محدوده ارجاع')!;
 
-    await expect(service.assignOperationalRecord('task',document.id,'persona-system-admin','ماژول اشتباه')).rejects.toThrow('معتبر نیست');
+    await expect(service.assignOperationalRecord('task',document.id,'persona-system-admin','ماژول اشتباه',document.version)).rejects.toThrow('معتبر نیست');
     expect((await storage.getAll<OperationalRecord>('tasks')).some((record)=>record.id===document.id)).toBe(false);
 
     const target=await storage.get<LocalUser>('users','persona-system-admin');
     await storage.put('users',{...target!,companyId:'other-company'});
-    await expect(service.assignOperationalRecord('document',document.id,'persona-system-admin','شرکت دیگر')).rejects.toThrow('معتبر نیست');
+    await expect(service.assignOperationalRecord('document',document.id,'persona-system-admin','شرکت دیگر',document.version)).rejects.toThrow('معتبر نیست');
     await storage.put('users',target!);
 
     const role:SecurityRole={id:'role-unit-document-manager-test',name:'مدیر سند واحدی آزمون',description:'آزمون محدوده واحد',status:'active',protected:false,scope:'UNIT',permissions:[permissionFor('document','view'),permissionFor('document','manage')],createdAt:'2026-08-27T00:00:00.000Z',updatedAt:'2026-08-27T00:00:00.000Z',version:1};
@@ -215,7 +241,7 @@ describe('collaboration project domain',()=>{
     document={...document,unitId:'unit-sales',version:document.version+1,updatedAt:'2026-08-27T00:00:00.000Z'};
     await storage.put('documents',document);await sessionAs(storage,'persona-user-manager');state=await service.loadState();
     expect(isWorkspaceRecordVisible(document,state,['document'])).toBe(false);
-    await expect(service.assignOperationalRecord('document',document.id,'persona-user-manager','خارج از واحد')).rejects.toThrow('محدوده');
+    await expect(service.assignOperationalRecord('document',document.id,'persona-user-manager','خارج از واحد',document.version)).rejects.toThrow('محدوده');
 
     const ownUnitDocument={...document,id:'document-own-unit',unitId:state.activeUser.unitId,trackingCode:'DOC-OWN-UNIT'};
     expect(isWorkspaceRecordVisible(ownUnitDocument,state,['document'])).toBe(true);

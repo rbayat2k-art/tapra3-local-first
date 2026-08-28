@@ -23,6 +23,7 @@ export interface RoleTemplate {
 const communicationsSelfService: PermissionCode[] = [
   permissionFor('chat','view'), permissionFor('chat','create'), permissionFor('chat','edit'),
   permissionFor('message','view'), permissionFor('message','create'), permissionFor('message','edit'),
+  permissionFor('letter','view'), permissionFor('letter','create'), permissionFor('letter','edit'), permissionFor('letter','transition'),
 ];
 const shellBase: PermissionCode[] = [
   'foundation.dashboard.view', 'foundation.preferences.manage', 'organization.overview.view', ...communicationsSelfService,
@@ -55,6 +56,7 @@ export const ROLE_TEMPLATES: RoleTemplate[] = [
   {id: 'role-inventory-maker', title: 'ثبت‌کننده موجودی', description: 'ثبت تعدیل موجودی بدون مجوز تأیید', scope: 'UNIT', permissions: [...employeeSelfService, 'business.inventory.adjust']},
   {id: 'role-inventory-approver', title: 'تأییدکننده موجودی', description: 'تأیید تعدیل‌های دیگران در واحد انبار', scope: 'UNIT', permissions: [...employeeSelfService, 'business.inventory.approve']},
   {id: 'role-support-agent', title: 'کارشناس پشتیبانی', description: 'دسترسی به پرونده‌های تخصیص‌یافته', scope: 'SELF', permissions: employeeSelfService},
+  {id: 'role-training-personnel', title: 'پرسنل آموزشی', description: 'ورود محدود دوره آموزشی؛ ارتباطات سازمانی و انجام کارهای تخصیص‌یافته بدون دسترسی مالی یا مدیریتی', scope: 'SELF', permissions: [...shellBase, permissionFor('task','view'), permissionFor('task','edit'), permissionFor('task','transition')]},
   {id: 'role-auditor', title: 'ممیز داخلی', description: 'نقش موقت فقط‌خواندنی برای مشاهده ساختار و خط‌مشی؛ گزارش ممیزی تا تصویب قرارداد سانسور نمایش داده نمی‌شود', scope: 'COMPANY', permissions: [...shellBase, 'organization.units.view', 'organization.positions.view', 'organization.roles.view', 'foundation.policy.inspect']},
   {id: 'role-registration-reviewer', title: 'بازبین ثبت‌نام', description: 'بررسی هویت و تصمیم‌گیری درباره درخواست ثبت‌نام؛ بدون اختیار ویرایش پرونده یا نقش', scope: 'COMPANY', permissions: ORGANIZATION_ROLE_GRANTS['role-registration-reviewer']},
   ...ERP_ROLE_TEMPLATES.map((role) => ({
@@ -110,7 +112,7 @@ export const ORGANIZATIONAL_UNITS: OrganizationalUnit[] = [
   {id: 'unit-studio', name: 'آتلیه', type: 'واحد', parentId: 'unit-management', status: 'active', order: 26, description: 'تولید و مدیریت محتوای تصویری', createdAt: SEED_TIME, updatedAt: SEED_TIME},
   {id: 'unit-validation', name: 'اعتبارسنجی', type: 'واحد', parentId: 'unit-management', status: 'active', order: 27, description: 'بررسی و کنترل اعتبار اطلاعات و پرونده‌ها', createdAt: SEED_TIME, updatedAt: SEED_TIME},
   {id: 'unit-sales-boost', name: 'فروش تقویتی', type: 'واحد', parentId: 'unit-management', status: 'active', order: 28, description: 'برنامه‌های تکمیلی و تقویت عملکرد فروش', createdAt: SEED_TIME, updatedAt: SEED_TIME},
-];
+].map((unit)=>({...unit,companyId:COMPANY_ID} as OrganizationalUnit));
 
 /** مسئولان مصوب داده نمونه؛ در ارتقای v1.34 فقط همین شناسه‌های قطعی ترمیم می‌شوند. */
 export const SEED_UNIT_MANAGER_ASSIGNMENTS: Record<string, string> = Object.fromEntries(
@@ -206,6 +208,7 @@ export const LOCAL_USERS: LocalUser[] = [
   user({id: 'persona-advance-branch-manager', actorId: 'actor-advance-branch-manager', name: 'کامران یوسفی', username: 'k.yousefi', roleId: 'role-advance-branch-manager', roleIds: ['role-advance-branch-manager'], status: 'active', companyId: COMPANY_ID, unitId: 'unit-sales', branchUnitId: 'unit-branch-central', positionId: 'position-manager', managerUserId: 'persona-product-owner', personnelId: 'personnel-advance-branch-manager', advanceBranchIds: ['unit-branch-central','unit-branch-poonak-night','unit-branch-mokhberi-1','unit-branch-mokhberi-4','unit-branch-fakhar','unit-branch-azadi'], accent: '#ea580c', initials: 'ک.ی', isAdmin: false}),
   user({id: 'persona-advance-accounting', actorId: 'actor-advance-accounting', name: 'بهاره اکبری', username: 'b.akbari', roleId: 'role-advance-accounting-reviewer', roleIds: ['role-advance-accounting-reviewer'], status: 'active', companyId: COMPANY_ID, unitId: 'unit-accounting', positionId: 'position-specialist', managerUserId: 'persona-product-owner', personnelId: 'personnel-advance-accounting', advanceBranchIds: ['*'], accent: '#0891b2', initials: 'ب.ا', isAdmin: false}),
   user({id: 'persona-sales-advance-approver', actorId: 'actor-sales-advance-approver', name: 'سودابه مرادی', username: 's.moradi', roleId: 'role-sales-advance-approver', roleIds: ['role-sales-advance-approver', 'role-sales-vice'], status: 'active', companyId: COMPANY_ID, unitId: 'unit-sales', branchUnitId: 'unit-branch-central', positionId: 'position-sales-vice', managerUserId: 'persona-product-owner', personnelId: 'personnel-sales-advance-approver', advanceBranchIds: ['*'], salesHierarchyLevel: 'sales_vice', accent: '#7c3aed', initials: 'س.م', isAdmin: false}),
+  user({id: 'persona-training-yasin', actorId: 'actor-training-yasin', name: 'یاسین احمدی', username: 'y.ahmadi.training', roleId: 'role-training-personnel', roleIds: ['role-training-personnel'], status: 'active', companyId: COMPANY_ID, unitId: 'unit-sales', branchUnitId: 'unit-branch-central', positionId: 'position-seller', managerUserId: 'persona-callcenter-a', personnelId: 'personnel-training-yasin', teamId: 'team-sales-a', accent: '#d69b2d', initials: 'ی.ا', isAdmin: false}),
 ];
 
 const personnel = (input: Omit<PersonnelRecord, 'createdAt' | 'updatedAt' | 'gender' | 'maritalStatus' | 'employmentType' | 'startDate' | 'primaryMobile' | 'branchUnitId' | 'movements' | 'salesCompensationHistory'> & Partial<Pick<PersonnelRecord, 'gender' | 'maritalStatus' | 'employmentType' | 'startDate' | 'primaryMobile' | 'branchUnitId' | 'movements' | 'salesCompensationHistory'>>): PersonnelRecord => {
@@ -245,6 +248,7 @@ const BASE_PERSONNEL_RECORDS: PersonnelRecord[] = [
   personnel({id: 'personnel-advance-accounting', personnelCode: 'P-1502', firstName: 'بهاره', lastName: 'اکبری', primaryMobile: '09121115002', employmentStatus: 'active', unitId: 'unit-accounting', positionId: 'position-specialist', managerPersonnelId: 'personnel-admin', linkedUserId: 'persona-advance-accounting'}),
   personnel({id: 'personnel-sales-advance-approver', personnelCode: 'P-1503', firstName: 'سودابه', lastName: 'مرادی', primaryMobile: '09121115003', employmentStatus: 'active', unitId: 'unit-sales', positionId: 'position-sales-vice', managerPersonnelId: 'personnel-admin', salesHierarchyLevel: 'sales_vice', salesBranchUnitId: 'unit-branch-central', linkedUserId: 'persona-sales-advance-approver'}),
   personnel({id: 'personnel-laleh', personnelCode: 'P-3002', firstName: 'لاله', lastName: 'مرادی', primaryMobile: '09122223344', city: 'تهران', employmentStatus: 'active', unitId: 'unit-sales', positionId: 'position-seller', managerPersonnelId: 'personnel-callcenter-a', salesHierarchyLevel: 'seller', salesChannel: 'call_center', salesSupervisorPersonnelId: 'personnel-callcenter-a', salesBranchUnitId: 'unit-branch-central', salesStructureId: 'sales-structure-saadat-a', linkedUserId: 'persona-laleh'}),
+  personnel({id: 'personnel-training-yasin', personnelCode: 'P-6105', firstName: 'یاسین', lastName: 'احمدی', nationalId: '0071234551', primaryMobile: '09121230051', employmentStatus: 'active', employmentType: 'آموزشی', startDate: '2026-08-11', unitId: 'unit-sales', positionId: 'position-seller', branchUnitId: 'unit-branch-central', managerPersonnelId: 'personnel-callcenter-a', linkedUserId: 'persona-training-yasin', sourceRecruitmentRecordId: 'recruitment-case-005', advanceEligibilityStatus: 'ineligible', advanceEligibilityReason: 'تا تبدیل دوره آموزشی به همکاری قراردادی، امکان ثبت مساعده فعال نیست.'}),
   personnel({id: 'personnel-ended', personnelCode: 'P-5098', firstName: 'حمید', lastName: 'زارعی', primaryMobile: '09120001122', employmentStatus: 'ended', employmentType: 'پروژه‌ای', startDate: '2022-05-01', endDate: '2025-09-30', unitId: 'unit-support', positionId: 'position-specialist'}),
 ];
 
@@ -363,6 +367,7 @@ const recruitmentStatePaths: Record<string, string[]> = {
   interview_scheduled: ['submitted','hr_review','ready_to_publish','published','candidate_review','interview_scheduled'],
   ready_to_start: ['submitted','hr_review','ready_to_publish','published','candidate_review','interview_scheduled','evaluated','offer_sent','offer_accepted','ready_to_start'],
   training: ['submitted','hr_review','ready_to_publish','published','candidate_review','interview_scheduled','evaluated','offer_sent','offer_accepted','ready_to_start','training'],
+  rejected: ['submitted','hr_review','ready_to_publish','published','candidate_review','interview_scheduled','evaluated','rejected'],
 };
 
 const recruitmentStateActor = (state: string) => {
@@ -376,6 +381,7 @@ const recruitmentStateTitle: Record<string, string> = {
   submitted:'اعلام نیاز ثبت‌شده', hr_review:'بررسی منابع انسانی', ready_to_publish:'آماده انتشار آگهی', published:'انتشار و جذب متقاضی',
   candidate_review:'بررسی پرونده متقاضی', interview_scheduled:'دعوت و مصاحبه', evaluated:'ارزیابی مصاحبه', offer_sent:'ارسال پیشنهاد همکاری',
   offer_accepted:'پذیرش و امضای پیشنهاد', ready_to_start:'آماده شروع به کار', training:'همکاری آموزشی', contracted:'همکاری قراردادی',
+  rejected:'رد و بستن پرونده',
 };
 
 function seedRecruitmentHistory(records: OperationalRecord[]): OperationalRecordHistory[] {

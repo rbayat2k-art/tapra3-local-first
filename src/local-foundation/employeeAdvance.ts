@@ -1,5 +1,6 @@
 import type {AdvanceEligibilityStatus, FoundationState, LocalUser, OperationalPayloadValue, OperationalRecord, PersonnelRecord, WorkflowApprovalStageDefinition} from './model';
 import {approvalStagesForRoute, assignmentModeForStage, roleIdsForWorkflowState, routeVariantForBranch} from './workflowPolicy';
+import {resolveEffectiveUnitManager, userIsEffectiveUnitManager} from './workflowRouting';
 
 export type AdvanceStage = 'draft' | 'branch_review' | 'accounting_review' | 'final_review' | 'needs_correction' | 'sent_to_treasury' | 'rejected' | 'paid';
 export type AdvanceDecision = 'approve' | 'needs_correction' | 'reject' | 'accounting_recheck' | 'approve_to_treasury';
@@ -107,10 +108,10 @@ export function readEmployeeAdvancePayload(recordOrPayload: OperationalRecord | 
   };
 }
 
-export function advanceBranchIds(user: LocalUser, state: Pick<FoundationState, 'units'>): string[] {
+export function advanceBranchIds(user: LocalUser, state: Pick<FoundationState, 'units' | 'users' | 'personnel'>): string[] {
   if (user.isAdmin || user.advanceBranchIds?.includes('*')) return state.units.filter((unit) => unit.type === 'شعبه' && unit.status === 'active').map((unit) => unit.id);
   const explicit = user.advanceBranchIds?.length ? user.advanceBranchIds : user.branchUnitId ? [user.branchUnitId] : [];
-  const managed = state.units.filter((unit) => unit.type === 'شعبه' && unit.status === 'active' && unit.managerUserId === user.id).map((unit) => unit.id);
+  const managed = state.units.filter((unit) => unit.type === 'شعبه' && unit.status === 'active' && userIsEffectiveUnitManager(state, unit, user.id)).map((unit) => unit.id);
   return [...new Set([...explicit, ...managed])];
 }
 
@@ -130,17 +131,19 @@ interface AdvanceStageAssignmentContext {
 export function canUserTakeAdvanceStage(
   user: LocalUser,
   stage: WorkflowApprovalStageDefinition,
-  state: Pick<FoundationState, 'units'>,
+  state: Pick<FoundationState, 'units' | 'users' | 'personnel' | 'roles'>,
   context: AdvanceStageAssignmentContext,
 ): boolean {
   if (user.status !== 'active') return false;
   const mode = assignmentModeForStage(stage);
   if (mode === 'specific_user' && user.id !== stage.assigneeUserId) return false;
   if (mode === 'branch_manager') {
-    const branch = state.units.find((unit) => unit.id === context.branchUnitId && unit.status === 'active');
-    if (!branch?.managerUserId || branch.managerUserId !== user.id) return false;
+    const manager = resolveEffectiveUnitManager(state, context.branchUnitId)?.effectiveManager;
+    if (!manager || manager.id !== user.id) return false;
   }
-  if (stage.roleIds.length && !user.roleIds.some((roleId) => stage.roleIds.includes(roleId))) return false;
+  // Acting management narrows *where* the user may act; it never clones the
+  // permanent manager's workflow role or permission bundle.
+  if (stage.roleIds.length && !state.roles.some((role) => role.status === 'active' && user.roleIds.includes(role.id) && stage.roleIds.includes(role.id))) return false;
   if (stage.scope === 'SELF' && user.id !== context.beneficiaryUserId) return false;
   if (stage.scope === 'UNIT' && user.unitId !== context.unitId) return false;
   if (stage.scope === 'BRANCH') {
@@ -152,7 +155,7 @@ export function canUserTakeAdvanceStage(
 }
 
 export function resolveAdvanceStageAssignee(
-  state: Pick<FoundationState, 'users' | 'units' | 'roles'>,
+  state: Pick<FoundationState, 'users' | 'units' | 'personnel' | 'roles'>,
   workflow: Parameters<typeof approvalStagesForRoute>[0],
   routeId: string | undefined,
   stateId: string,
@@ -200,19 +203,56 @@ export function canBranchManagerDecideAdvance(record: OperationalRecord, state: 
   const payload = readEmployeeAdvancePayload(record);
   const workflow = state.workflows.find((item) => item.moduleId === 'employee-advance' && (!record.workflowVersion || item.version === record.workflowVersion))
     ?? state.workflowVersions.find((item) => item.moduleId === 'employee-advance' && item.version === record.workflowVersion);
-  const stage = workflow && approvalStagesForRoute(workflow, state.roles, record.workflowRouteId).find((item) => item.stateId === 'branch_review');
+  const configured = workflow && approvalStagesForRoute(workflow, state.roles, record.workflowRouteId).find((item) => item.stateId === 'branch_review');
+  const stage=configured&&record.payload.continuitySpecificAssigneeState==='branch_review'&&typeof record.payload.continuitySpecificAssigneeUserId==='string'?{...configured,assigneeUserId:record.payload.continuitySpecificAssigneeUserId}:configured;
   return Boolean(stage && canUserTakeAdvanceStage(user, stage, state, {branchUnitId: payload.branchUnitId, unitId: payload.unitId, beneficiaryUserId: payload.beneficiaryUserId}));
 }
 
 export function canEmployeeAdvanceReviewerDecide(record: OperationalRecord, state: FoundationState): boolean {
   const user = state.activeUser;
-  if (user.isAdmin) return ['branch_review', 'accounting_review', 'final_review'].includes(record.status);
+  if (record.payload.needsReassignment === true || user.status !== 'active' || !user.permissions.includes('hr.employee_advance.approve')) return false;
   if (!['branch_review', 'accounting_review', 'final_review'].includes(record.status)) return false;
   const payload = readEmployeeAdvancePayload(record);
   const workflow = state.workflows.find((item) => item.moduleId === 'employee-advance' && (!record.workflowVersion || item.version === record.workflowVersion))
     ?? state.workflowVersions.find((item) => item.moduleId === 'employee-advance' && item.version === record.workflowVersion);
-  const stage = workflow && approvalStagesForRoute(workflow, state.roles, record.workflowRouteId).find((item) => item.stateId === record.status);
+  const configured = workflow && approvalStagesForRoute(workflow, state.roles, record.workflowRouteId).find((item) => item.stateId === record.status);
+  const stage=configured&&record.payload.continuitySpecificAssigneeState===record.status&&typeof record.payload.continuitySpecificAssigneeUserId==='string'?{...configured,assigneeUserId:record.payload.continuitySpecificAssigneeUserId}:configured;
   return Boolean(stage && canUserTakeAdvanceStage(user, stage, state, {branchUnitId: payload.branchUnitId, unitId: payload.unitId, beneficiaryUserId: payload.beneficiaryUserId}));
+}
+
+export interface EmployeeAdvanceUiAccess {
+  reviewerCanDecide: boolean;
+  beneficiaryCanEdit: boolean;
+  beneficiaryCanReveal: boolean;
+  treasuryCanReveal: boolean;
+  canRevealCard: boolean;
+  disabledReason: string;
+}
+
+/** UI projection of the same current-stage entitlement enforced by the service. */
+export function employeeAdvanceUiAccess(record:OperationalRecord,state:FoundationState):EmployeeAdvanceUiAccess{
+  const user=state.activeUser;
+  const payload=readEmployeeAdvancePayload(record);
+  const correctionRecipient=typeof record.payload.continuityCorrectionRecipientUserId==='string'?record.payload.continuityCorrectionRecipientUserId:undefined;
+  const beneficiaryIdentity=payload.beneficiaryUserId===user.id||record.createdByUserId===user.id
+    ||(record.status==='needs_correction'&&correctionRecipient===user.id);
+  const beneficiaryCanEdit=record.payload.needsReassignment!==true&&user.status==='active'&&beneficiaryIdentity
+    &&user.permissions.includes('hr.employee_advance.edit')
+    &&(['branch_review','needs_correction'].includes(record.status)||(record.status==='accounting_review'&&payload.branchReviewSkipped));
+  const reviewerCanDecide=canEmployeeAdvanceReviewerDecide(record,state);
+  const treasuryCanReveal=user.status==='active'&&user.companyId===record.companyId
+    &&user.permissions.includes('treasury.treasury_execution.view')&&['sent_to_treasury','paid'].includes(record.status);
+  const beneficiaryCanReveal=user.status==='active'&&user.companyId===record.companyId&&beneficiaryIdentity
+    &&user.permissions.includes('hr.employee_advance.view');
+  let disabledReason='این مرحله در کارتابل نقش یا محدوده فعلی شما نیست.';
+  if(record.payload.needsReassignment===true)disabledReason='این پرونده تا تعیین مسئول معتبر متوقف است.';
+  else if(record.status==='branch_review'){
+    const routing=resolveEffectiveUnitManager(state,payload.branchUnitId);
+    disabledReason=routing?.source==='none'?routing.reason:routing?.effectiveManager
+      ?`این مرحله در انتظار اقدام مدیر مؤثر شعبه، ${routing.effectiveManager.name}، است.`
+      :'مدیر مؤثر معتبر برای این شعبه تعیین نشده است.';
+  }
+  return {reviewerCanDecide,beneficiaryCanEdit,beneficiaryCanReveal,treasuryCanReveal,canRevealCard:reviewerCanDecide||beneficiaryCanReveal||treasuryCanReveal,disabledReason};
 }
 
 export function advanceBeneficiaryName(record: OperationalRecord): string {

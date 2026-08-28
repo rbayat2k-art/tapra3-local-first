@@ -1,10 +1,10 @@
 import {describe, expect, it} from 'vitest';
-import type {FoundationSession, FoundationStoreName, LocalUser, OperationalRecord, OperationalRecordHistory, SnapshotManifest, UserNotification} from './model';
+import type {FoundationSession, FoundationStoreName, LocalUser, OperationalRecord, OperationalRecordHistory, SnapshotManifest, UserNotification, WorkflowDefinition} from './model';
 import {FOUNDATION_STORES} from './model';
 import {purchaseAllocationTotal, purchaseRequestTotal, purchaseRequestValidationErrors, readPurchaseRequestPayload} from './purchaseRequest';
 import {ERP_MODULES} from './erpCatalog';
 import {createSeedData} from './seed';
-import {LocalFoundationService, type OperationalRecordInput} from './service';
+import {LocalFoundationService, type OperationalRecordInput, type TreasurySourceInvariant} from './service';
 import type {StorageAdapter, StorageTransaction} from './storage';
 import {canRevealTreasuryBeneficiaryCard, isTreasuryRecordVisibleToUser, treasuryRequesterName} from './TreasuryExecutionUi';
 
@@ -13,6 +13,7 @@ class MemoryStorage implements StorageAdapter {
   private failingStore?: FoundationStoreName;
   private beforeNextReadwrite?: () => void;
   failNextPut(store: FoundationStoreName) {this.failingStore = store;}
+  mutateRecordBeforeNextReadwrite<T>(store:FoundationStoreName,id:IDBValidKey,mutate:(current:T)=>T){this.beforeNextReadwrite=()=>{const current=this.stores.get(store)!.get(id) as T;this.stores.get(store)!.set(id,structuredClone(mutate(current)));};}
   revokeRoleBeforeNextReadwrite(userId:string,roleId:string){this.beforeNextReadwrite=()=>{const user=this.stores.get('users')?.get(userId) as LocalUser;this.stores.get('users')!.set(userId,{...user,roleIds:user.roleIds.filter((id)=>id!==roleId),roleId:user.roleId===roleId?'role-purchase-requester':user.roleId});};}
   async transaction<T>(stores: FoundationStoreName[], mode: IDBTransactionMode, work: (transaction: StorageTransaction) => Promise<T>): Promise<T> {
     if(mode==='readwrite'&&this.beforeNextReadwrite){const mutate=this.beforeNextReadwrite;this.beforeNextReadwrite=undefined;mutate();}
@@ -122,6 +123,9 @@ describe('multi-branch purchase request', () => {
     await storage.put('sessions', {...session!, activeUserId: 'persona-purchase-approver', actingAdminUserId: undefined});
     await expect(service.transitionOperationalRecord('purchase-request', 'demo-purchase-request-1', 'purchase-request.needs_correction', 'دور زدن مسیر اختصاصی')).rejects.toThrow('مسیر اختصاصی');
     const decisionVersion = await purchaseVersion(storage);
+    const treasuryWorkflow=(await storage.getAll<WorkflowDefinition>('workflow_definitions')).find((item)=>item.moduleId==='treasury-execution')!;
+    const treasuryV77:WorkflowDefinition={...treasuryWorkflow,version:77,status:'published',initialState:'custom_treasury_queue',stateLabels:{...treasuryWorkflow.stateLabels,custom_treasury_queue:'صف سفارشی خزانه'},updatedAt:new Date().toISOString()};
+    await storage.put('workflow_definitions',treasuryV77);await storage.put('workflow_versions',{...treasuryV77,id:`${treasuryV77.id}-v77`});
     const beforeDecision = await service.loadState();
     storage.failNextPut('treasury_executions');
     await expect(service.decidePurchaseRequest('demo-purchase-request-1', 'approve_and_forward', 'persona-treasury-executor', 'اقلام و تقسیم مالی شعب بررسی شد؛ پرداخت طبق سهم هر شعبه انجام شود', decisionVersion)).rejects.toThrow('injected treasury_executions failure');
@@ -134,6 +138,7 @@ describe('multi-branch purchase request', () => {
     expect(state.operationalRecords.find((item) => item.id === 'demo-purchase-request-1')?.status).toBe('sent_to_treasury');
     const payments = state.operationalRecords.filter((item) => item.moduleId === 'treasury-execution' && item.relatedRecordId === 'demo-purchase-request-1');
     expect(payments).toHaveLength(2);
+    expect(payments.every((item)=>item.status==='custom_treasury_queue'&&item.workflowVersion===77&&item.workflowRouteId==='base')).toBe(true);
     expect(payments.map((item) => item.amountRial)).toEqual([undefined, undefined]);
     const storedPayments = (await storage.getAll<OperationalRecord>('treasury_executions')).filter((item) => item.relatedRecordId === 'demo-purchase-request-1');
     expect(storedPayments.map((item) => item.amountRial).sort()).toEqual(['100000000', '65000000'].sort());
@@ -181,6 +186,32 @@ describe('multi-branch purchase request', () => {
     expect(request?.assigneeUserId).toBe('persona-purchase-requester');
   });
 
+  it('routes purchase correction to the continuity successor and never to an inactive requester', async () => {
+    const storage = new MemoryStorage(); await storage.replaceAll(createSeedData());
+    const session = await storage.get<FoundationSession>('sessions', 'active-session');
+    const service = new LocalFoundationService(storage);
+    await storage.put('sessions', {...session!, activeUserId: 'persona-purchase-requester', actingAdminUserId: undefined});
+    await service.transitionOperationalRecord('purchase-request', 'demo-purchase-request-1', 'purchase-request.submitted');
+    const current = await storage.get<OperationalRecord>('purchase_requests', 'demo-purchase-request-1');
+    await storage.put('purchase_requests', {...current!, payload: {...current!.payload, continuityCorrectionRecipientUserId: 'persona-product-owner'}});
+    const requester = await storage.get<LocalUser>('users', 'persona-purchase-requester');
+    await storage.put('users', {...requester!, status: 'inactive'});
+
+    await storage.put('sessions', {...session!, activeUserId: 'persona-purchase-approver', actingAdminUserId: undefined});
+    let state = await service.decidePurchaseRequest('demo-purchase-request-1', 'needs_correction', '', 'اصلاح توسط جانشین انجام شود', current!.version);
+    let request = state.operationalRecords.find((item) => item.id === 'demo-purchase-request-1');
+    expect(request?.status).toBe('needs_correction');
+    expect(request?.assigneeUserId).toBe('persona-product-owner');
+    expect(request?.assigneeUserId).not.toBe('persona-purchase-requester');
+    await storage.put('sessions', {...session!,activeUserId:'persona-product-owner',actingAdminUserId:undefined});
+    state=await service.updateOperationalRecord('purchase-request',request!.id,request!.version,{title:request!.title,description:'نسخه اصلاحی جانشین صریح',priority:request!.priority,dueAt:request!.dueAt},'purchase-successor-edit');
+    request=state.operationalRecords.find((item)=>item.id==='demo-purchase-request-1')!;
+    expect(request.createdByUserId).toBe('persona-purchase-requester');expect(request.status).toBe('needs_correction');
+    state=await service.transitionOperationalRecord('purchase-request',request.id,'purchase-request.submitted','ارسال مجدد جانشین','purchase-successor-resubmit');
+    request=state.operationalRecords.find((item)=>item.id==='demo-purchase-request-1')!;
+    expect(request.status).toBe('submitted');expect(request.createdByUserId).toBe('persona-purchase-requester');
+  });
+
   it('lets the assigned treasury executor register payment directly while reference and receipt stay optional', async () => {
     const storage = new MemoryStorage(); await storage.replaceAll(createSeedData());
     const session = await storage.get<FoundationSession>('sessions', 'active-session');
@@ -224,6 +255,22 @@ describe('multi-branch purchase request', () => {
     expect(state.operationalHistory.filter((item) => item.recordId === treasuryRecord.id).sort((a, b) => a.sequence - b.sequence).at(-1)?.toState).toBe('queued');
   });
 
+  it('replays a specialized purchase decision and fails closed for command reuse and QA access-view', async () => {
+    const storage=new MemoryStorage();await storage.replaceAll(createSeedData());const service=new LocalFoundationService(storage);
+    const session=(await storage.get<FoundationSession>('sessions','active-session'))!;
+    await storage.put('sessions',{...session,activeUserId:'persona-purchase-requester',actingAdminUserId:undefined});
+    await service.transitionOperationalRecord('purchase-request','demo-purchase-request-1','purchase-request.submitted');
+    await storage.put('sessions',{...session,activeUserId:'persona-purchase-approver',actingAdminUserId:undefined});
+    const version=await purchaseVersion(storage);
+    await service.decidePurchaseRequest('demo-purchase-request-1','needs_correction','','نیازمند تکمیل پیش‌فاکتور',version,'purchase-decision-stable');
+    await expect(service.decidePurchaseRequest('demo-purchase-request-1','needs_correction','','نیازمند تکمیل پیش‌فاکتور',version,'purchase-decision-stable')).resolves.toBeTruthy();
+    await expect(service.decidePurchaseRequest('demo-purchase-request-1','needs_correction','','محتوای متفاوت فرمان',version,'purchase-decision-stable')).rejects.toThrow('شناسه این فرمان');
+    const before=await storage.get<OperationalRecord>('purchase_requests','demo-purchase-request-1');
+    await storage.put('sessions',{...session,activeUserId:'persona-purchase-approver',actingAdminUserId:'persona-product-owner'});
+    await expect(service.decidePurchaseRequest('demo-purchase-request-1','rejected','','تصمیم در حالت مشاهده',before!.version,'purchase-qa-command')).rejects.toThrow('مشاهده آزمایشی');
+    expect(await storage.get<OperationalRecord>('purchase_requests','demo-purchase-request-1')).toEqual(before);
+  });
+
   it('does not mutate purchase workflow when the approver role is revoked immediately before the write transaction', async () => {
     const storage=new MemoryStorage();await storage.replaceAll(createSeedData());const service=new LocalFoundationService(storage);
     const session=(await storage.get<FoundationSession>('sessions','active-session'))!;
@@ -236,6 +283,46 @@ describe('multi-branch purchase request', () => {
     await expect(service.decidePurchaseRequest('demo-purchase-request-1','approve_and_forward','persona-treasury-executor','تأیید نباید پس از لغو نقش ثبت شود',before!.version)).rejects.toThrow('دسترسی یا محدوده');
     expect(await storage.get<OperationalRecord>('purchase_requests','demo-purchase-request-1')).toEqual(before);
     expect(await storage.getAll('workflow_history')).toEqual(beforeHistory);
+  });
+
+  it('pins treasury workflow, replays one payment command and rejects role/source races without partial writes', async () => {
+    const storage=new MemoryStorage();await storage.replaceAll(createSeedData());const service=new LocalFoundationService(storage);
+    const session=(await storage.get<FoundationSession>('sessions','active-session'))!;
+    const treasuryWorkflow=(await storage.getAll<WorkflowDefinition>('workflow_definitions')).find((item)=>item.moduleId==='treasury-execution')!;
+    const treasuryV77:WorkflowDefinition={...treasuryWorkflow,version:77,status:'published',initialState:'queued',updatedAt:new Date().toISOString()};
+    await storage.put('workflow_definitions',treasuryV77);await storage.put('workflow_versions',{...treasuryV77,id:`${treasuryV77.id}-v77`});
+    await storage.put('sessions',{...session,activeUserId:'persona-purchase-requester',actingAdminUserId:undefined});
+    await service.transitionOperationalRecord('purchase-request','demo-purchase-request-1','purchase-request.submitted');
+    await storage.put('sessions',{...session,activeUserId:'persona-purchase-approver',actingAdminUserId:undefined});
+    let state=await service.decidePurchaseRequest('demo-purchase-request-1','approve_and_forward','persona-treasury-executor','ارسال نسخه‌دار به خزانه',await purchaseVersion(storage));
+    let payments=state.operationalRecords.filter((item)=>item.moduleId==='treasury-execution'&&item.relatedRecordId==='demo-purchase-request-1').sort((a,b)=>a.id.localeCompare(b.id));
+    expect(payments.every((item)=>item.workflowVersion===77)).toBe(true);
+    const treasuryV78:WorkflowDefinition={...treasuryV77,version:78,transitions:treasuryV77.transitions.filter((item)=>item.to!=='payment_recorded'),updatedAt:new Date().toISOString()};
+    await storage.put('workflow_definitions',treasuryV78);await storage.put('workflow_versions',{...treasuryV78,id:`${treasuryV78.id}-v78`});
+    await storage.put('sessions',{...session,activeUserId:'persona-treasury-executor',actingAdminUserId:undefined});
+    const source=(await storage.get<OperationalRecord>('purchase_requests','demo-purchase-request-1'))!;
+    const first=payments[0];const sourceInvariant:TreasurySourceInvariant={id:source.id,moduleId:'purchase-request',version:source.version,status:source.status,treasuryRecordId:first.id};
+    const paymentInput={paidAt:'2026-08-28',paymentReference:'PIN-77',note:'پرداخت با نسخه پین‌شده'};
+    state=await service.recordTreasuryPayment(first.id,paymentInput,first.version,'treasury-stable-payment',sourceInvariant);
+    expect(state.operationalRecords.find((item)=>item.id===first.id)?.status).toBe('payment_recorded');
+    await expect(service.recordTreasuryPayment(first.id,paymentInput,first.version,'treasury-stable-payment',sourceInvariant)).resolves.toBeTruthy();
+    await expect(service.recordTreasuryPayment(first.id,{...paymentInput,paymentReference:'DIFFERENT'},first.version,'treasury-stable-payment',sourceInvariant)).rejects.toThrow('شناسه این فرمان');
+
+    payments=(await service.loadState()).operationalRecords.filter((item)=>item.moduleId==='treasury-execution'&&item.relatedRecordId===source.id).sort((a,b)=>a.id.localeCompare(b.id));
+    const pending=payments.find((item)=>item.status==='queued')!;const currentSource=(await storage.get<OperationalRecord>('purchase_requests',source.id))!;const pendingInvariant:TreasurySourceInvariant={id:currentSource.id,moduleId:'purchase-request',version:currentSource.version,status:currentSource.status,treasuryRecordId:pending.id};
+    const beforePending=structuredClone(await storage.get<OperationalRecord>('treasury_executions',pending.id));
+    const executorBefore=(await storage.get<LocalUser>('users','persona-treasury-executor'))!;
+    storage.revokeRoleBeforeNextReadwrite('persona-treasury-executor','role-treasury-executor-v1');
+    await expect(service.recordTreasuryPayment(pending.id,{paidAt:'2026-08-28',paymentReference:'ROLE-RACE',note:'نباید ثبت شود'},pending.version,'treasury-role-race',pendingInvariant)).rejects.toThrow('دسترسی');
+    expect(await storage.get<OperationalRecord>('treasury_executions',pending.id)).toEqual(beforePending);
+    await storage.put('users',executorBefore);
+    storage.mutateRecordBeforeNextReadwrite<FoundationSession>('sessions','active-session',(current)=>({...current,version:current.version+1,switchedAt:new Date().toISOString()}));
+    await expect(service.recordTreasuryPayment(pending.id,{paidAt:'2026-08-28',paymentReference:'SESSION-RACE',note:'نباید ثبت شود'},pending.version,'treasury-session-race',pendingInvariant)).rejects.toThrow('نشست کاربری');
+    expect(await storage.get<OperationalRecord>('treasury_executions',pending.id)).toEqual(beforePending);
+    storage.mutateRecordBeforeNextReadwrite<OperationalRecord>('purchase_requests',currentSource.id,(current)=>({...current,status:'rejected',version:current.version+1,updatedAt:new Date().toISOString()}));
+    await expect(service.recordTreasuryPayment(pending.id,{paidAt:'2026-08-28',paymentReference:'SOURCE-RACE',note:'نباید ثبت شود'},pending.version,'treasury-source-race',pendingInvariant)).rejects.toThrow('مبنای پرداخت');
+    expect(await storage.get<OperationalRecord>('treasury_executions',pending.id)).toEqual(beforePending);
+    expect(await storage.get('idempotency_keys','treasury-source-race')).toBeUndefined();
   });
 
   it('closes a multi-allocation obligation only after every unique payment and reopens it atomically on reversal', async () => {
@@ -255,6 +342,7 @@ describe('multi-branch purchase request', () => {
     expect(source.payload.financialPaymentProgress).toMatchObject({obligationCount:2,paidCount:1,complete:false});
     payments = state.operationalRecords.filter((item) => item.moduleId === 'treasury-execution' && item.relatedRecordId === source.id).sort((a,b)=>a.id.localeCompare(b.id));
     const pending = payments.find((item)=>item.status==='queued')!;
+    expect(pending.payload.sourceInvariant).toMatchObject({id:source.id,version:source.version,status:'sent_to_treasury',treasuryRecordId:pending.id} satisfies Partial<TreasurySourceInvariant>);
     await expect(service.recordTreasuryPayment(pending.id,{paidAt:'2026-08-26',paymentReference:'REF123',note:'تکراری'},pending.version)).rejects.toThrow('قبلاً');
     expect((await service.loadState()).operationalRecords.find((item)=>item.id===pending.id)?.status).toBe('queued');
 
@@ -271,7 +359,7 @@ describe('multi-branch purchase request', () => {
     expect(source.payload.financialPaymentProgress).toMatchObject({obligationCount:2,paidCount:2,totalRial:'165000000',paidRial:'165000000',complete:true});
     await expect(service.recordTreasuryPayment(pending.id,{paidAt:'2026-08-26',paymentReference:'REF125',note:'نسخه قدیمی'},pending.version)).rejects.toThrow('هم‌زمان تغییر کرده');
 
-    state = await service.revertTreasuryPayment(secondPaid.id,'رسید سهم دوم نیازمند ثبت مجدد است',secondPaid.version);
+    await service.revertTreasuryPayment(secondPaid.id,'رسید سهم دوم نیازمند ثبت مجدد است',secondPaid.version);
     source = (await storage.get<OperationalRecord>('purchase_requests', source.id))!;
     expect(source.status).toBe('sent_to_treasury');
     expect(source.payload.financialPaymentProgress).toMatchObject({obligationCount:2,paidCount:1,complete:false});
@@ -292,8 +380,28 @@ describe('multi-branch purchase request', () => {
     }
 
     await storage.put('sessions', {...session!, activeUserId: 'persona-purchase-requester', actingAdminUserId: undefined});
-    let state = await service.requestTreasuryFollowUp('demo-purchase-request-1');
+    const sourceBefore=(await storage.get<OperationalRecord>('purchase_requests','demo-purchase-request-1'))!;
+    const executorBefore=(await storage.get<LocalUser>('users','persona-treasury-executor'))!;
+    storage.revokeRoleBeforeNextReadwrite(executorBefore.id,'role-treasury-executor-v1');
+    await expect(service.requestTreasuryFollowUp(sourceBefore.id,sourceBefore.version,'follow-up-role-race')).rejects.toThrow('هیچ مجری خزانه فعال و مجازی');
+    expect(await storage.getAll<UserNotification>('notifications')).toHaveLength(0);
+    await storage.put('users',executorBefore);
+
+    storage.mutateRecordBeforeNextReadwrite<OperationalRecord>('purchase_requests',sourceBefore.id,(current)=>({...current,status:'rejected',version:current.version+1}));
+    await expect(service.requestTreasuryFollowUp(sourceBefore.id,sourceBefore.version,'follow-up-source-race')).rejects.toThrow('هم‌زمان تغییر کرده');
+    await storage.put('purchase_requests',sourceBefore);
+
+    const commentCountBefore=(await storage.getAll<OperationalRecordHistory>('workflow_history')).filter((item)=>item.recordId===sourceBefore.id&&item.eventType==='comment').length;
+    storage.failNextPut('audit_events');
+    await expect(service.requestTreasuryFollowUp(sourceBefore.id,sourceBefore.version,'follow-up-stable-command')).rejects.toThrow('injected audit_events failure');
+    expect(await storage.getAll<UserNotification>('notifications')).toHaveLength(0);
+    expect((await storage.getAll<OperationalRecordHistory>('workflow_history')).filter((item)=>item.recordId===sourceBefore.id&&item.eventType==='comment')).toHaveLength(commentCountBefore);
+    expect(await storage.get('idempotency_keys','follow-up-stable-command')).toBeUndefined();
+
+    let state = await service.requestTreasuryFollowUp(sourceBefore.id,sourceBefore.version,'follow-up-stable-command');
     expect(state.notifications).toEqual([]);
+    await expect(service.requestTreasuryFollowUp(sourceBefore.id,sourceBefore.version,'follow-up-stable-command')).resolves.toBeTruthy();
+    await expect(service.requestTreasuryFollowUp(sourceBefore.id,sourceBefore.version+1,'follow-up-stable-command')).rejects.toThrow('شناسه این فرمان');
     await expect(service.requestTreasuryFollowUp('demo-purchase-request-1')).rejects.toThrow('امروز قبلاً پیگیری ثبت شده است');
 
     const storedNotifications = await storage.getAll<UserNotification>('notifications');
@@ -308,5 +416,48 @@ describe('multi-branch purchase request', () => {
     expect(state.notifications[0].readAt).toBeTruthy();
     const storedHistory = await storage.getAll<OperationalRecordHistory>('workflow_history');
     expect(storedHistory.some((item) => item.recordId === 'demo-purchase-request-1' && item.eventType === 'comment' && item.reason?.includes('پیگیری'))).toBe(true);
+  });
+
+  it('keeps an explicit ALL purchase round in the same record version and creates treasury handoff only on the final vote', async () => {
+    const storage=new MemoryStorage();await storage.replaceAll(createSeedData());const service=new LocalFoundationService(storage);
+    const session=(await storage.get<FoundationSession>('sessions','active-session'))!;
+    const workflow=(await storage.getAll<WorkflowDefinition>('workflow_definitions')).find((item)=>item.moduleId==='purchase-request')!;
+    const pinned=(await storage.getAll<WorkflowDefinition>('workflow_versions')).find((item)=>item.moduleId==='purchase-request'&&item.version===workflow.version)!;
+    const makeAll=(item:WorkflowDefinition):WorkflowDefinition=>({...item,approvalStages:item.approvalStages?.map((stage)=>stage.stateId==='submitted'?{...stage,approvalMode:'ALL',requiredApprovals:undefined}:stage)});
+    await storage.put('workflow_definitions',makeAll(workflow));await storage.put('workflow_versions',makeAll(pinned));
+    const first=(await storage.get<LocalUser>('users','persona-purchase-approver'))!;
+    const second:LocalUser={...first,id:'persona-purchase-approver-two',actorId:'actor-purchase-approver-two',username:'purchase.approver.two',name:'تأییدکننده دوم خرید',personnelId:undefined};
+    await storage.put('users',second);
+
+    await storage.put('sessions',{...session,activeUserId:'persona-purchase-requester',actingAdminUserId:undefined});
+    await service.transitionOperationalRecord('purchase-request','demo-purchase-request-1','purchase-request.submitted');
+    const entry=(await storage.get<OperationalRecord>('purchase_requests','demo-purchase-request-1'))!;
+    await storage.put('sessions',{...session,activeUserId:first.id,actingAdminUserId:undefined});
+    await service.decidePurchaseRequest(entry.id,'approve_and_forward','persona-treasury-executor','مقصد خزانه برای کل دور ثابت است',entry.version,'purchase-all-vote-one');
+    const pending=(await storage.get<OperationalRecord>('purchase_requests',entry.id))!;
+    const round=(await storage.getAll<{recordId:string;requiredCount:number;votes:unknown[];status:string}>('workflow_approval_rounds')).find((item)=>item.recordId===entry.id)!;
+    expect(pending).toMatchObject({status:'submitted',version:entry.version});
+    expect(round).toMatchObject({requiredCount:2,status:'open'});expect(round.votes).toHaveLength(1);
+    expect((await storage.getAll<OperationalRecord>('treasury_executions')).filter((item)=>item.relatedRecordId===entry.id)).toHaveLength(0);
+
+    await storage.put('sessions',{...session,activeUserId:second.id,actingAdminUserId:undefined});
+    const state=await service.decidePurchaseRequest(entry.id,'approve_and_forward','persona-treasury-executor','مقصد خزانه برای کل دور ثابت است',entry.version,'purchase-all-vote-two');
+    expect(state.operationalRecords.find((item)=>item.id===entry.id)?.status).toBe('sent_to_treasury');
+    expect((await storage.getAll<OperationalRecord>('treasury_executions')).filter((item)=>item.relatedRecordId===entry.id)).toHaveLength(2);
+    const closed=(await storage.getAll<{recordId:string;votes:unknown[];status:string}>('workflow_approval_rounds')).find((item)=>item.recordId===entry.id)!;
+    expect(closed.status).toBe('approved');expect(closed.votes).toHaveLength(2);
+  });
+
+  it('closes an ALL purchase round immediately when a second reviewer requests correction after one approval',async()=>{
+    const storage=new MemoryStorage();await storage.replaceAll(createSeedData());const service=new LocalFoundationService(storage);const session=(await storage.get<FoundationSession>('sessions','active-session'))!;
+    const workflow=(await storage.getAll<WorkflowDefinition>('workflow_definitions')).find((item)=>item.moduleId==='purchase-request')!;const pinned=(await storage.getAll<WorkflowDefinition>('workflow_versions')).find((item)=>item.moduleId==='purchase-request'&&item.version===workflow.version)!;
+    const makeAll=(item:WorkflowDefinition):WorkflowDefinition=>({...item,approvalStages:item.approvalStages?.map((stage)=>stage.stateId==='submitted'?{...stage,approvalMode:'ALL',requiredApprovals:undefined}:stage)});await storage.put('workflow_definitions',makeAll(workflow));await storage.put('workflow_versions',makeAll(pinned));
+    const first=(await storage.get<LocalUser>('users','persona-purchase-approver'))!;const second:LocalUser={...first,id:'persona-purchase-negative-two',actorId:'actor-purchase-negative-two',username:'purchase.negative.two',name:'بازبین اصلاح خرید',personnelId:undefined};await storage.put('users',second);
+    await storage.put('sessions',{...session,activeUserId:'persona-purchase-requester',actingAdminUserId:undefined});await service.transitionOperationalRecord('purchase-request','demo-purchase-request-1','purchase-request.submitted');const entry=(await storage.get<OperationalRecord>('purchase_requests','demo-purchase-request-1'))!;
+    await storage.put('sessions',{...session,activeUserId:first.id,actingAdminUserId:undefined});await service.decidePurchaseRequest(entry.id,'approve_and_forward','persona-treasury-executor','تأیید اولیه برای ادامه',entry.version,'purchase-positive-before-correction');
+    await storage.put('sessions',{...session,activeUserId:second.id,actingAdminUserId:undefined});await service.decidePurchaseRequest(entry.id,'needs_correction','persona-treasury-executor','نیازمند اصلاح پس از رأی مثبت',entry.version,'purchase-correction-after-positive');
+    expect(await storage.get<OperationalRecord>('purchase_requests',entry.id)).toMatchObject({status:'needs_correction',version:entry.version+1});
+    const round=(await storage.getAll<{recordId:string;status:string;votes:Array<{decision:string}>}>('workflow_approval_rounds')).find((item)=>item.recordId===entry.id)!;expect(round.status).toBe('correction');expect(round.votes.map((vote)=>vote.decision)).toEqual(['approve','needs_correction']);
+    expect((await storage.getAll<OperationalRecord>('treasury_executions')).filter((item)=>item.relatedRecordId===entry.id)).toHaveLength(0);
   });
 });

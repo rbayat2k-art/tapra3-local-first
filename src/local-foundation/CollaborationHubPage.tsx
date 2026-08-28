@@ -64,6 +64,10 @@ export function CollaborationHubPage({state, service, execute, onOpenConversatio
   const [labelFilter, setLabelFilter] = useState('all');
   const [dueFilter, setDueFilter] = useState<'all'|'today'|'overdue'>('all');
   const [taskQueue,setTaskQueue]=useState<TaskQueue>(initialQueue);
+  const projectCreateCommandRef=useRef<{id:string;fingerprint:string}|undefined>(undefined);
+  const projectCreateBusyRef=useRef(false);
+  const taskCreateCommandRef=useRef<{id:string;fingerprint:string}|undefined>(undefined);
+  const taskCreateBusyRef=useRef(false);
   const selectedProject = projects.find((project) => project.id === selectedProjectId) ?? projects[0];
   const allTasks = useMemo(() => projectTasks(state), [state]);
   const editingTaskProject = editingTask ? projects.find((project)=>project.id===taskProjectId(editingTask)) : undefined;
@@ -202,18 +206,33 @@ export function CollaborationHubPage({state, service, execute, onOpenConversatio
       </main>
     </section>
 
-    {projectDialogOpen && <ProjectDialog state={state} onClose={() => setProjectDialogOpen(false)} onSave={async(input) => {
-      const ok = await execute('project-create', () => service.createProject(input), 'پروژه و فضای همکاری آن ساخته شد.');
-      if (ok) {
-        setPendingProjectTitle(input.title.trim());
-        setProjectDialogOpen(false);
-      }
+    {projectDialogOpen && <ProjectDialog state={state} onClose={() => {projectCreateCommandRef.current=undefined;setProjectDialogOpen(false);}} onSave={async(input) => {
+      if(projectCreateBusyRef.current)return;
+      const fingerprint=JSON.stringify(input);
+      if(!projectCreateCommandRef.current||projectCreateCommandRef.current.fingerprint!==fingerprint)projectCreateCommandRef.current={id:`project-create-${crypto.randomUUID()}`,fingerprint};
+      const commandId=projectCreateCommandRef.current.id;
+      projectCreateBusyRef.current=true;
+      try{
+        const ok = await execute('project-create', () => service.createProject(input,commandId), 'پروژه و فضای همکاری آن ساخته شد.');
+        if (ok) {
+          projectCreateCommandRef.current=undefined;
+          setPendingProjectTitle(input.title.trim());
+          setProjectDialogOpen(false);
+        }
+      }finally{projectCreateBusyRef.current=false;}
     }}
     />}
     {editingProject && <ProjectDialog state={state} project={editingProject} onClose={()=>setEditingProject(undefined)} onSave={async(input)=>{const ok=await execute('project-update',()=>service.updateProject(editingProject.id,input,editingProject.version),'پروژه و اعضای آن به‌روز شد.');if(ok)setEditingProject(undefined);}}/>}
-    {taskDialogOpen && selectedProject && <TaskDialog state={state} project={selectedProject} onClose={() => setTaskDialogOpen(false)} onSave={async(input) => {
-      const ok = await execute('project-task-create', () => service.createProjectTasksBatch(input), input.assigneeUserIds.length > 1 ? 'برای هر مسئول یک کار مستقل ساخته شد.' : 'کار پروژه ساخته شد.');
-      if (ok) setTaskDialogOpen(false);
+    {taskDialogOpen && selectedProject && <TaskDialog state={state} project={selectedProject} onClose={() => {taskCreateCommandRef.current=undefined;setTaskDialogOpen(false);}} onSave={async(input) => {
+      if(taskCreateBusyRef.current)return;
+      const fingerprint=JSON.stringify(input);
+      if(!taskCreateCommandRef.current||taskCreateCommandRef.current.fingerprint!==fingerprint)taskCreateCommandRef.current={id:`project-task-create-${crypto.randomUUID()}`,fingerprint};
+      const commandId=taskCreateCommandRef.current.id;
+      taskCreateBusyRef.current=true;
+      try{
+        const ok = await execute('project-task-create', () => service.createProjectTasksBatch(input,commandId), input.assigneeUserIds.length > 1 ? 'برای هر مسئول یک کار مستقل ساخته شد.' : 'کار پروژه ساخته شد.');
+        if (ok) {taskCreateCommandRef.current=undefined;setTaskDialogOpen(false);}
+      }finally{taskCreateBusyRef.current=false;}
     }}
     />}
     {editingTask && editingTaskProject && <TaskDialog state={state} project={editingTaskProject} task={editingTask} onClose={()=>setEditingTask(undefined)} onSave={async(input)=>{const ok=await execute('project-task-update',()=>service.updateProjectTask(editingTask.id,{...input,assigneeUserId:input.assigneeUserIds[0]},editingTask.version),'کار پروژه به‌روز شد.');if(ok)setEditingTask(undefined);}}/>}

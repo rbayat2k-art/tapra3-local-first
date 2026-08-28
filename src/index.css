@@ -76,6 +76,8 @@
 .recruitment-page .page-hero__title h2{margin:4px 0 6px}
 .recruitment-page .page-hero__title p{margin:0;max-width:820px;color:var(--muted)}
 .recruitment-table-card{overflow:hidden;border:1px solid var(--border);border-radius:20px;background:var(--surface);box-shadow:var(--shadow-soft)}
+.recruitment-bank-filters{display:flex;align-items:center;gap:8px;overflow-x:auto;padding:13px 15px;border-bottom:1px solid var(--border);background:var(--surface);scrollbar-width:thin}
+.recruitment-bank-filters .button{flex:0 0 auto;min-height:36px;white-space:nowrap}
 .recruitment-table-card .table-toolbar{display:grid;grid-template-columns:minmax(260px,1fr) minmax(160px,220px);gap:10px;padding:13px 15px;border-bottom:1px solid var(--border);background:var(--surface-soft)}
 .recruitment-table-card .search-box{width:100%;min-width:0;background:var(--surface)}
 .recruitment-table-card .table-toolbar select{width:100%;min-height:43px;padding:0 12px;border:1px solid var(--border);border-radius:12px;color:var(--text);background:var(--surface);font:inherit;outline:none}
@@ -98,6 +100,8 @@
 .recruitment-table td strong{font-size:13px;line-height:1.7}
 .recruitment-table td small{margin-top:4px;color:var(--muted);font-size:10px;line-height:1.6}
 .recruitment-table .state-badge{max-width:100%;overflow:hidden;text-overflow:ellipsis}
+.recruitment-history-badge{display:block;color:var(--success)!important;font-weight:800}
+.recruitment-row-actions{display:flex;align-items:center;justify-content:center;gap:5px}
 .recruitment-drawer{width:min(960px,94vw)}
 .recruitment-progress{display:grid;grid-template-columns:repeat(10,minmax(76px,1fr));gap:6px;overflow-x:auto;padding:10px 2px 18px}
 .recruitment-progress>div{position:relative;min-width:76px;text-align:center;color:var(--text-muted)}
@@ -119,6 +123,11 @@
 .timeline-row p{margin:4px 0;color:var(--text-muted)}
 .timeline-row small{color:var(--text-muted)}
 .recruitment-request-dialog{width:min(900px,94vw)}
+.recruitment-talent-history{background:color-mix(in srgb,var(--primary) 4%,var(--surface))}
+.recruitment-talent-tags{display:flex;flex-wrap:wrap;gap:7px;margin-top:12px}
+.recruitment-talent-tags span{padding:5px 10px;border:1px solid color-mix(in srgb,var(--primary) 22%,var(--border));border-radius:999px;background:var(--primary-soft);color:var(--primary);font-size:11px;font-weight:800}
+.recruitment-reuse-source{display:grid;gap:4px;padding:14px;border:1px solid color-mix(in srgb,var(--primary) 28%,var(--border));border-radius:14px;background:var(--primary-soft)}
+.recruitment-reuse-source strong{font-size:15px}.recruitment-reuse-source span,.recruitment-reuse-source small{color:var(--muted);line-height:1.7}
 .recruitment-scope-note{display:grid;gap:6px;padding:12px 14px;border:1px solid color-mix(in srgb,var(--primary) 28%,var(--border));border-radius:14px;background:color-mix(in srgb,var(--primary) 6%,var(--surface));color:var(--text)}
 .recruitment-scope-note span{font-weight:800;color:var(--primary)}
 .recruitment-scope-note small{color:var(--muted);line-height:1.8}
@@ -2808,3 +2817,43 @@ body.has-open-window-bar:has(.workspace-page-tabs) .record-drawer { max-height: 
 @media(max-width:760px){.letter-row{grid-template-columns:90px minmax(0,1fr) auto}.letter-row>.letter-classification{grid-column:2}.letter-row>.state-badge{grid-column:3;grid-row:1}.letter-classification-picker{grid-template-columns:repeat(2,minmax(0,1fr))}.letter-reply-policy{grid-template-columns:1fr}.letter-security-dialog{width:100%;max-width:100%}.local-sms-preview{flex-wrap:wrap}.local-sms-preview code{margin-inline-start:0}}
 .letter-classification--confidential,.letter-classification--private,.letter-row .state-badge--neutral{color:var(--text)}
 .collaboration-dialog>.drawer-body{min-inline-size:0;margin:0;border:0}
+
+/* Recruitment training onboarding. */
+.recruitment-training-dialog{width:min(860px,calc(100vw - 32px))}
+.training-start-policy{display:flex;align-items:flex-start;gap:12px;padding:14px 16px;border:1px solid color-mix(in srgb,var(--brand-accent) 45%,var(--border));border-radius:16px;background:color-mix(in srgb,var(--brand-accent) 8%,var(--surface));color:var(--text)}
+.training-start-policy>svg{flex:0 0 auto;color:var(--brand-accent-strong)}
+.training-start-policy div{display:grid;gap:4px}.training-start-policy span{color:var(--text-muted);line-height:1.8}
+.training-account-choice{display:flex;align-items:center;gap:12px;padding:14px 16px;border:1px solid var(--border);border-radius:16px;background:var(--surface-subtle);cursor:pointer}
+.training-account-choice>input{width:18px;height:18px;accent-color:var(--primary)}.training-account-choice>svg{color:var(--primary)}
+.training-account-choice>span{display:grid;gap:3px}.training-account-choice small{color:var(--text-muted);line-height:1.7}
+.training-account-choice:focus-within{outline:3px solid var(--focus-ring);outline-offset:2px}
+@media(max-width:640px){.recruitment-training-dialog{width:100%;max-width:100%}.training-start-policy,.training-account-choice{align-items:flex-start}}
+
+/* Recruitment candidate resume and secure document intake. */
+.auth-register{flex-wrap:wrap}.auth-register button+button{margin-inline-start:.65rem}
+.candidate-profile-dialog{width:min(980px,calc(100vw - 32px));max-height:min(92vh,940px)}
+.candidate-profile-body{display:grid;min-height:0;gap:16px;overflow-y:auto}
+.candidate-profile-section{padding:16px;border:1px solid var(--border);border-radius:18px;background:var(--surface-subtle)}
+.candidate-profile-section>h3{margin:0 0 4px}.candidate-profile-section>p{margin:0 0 14px;color:var(--text-muted);line-height:1.8}
+.candidate-file-controls{display:flex;align-items:end;gap:12px;flex-wrap:wrap}.candidate-file-controls .field{min-width:220px;flex:1}
+.candidate-drop-zone{display:grid;min-height:126px;place-items:center;align-content:center;gap:5px;margin-top:12px;border:1.5px dashed var(--primary);border-radius:16px;color:var(--primary);background:var(--primary-soft);cursor:pointer;transition:border-color .2s,transform .2s,background .2s}
+.candidate-drop-zone svg{width:30px;height:30px}.candidate-drop-zone span{color:var(--text)}.candidate-drop-zone.is-dragging{border-style:solid;background:var(--surface);transform:translateY(-2px)}
+.candidate-file-list{display:grid;gap:8px;margin-top:12px}.candidate-file-list article{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--border);border-radius:13px;background:var(--surface)}
+.candidate-file-list article>span{display:grid;min-width:0;gap:2px}.candidate-file-list article small{color:var(--text-muted);overflow-wrap:anywhere}.candidate-file-list article.is-replaced{opacity:.7}
+.candidate-consent{display:flex;align-items:flex-start;gap:10px;padding:12px 14px;border:1px solid var(--primary);border-radius:15px;background:var(--primary-soft)}.candidate-consent input{margin-top:5px}.candidate-consent span{display:grid;gap:3px}.candidate-consent small{color:var(--text);line-height:1.7}
+.candidate-profile-about{padding:12px 14px;border-inline-start:3px solid var(--primary);background:var(--surface-subtle);line-height:2;white-space:pre-wrap}.candidate-document-chips{display:flex;flex-wrap:wrap;gap:7px;margin-top:10px}.candidate-document-chips span{padding:5px 9px;border:1px solid var(--border);border-radius:999px;background:var(--surface);font-size:.78rem}
+@media(max-width:640px){.candidate-profile-dialog{width:calc(100vw - 12px);max-height:calc(100dvh - 12px)}.candidate-profile-section{padding:12px}.candidate-file-controls{align-items:stretch}.candidate-file-controls .button{width:100%}.auth-register button+button{margin-inline-start:0}}
+
+/* Atomic work-continuity handoff before account deactivation. */
+.continuity-dialog{width:min(860px,calc(100vw - 32px))}
+.continuity-loading,.continuity-summary{display:flex;align-items:center;gap:12px;padding:16px;border:1px solid var(--border);border-radius:16px;background:var(--surface-subtle)}
+.continuity-summary>div{display:grid;gap:4px}.continuity-summary span,.continuity-list small{color:var(--text-muted);font-size:.78rem}
+.continuity-list{display:grid;gap:10px;max-height:42vh;overflow:auto;padding-inline-end:4px}
+.continuity-list article{display:grid;grid-template-columns:minmax(0,1fr) minmax(220px,320px);align-items:center;gap:14px;padding:12px 14px;border:1px solid var(--border);border-radius:14px;background:var(--surface)}
+.continuity-list article>div{display:grid;gap:4px;min-width:0}.continuity-list select{width:100%;min-height:42px;border:1px solid var(--border);border-radius:11px;background:var(--surface);color:var(--text);padding:0 10px}
+@media(max-width:680px){.continuity-list article{grid-template-columns:1fr}.continuity-dialog{width:100%}.continuity-list{max-height:none}}
+.approval-progress{display:grid;gap:.65rem;margin:.75rem 0;padding:.9rem;border:1px solid var(--border);border-radius:16px;background:var(--surface-soft)}
+.approval-progress>header{display:flex;align-items:center;justify-content:space-between;gap:.75rem}.approval-progress>header span{display:flex;align-items:center;gap:.45rem}.approval-progress>header small,.approval-progress p,.approval-progress__people small{color:var(--muted);font-size:.76rem}
+.approval-progress__bar{height:7px;border-radius:999px;background:var(--border);overflow:hidden}.approval-progress__bar span{display:block;height:100%;border-radius:inherit;background:var(--accent);transition:width .2s ease}
+.approval-progress__people{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.45rem}.approval-progress__people>span{display:grid;gap:.15rem;padding:.55rem .65rem;border:1px solid var(--border);border-radius:12px;background:var(--surface)}.approval-progress__people .is-approve{border-color:color-mix(in srgb,var(--success) 45%,var(--border))}.approval-progress__people .is-reject,.approval-progress__people .is-needs_correction{border-color:color-mix(in srgb,var(--danger) 45%,var(--border))}
+@media(max-width:640px){.approval-progress>header{align-items:flex-start;flex-direction:column}.approval-progress__people{grid-template-columns:1fr}}

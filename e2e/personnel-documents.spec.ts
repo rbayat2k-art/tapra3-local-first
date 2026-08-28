@@ -54,5 +54,5 @@ test('صف نواقص و مدارک اجباری بدون قطع دسترسی ن
   await page.setViewportSize({width: 390, height: 844});
   expect(await dialog.evaluate((element) => element.scrollWidth > element.clientWidth + 1)).toBe(false);
   await dialog.getByRole('button', {name: 'بستن پنجره'}).click();
-  await expect(page.getByText('28 پرونده', {exact: true})).toBeVisible();
+  await expect(page.getByText('29 پرونده', {exact: true})).toBeVisible();
 });

@@ -26,7 +26,7 @@ describe('complete local ERP catalog', () => {
   it('has deterministic operational demo data and comprehensive roles', () => {
     const records = seedOperationalRecords();
     expect(Object.values(records).flat().length).toBeGreaterThanOrEqual(ERP_MODULES.length);
-    expect(records.recruitment_cases).toHaveLength(5);
+    expect(records.recruitment_cases).toHaveLength(6);
     expect(ERP_MODULES.every((module) => records[module.store].some((record) => record.moduleId === module.id))).toBe(true);
     expect(Object.keys(records).sort()).toEqual([...ERP_OPERATIONAL_STORES].sort());
     expect(ERP_ROLE_TEMPLATES.length).toBeGreaterThanOrEqual(50);

@@ -1,17 +1,22 @@
-import {describe, expect, it} from 'vitest';
-import type {FoundationSession, FoundationStoreName, LocalUser, SnapshotManifest} from './model';
+import {describe, expect, it, vi} from 'vitest';
+import type {FoundationSession, FoundationStoreName, LocalUser, OperationalRecord, PersonnelRecord, SecurityRole, SnapshotManifest} from './model';
 import {FOUNDATION_STORES} from './model';
 import {createSeedData} from './seed';
 import {LocalFoundationService, userConcurrencyToken} from './service';
 import type {StorageAdapter, StorageTransaction} from './storage';
 import {todayIsoDate, toIsoDate} from './PersianDate';
 import {permissionFor} from './erpCatalog';
+import {defaultWorkContinuityPlan} from './workContinuity';
+import {offboardingActionVisibility} from './offboardingAuthorization';
 
 class MemoryStorage implements StorageAdapter {
   private stores = new Map<FoundationStoreName, Map<IDBValidKey, unknown>>(FOUNDATION_STORES.map((store) => [store, new Map()]));
   private failPutStore?: FoundationStoreName;
+  private beforeReadwrite?:()=>Promise<void>;
   failNextPut(store: FoundationStoreName) {this.failPutStore = store;}
+  beforeNextReadwrite(work:()=>Promise<void>){this.beforeReadwrite=work;}
   async transaction<T>(stores: FoundationStoreName[], mode: IDBTransactionMode, work: (transaction: StorageTransaction) => Promise<T>): Promise<T> {
+    if(mode==='readwrite'&&this.beforeReadwrite){const hook=this.beforeReadwrite;this.beforeReadwrite=undefined;await hook();}
     const working: Map<FoundationStoreName, Map<IDBValidKey, unknown>> = mode === 'readwrite'
       ? new Map([...this.stores.entries()].map(([store, values]) => [store, stores.includes(store) ? new Map([...values].map(([id, value]) => [id, structuredClone(value)])) : values]))
       : this.stores;
@@ -37,7 +42,30 @@ class MemoryStorage implements StorageAdapter {
   async exportSnapshot(): Promise<SnapshotManifest> {throw new Error('not used');} async importSnapshot(): Promise<void> {throw new Error('not used');}
 }
 
-async function setup() {const storage = new MemoryStorage(); await storage.replaceAll(createSeedData()); return {storage, service: new LocalFoundationService(storage)};}
+async function setup() {
+  const storage = new MemoryStorage(); await storage.replaceAll(createSeedData());
+  const [baseRole,baseUser,basePersonnel]=await Promise.all([
+    storage.get<SecurityRole>('security_roles','role-hr-manager'),storage.get<LocalUser>('users','persona-seller'),storage.get<PersonnelRecord>('personnel','personnel-arman'),
+  ]);
+  const now='2026-08-28T00:00:00.000Z';
+  await storage.put('security_roles',{...baseRole!,id:'role-approved-sales-manager',name:'مدیر مصوب فروش',scope:'UNIT',status:'active',permissions:[...new Set([...baseRole!.permissions,'organization.personnel.manage','organization.units.manage'])],protected:false,createdAt:now,updatedAt:now});
+  await storage.put('users',{...baseUser!,id:'persona-approved-manager',actorId:'actor-approved-manager',name:'مدیر مصوب فروش',username:'approved.manager',roleId:'role-approved-sales-manager',roleIds:['role-approved-sales-manager'],status:'active',unitId:'unit-sales',branchUnitId:'unit-branch-central',advanceBranchIds:['*'],positionId:'position-manager',personnelId:'personnel-approved-manager',managerUserId:'persona-product-owner',isAdmin:false,permissions:[],scope:'UNIT'});
+  await storage.put('personnel',{...basePersonnel!,id:'personnel-approved-manager',personnelCode:'P-TEST-MANAGER',firstName:'مدیر',lastName:'مصوب فروش',nationalId:undefined,primaryMobile:'09000000000',linkedUserId:'persona-approved-manager',positionId:'position-manager',branchUnitId:'unit-branch-central',managerPersonnelId:'personnel-admin',salesSupervisorPersonnelId:undefined,createdAt:now,updatedAt:now});
+  return {storage, service: new LocalFoundationService(storage)};
+}
+async function continuityPlan(service: LocalFoundationService, targetUserId = 'persona-seller') {
+  const state = await service.loadState();
+  const target = state.users.find((user) => user.id === targetUserId)!;
+  const preview = await service.previewWorkContinuity(targetUserId);
+  const plan=defaultWorkContinuityPlan(preview, userConcurrencyToken(target), 'تحویل کامل مسئولیت‌های باز');
+  const structural=new Set(['direct_report','personnel_manager','sales_supervisor','unit_manager','unit_acting_manager']);
+  plan.resolutions=preview.responsibilities.map((item)=>({
+    responsibilityId:item.id,
+    action:item.mode==='replacement_required'?'replace':item.mode==='replacement_or_needs_reassignment'?'mark_needs_reassignment':item.mode==='return_to_role_queue'?'return_to_queue':item.mode==='remove_membership'?'remove_membership':'preserve_history',
+    replacementUserId:item.mode==='replacement_required'?(structural.has(item.kind)?'persona-approved-manager':'persona-product-owner'):undefined,
+  }));
+  return plan;
+}
 async function switchActiveUser(storage: MemoryStorage, activeUserId: string) {const session = await storage.get<FoundationSession>('sessions', 'active-session'); await storage.put('sessions', {...session!, activeUserId, actingAdminUserId: undefined, switchedAt: new Date().toISOString(), version: (session?.version ?? 0) + 1});}
 async function confirmAssetCustodyBoth(storage: MemoryStorage, service: LocalFoundationService, transferId: string) {
   await switchActiveUser(storage, 'persona-seller');
@@ -47,6 +75,17 @@ async function confirmAssetCustodyBoth(storage: MemoryStorage, service: LocalFou
   const officerChallenge = await service.issueAssetCustodyOtp(transferId, 'officer');
   const state = await service.confirmAssetCustodyOtp(transferId, 'officer', officerChallenge.otp);
   return {state, employeeOtp: employeeChallenge.otp, officerOtp: officerChallenge.otp};
+}
+async function addAssetManager(storage:MemoryStorage){
+  const template=await storage.get<LocalUser>('users','persona-system-admin');
+  await storage.put('users',{...template!,id:'persona-asset-manager',actorId:'actor-asset-manager',name:'مسئول اموال آزمون',username:'asset.manager.test',roleId:'role-asset-manager',roleIds:['role-asset-manager'],status:'active',isAdmin:false,personnelId:undefined,permissions:[],permissionEntitlements:[],permissionGrants:[],permissionDenials:[]});
+}
+async function assignAssetToSeller(storage:MemoryStorage,service:LocalFoundationService,title:string){
+  let state=await service.createOperationalRecord('fixed-asset',{title});
+  const asset=state.operationalRecords.find((record)=>record.moduleId==='fixed-asset'&&record.title===title)!;
+  const delivery=await service.createAssetCustodyChallenge({assetRecordId:asset.id,personnelId:'personnel-arman',action:'delivery'});
+  state=(await confirmAssetCustodyBoth(storage,service,delivery.transferId)).state;
+  return{asset,state};
 }
 
 describe('personnel employment lifecycle', () => {
@@ -109,9 +148,18 @@ describe('personnel employment lifecycle', () => {
     expect(state.operationalRecords.find((item) => item.id === request.id)?.status).toBe('offboarding');
   });
 
+  it('revalidates the checker role inside approval and leaves the request untouched on revoke',async()=>{
+    const{storage,service}=await setup();await switchActiveUser(storage,'persona-callcenter-a');
+    let state=await service.submitPersonnelEndRequest('personnel-laleh',{effectiveDate:todayIsoDate(),departureInitiator:'organization',reason:'درخواست آزمون لغو نقش هم‌زمان'});const request=state.operationalRecords.find((item)=>item.moduleId==='offboarding'&&item.ownerPersonnelId==='personnel-laleh')!;
+    await switchActiveUser(storage,'persona-hr-manager');
+    storage.beforeNextReadwrite(async()=>{const role=await storage.get<SecurityRole>('security_roles','role-hr-manager');await storage.put('security_roles',{...role!,status:'inactive'});});
+    await expect(service.approvePersonnelEndRequest(request.id,request.version,'تأیید پس از بازبینی کامل')).rejects.toThrow(/دسترسی|نقش/);
+    expect((await storage.get<{status:string}>('offboarding_cases',request.id))?.status).toBe('requested');expect((await storage.get<{employmentStatus:string}>('personnel','personnel-laleh'))?.employmentStatus).toBe('active');
+  });
+
   it('ends employment and disables login without deleting either record', async () => {
-    const {storage, service} = await setup();
-    const state = await service.schedulePersonnelEnd('personnel-arman', (await service.loadState()).personnel.find((person)=>person.id==='personnel-arman')!.updatedAt, {effectiveDate: todayIsoDate(), departureInitiator: 'organization', reason: 'پایان همکاری آزمایشی', handoffNotes: 'تحویل کامل کارها'});
+    const {service} = await setup();
+    const state = await service.schedulePersonnelEnd('personnel-arman', (await service.loadState()).personnel.find((person)=>person.id==='personnel-arman')!.updatedAt, {effectiveDate: todayIsoDate(), departureInitiator: 'organization', reason: 'پایان همکاری آزمایشی', handoffNotes: 'تحویل کامل کارها', continuityPlan: await continuityPlan(service)});
     const personnel = state.personnel.find((item) => item.id === 'personnel-arman')!;
     const user = state.users.find((item) => item.id === 'persona-seller')!;
     expect(personnel.employmentStatus).toBe('ended');
@@ -125,14 +173,14 @@ describe('personnel employment lifecycle', () => {
 
   it('keeps a future termination scheduled and the login active until its effective date', async () => {
     const {service} = await setup(); const future = new Date(); future.setDate(future.getDate() + 2);
-    const state = await service.schedulePersonnelEnd('personnel-arman', (await service.loadState()).personnel.find((person)=>person.id==='personnel-arman')!.updatedAt, {effectiveDate: toIsoDate(future), departureInitiator: 'organization', reason: 'پایان قرارداد در آینده'});
+    const state = await service.schedulePersonnelEnd('personnel-arman', (await service.loadState()).personnel.find((person)=>person.id==='personnel-arman')!.updatedAt, {effectiveDate: toIsoDate(future), departureInitiator: 'organization', reason: 'پایان قرارداد در آینده', continuityPlan: await continuityPlan(service)});
     expect(state.personnel.find((item) => item.id === 'personnel-arman')?.employmentStatus).toBe('ending_scheduled');
     expect(state.users.find((item) => item.id === 'persona-seller')?.status).toBe('active');
   });
 
   it('rehire uses the same dossier and explicitly replaces old access roles', async () => {
     const {service} = await setup();
-    const ended = await service.schedulePersonnelEnd('personnel-arman', (await service.loadState()).personnel.find((person)=>person.id==='personnel-arman')!.updatedAt, {effectiveDate: todayIsoDate(), departureInitiator: 'organization', reason: 'پایان دوره قبلی'});
+    const ended = await service.schedulePersonnelEnd('personnel-arman', (await service.loadState()).personnel.find((person)=>person.id==='personnel-arman')!.updatedAt, {effectiveDate: todayIsoDate(), departureInitiator: 'organization', reason: 'پایان دوره قبلی', continuityPlan: await continuityPlan(service)});
     const state = await service.rehirePersonnel('personnel-arman', ended.personnel.find((person)=>person.id==='personnel-arman')!.updatedAt, {effectiveDate: todayIsoDate(), reason: 'شروع دوره تازه', employmentType: 'تمام‌وقت', unitId: 'unit-sales', positionId: 'position-sales-manager', branchUnitId: 'unit-branch-central', roleIds: ['role-sales-seller']});
     const personnel = state.personnel.find((item) => item.id === 'personnel-arman')!;
     const user = state.users.find((item) => item.id === 'persona-seller')!;
@@ -145,7 +193,7 @@ describe('personnel employment lifecycle', () => {
 
   it('blocks manual account activation while employment is ended', async () => {
     const {service} = await setup();
-    const state = await service.schedulePersonnelEnd('personnel-arman', (await service.loadState()).personnel.find((person)=>person.id==='personnel-arman')!.updatedAt, {effectiveDate: todayIsoDate(), departureInitiator: 'organization', reason: 'پایان همکاری'});
+    const state = await service.schedulePersonnelEnd('personnel-arman', (await service.loadState()).personnel.find((person)=>person.id==='personnel-arman')!.updatedAt, {effectiveDate: todayIsoDate(), departureInitiator: 'organization', reason: 'پایان همکاری', continuityPlan: await continuityPlan(service)});
     const endedUser = state.users.find((user)=>user.id==='persona-seller')!;
     await expect(service.setUserStatus('persona-seller', userConcurrencyToken(endedUser), 'active')).rejects.toThrow('بازگشت به همکاری');
   });
@@ -158,33 +206,117 @@ describe('personnel employment lifecycle', () => {
 
     const current=(await service.loadState()).personnel.find((person)=>person.id==='personnel-arman')!;
     const future=new Date();future.setDate(future.getDate()+2);
-    const scheduledState=await service.schedulePersonnelEnd(current.id,current.updatedAt,{effectiveDate:toIsoDate(future),departureInitiator:'organization',reason:'پایان قرارداد آینده'});
+    const scheduledState=await service.schedulePersonnelEnd(current.id,current.updatedAt,{effectiveDate:toIsoDate(future),departureInitiator:'organization',reason:'پایان قرارداد آینده',continuityPlan:await continuityPlan(service)});
     const scheduled=scheduledState.personnel.find((person)=>person.id===current.id)!;
     storage.failNextPut('audit_events');
     await expect(service.cancelPersonnelEnd(scheduled.id,scheduled.updatedAt,'لغو برنامه خروج')).rejects.toThrow('injected audit_events failure');
     expect((await storage.get<typeof scheduled>('personnel',scheduled.id))?.employmentStatus).toBe('ending_scheduled');
   });
 
+  it('fails a scheduled cancellation when the HR role is revoked after the form was loaded',async()=>{
+    const{storage,service}=await setup();const initial=(await service.loadState()).personnel.find((person)=>person.id==='personnel-arman')!;const future=new Date();future.setDate(future.getDate()+2);
+    let state=await service.schedulePersonnelEnd(initial.id,initial.updatedAt,{effectiveDate:toIsoDate(future),departureInitiator:'organization',reason:'پایان زمان‌بندی‌شده برای آزمون رقابت',continuityPlan:await continuityPlan(service)});
+    await switchActiveUser(storage,'persona-hr-manager');state=await service.loadState();const scheduled=state.personnel.find((person)=>person.id===initial.id)!;
+    storage.beforeNextReadwrite(async()=>{const role=await storage.get<SecurityRole>('security_roles','role-hr-manager');await storage.put('security_roles',{...role!,status:'inactive'});});
+    await expect(service.cancelPersonnelEnd(scheduled.id,scheduled.updatedAt,'لغو پس از بازبینی مجدد')).rejects.toThrow(/دسترسی|نقش/);
+    expect((await storage.get<typeof scheduled>('personnel',scheduled.id))?.employmentStatus).toBe('ending_scheduled');
+  });
+
   it('closes an exit dossier only after financial and organizational clearance', async () => {
-    const {service} = await setup();
-    let state = await service.schedulePersonnelEnd('personnel-arman', (await service.loadState()).personnel.find((person)=>person.id==='personnel-arman')!.updatedAt, {effectiveDate: todayIsoDate(), departureInitiator: 'employee', reason: 'پایان همکاری با تسویه کامل', handoffNotes: 'تحویل کارها ثبت شد'});
+    const {storage,service} = await setup();
+    let state = await service.schedulePersonnelEnd('personnel-arman', (await service.loadState()).personnel.find((person)=>person.id==='personnel-arman')!.updatedAt, {effectiveDate: todayIsoDate(), departureInitiator: 'employee', reason: 'پایان همکاری با تسویه کامل', handoffNotes: 'تحویل کارها ثبت شد', continuityPlan: await continuityPlan(service)});
     let offboarding = state.operationalRecords.find((item) => item.moduleId === 'offboarding' && item.ownerPersonnelId === 'personnel-arman')!;
+    await switchActiveUser(storage,'persona-hr-manager');
     await expect(service.completeOffboarding(offboarding.id, offboarding.version, 'بستن پرونده')).rejects.toThrow('تسویه مالی');
 
+    await switchActiveUser(storage,'persona-advance-accounting');
     state = await service.updateOffboardingClearance(offboarding.id, offboarding.version, 'financial', true, 'بدهی مالی کنترل و تسویه شد');
     offboarding = state.operationalRecords.find((item) => item.id === offboarding.id)!;
+    await switchActiveUser(storage,'persona-hr-manager');
     await expect(service.completeOffboarding(offboarding.id, offboarding.version, 'بستن پرونده')).rejects.toThrow('تسویه سازمانی');
 
+    await switchActiveUser(storage,'persona-hr-operator');
     state = await service.updateOffboardingClearance(offboarding.id, offboarding.version, 'organizational', true, 'تحویل کار و دسترسی‌های سازمانی کنترل شد');
     offboarding = state.operationalRecords.find((item) => item.id === offboarding.id)!;
+    await switchActiveUser(storage,'persona-hr-manager');
     state = await service.completeOffboarding(offboarding.id, offboarding.version, 'همه مراحل تسویه تکمیل شد');
     offboarding = state.operationalRecords.find((item) => item.id === offboarding.id)!;
     expect(offboarding.status).toBe('completed');
     expect(offboarding.payload.currentWaitingFor).toBe('پرونده خروج بسته شده');
   });
+
+  it('denies offboarding clearance and close when retained role ids point to inactive templates and hides the UI actions',async()=>{
+    const{storage,service}=await setup();let state=await service.schedulePersonnelEnd('personnel-arman',(await service.loadState()).personnel.find((person)=>person.id==='personnel-arman')!.updatedAt,{effectiveDate:todayIsoDate(),departureInitiator:'organization',reason:'خروج برای آزمون نقش غیرفعال',continuityPlan:await continuityPlan(service)});let record=state.operationalRecords.find((item)=>item.moduleId==='offboarding'&&item.ownerPersonnelId==='personnel-arman')!;
+    await switchActiveUser(storage,'persona-advance-accounting');state=await service.loadState();record=state.operationalRecords.find((item)=>item.id===record.id)!;const beforeRecord=await storage.get('offboarding_cases',record.id),beforeHistory=await storage.getAll('workflow_history'),beforeAudits=await storage.getAll('audit_events');storage.beforeNextReadwrite(async()=>{const role=await storage.get<SecurityRole>('security_roles','role-accountant');await storage.put('security_roles',{...role!,status:'inactive'});});await expect(service.updateOffboardingClearance(record.id,record.version,'financial',true,'تسویه مالی با نقش منقضی')).rejects.toThrow(/نقش فعال|مجوز/);expect(await storage.get('offboarding_cases',record.id)).toEqual(beforeRecord);expect(await storage.getAll('workflow_history')).toEqual(beforeHistory);expect(await storage.getAll('audit_events')).toEqual(beforeAudits);
+    state=await service.loadState();const rawRecord=(await storage.get<OperationalRecord>('offboarding_cases',record.id))!;expect(offboardingActionVisibility(state,rawRecord)).toMatchObject({canFinance:false,canOrganization:false,canClose:false});
+    const ready=(await storage.get<OperationalRecord>('offboarding_cases',record.id))!;await storage.put('offboarding_cases',{...ready,payload:{...ready.payload,accountClosureStatus:'disabled',assetClearanceStatus:'clear',pendingAssetIds:[],financialClearanceStatus:'clear',organizationalClearanceStatus:'clear'}});await switchActiveUser(storage,'persona-personnel-reviewer');state=await service.loadState();record=state.operationalRecords.find((item)=>item.id===record.id)!;const beforeClose=await storage.get('offboarding_cases',record.id);storage.beforeNextReadwrite(async()=>{const role=await storage.get<SecurityRole>('security_roles','role-personnel-reviewer');await storage.put('security_roles',{...role!,status:'inactive'});});await expect(service.completeOffboarding(record.id,record.version,'بستن با نقش بازبین غیرفعال')).rejects.toThrow(/نقش فعال|مجوز/);expect(await storage.get('offboarding_cases',record.id)).toEqual(beforeClose);
+  });
 });
 
 describe('asset custody with local OTP', () => {
+  it('revalidates the asset-manager template inside immediate and due offboarding transactions',async()=>{
+    {
+      const{storage,service}=await setup();await addAssetManager(storage);
+      const{state}=await assignAssetToSeller(storage,service,'دارایی خروج فوری با نقش منقضی');
+      await switchActiveUser(storage,'persona-product-owner');
+      const person=state.personnel.find((item)=>item.id==='personnel-arman')!;
+      const plan=await continuityPlan(service);
+      storage.beforeNextReadwrite(async()=>{const role=await storage.get<SecurityRole>('security_roles','role-asset-manager');await storage.put('security_roles',{...role!,status:'inactive'});});
+      const ended=await service.schedulePersonnelEnd(person.id,person.updatedAt,{effectiveDate:todayIsoDate(),departureInitiator:'organization',reason:'آزمون مسئول اموال غیرفعال در اجرای فوری',continuityPlan:plan});
+      const offboarding=ended.operationalRecords.find((item)=>item.moduleId==='offboarding'&&item.ownerPersonnelId===person.id)!;
+      expect(offboarding.assigneeUserId).toBeUndefined();expect(offboarding.payload.needsReassignment).toBe(true);
+      expect(ended.personnel.find((item)=>item.id===person.id)?.employmentStatus).toBe('ended');
+      expect((await storage.get<LocalUser>('users','persona-asset-manager'))?.roleIds).toContain('role-asset-manager');
+    }
+    {
+      const{storage,service}=await setup();await addAssetManager(storage);
+      const{state}=await assignAssetToSeller(storage,service,'دارایی خروج موعددار با نقش منقضی');
+      await switchActiveUser(storage,'persona-product-owner');
+      const person=state.personnel.find((item)=>item.id==='personnel-arman')!;const tomorrow=new Date();tomorrow.setDate(tomorrow.getDate()+1);
+      await service.schedulePersonnelEnd(person.id,person.updatedAt,{effectiveDate:toIsoDate(tomorrow),departureInitiator:'organization',reason:'آزمون مسئول اموال غیرفعال در اجرای موعددار',continuityPlan:await continuityPlan(service)});
+      storage.beforeNextReadwrite(async()=>{const role=await storage.get<SecurityRole>('security_roles','role-asset-manager');await storage.put('security_roles',{...role!,status:'inactive'});});
+      vi.useFakeTimers();vi.setSystemTime(new Date(tomorrow.getFullYear(),tomorrow.getMonth(),tomorrow.getDate(),12));
+      try{await service.initialize();}finally{vi.useRealTimers();}
+      const offboardings=await storage.getAll<OperationalRecord>('offboarding_cases');const offboarding=offboardings.find((item)=>item.ownerPersonnelId===person.id)!;
+      expect(offboarding.assigneeUserId).toBeUndefined();expect(offboarding.payload.needsReassignment).toBe(true);
+      expect((await storage.get<PersonnelRecord>('personnel',person.id))?.employmentStatus).toBe('ended');
+    }
+  });
+
+  it('notifies only currently authorized asset managers and rolls back the report if notification persistence fails',async()=>{
+    {
+      const{storage,service}=await setup();await addAssetManager(storage);const{asset}=await assignAssetToSeller(storage,service,'دارایی اعلان عودت امن');
+      await switchActiveUser(storage,'persona-seller');
+      storage.beforeNextReadwrite(async()=>{const role=await storage.get<SecurityRole>('security_roles','role-asset-manager');await storage.put('security_roles',{...role!,status:'inactive'});});
+      const result=await service.createAssetCustodyChallenge({assetRecordId:asset.id,personnelId:'personnel-arman',action:'return',notes:'عودت بدون افشای اعلان'});
+      const notifications=await storage.getAll<{userId:string;relatedRecordId?:string}>('notifications');
+      expect(notifications.some((item)=>item.userId==='persona-asset-manager'&&item.relatedRecordId===result.transferId)).toBe(false);
+    }
+    {
+      const{storage,service}=await setup();await addAssetManager(storage);const{asset}=await assignAssetToSeller(storage,service,'دارایی اعلان خرابی امن');
+      await switchActiveUser(storage,'persona-seller');
+      storage.beforeNextReadwrite(async()=>{const role=await storage.get<SecurityRole>('security_roles','role-asset-manager');await storage.put('security_roles',{...role!,status:'inactive'});});
+      const state=await service.reportOwnAssetIssue({assetRecordId:asset.id,issueType:'damage',description:'خرابی برای آزمون عدم اعلان به نقش منقضی'});
+      const report=state.operationalRecords.find((item)=>item.moduleId==='asset-maintenance'&&item.relatedRecordId===asset.id)!;
+      expect(report.assigneeUserId).toBeUndefined();
+      expect((await storage.getAll<{userId:string;relatedRecordId?:string}>('notifications')).some((item)=>item.userId==='persona-asset-manager'&&item.relatedRecordId===report.id)).toBe(false);
+    }
+    {
+      const{storage,service}=await setup();await addAssetManager(storage);const{asset}=await assignAssetToSeller(storage,service,'دارایی اعلان مسئول فعال');
+      await switchActiveUser(storage,'persona-seller');
+      const state=await service.reportOwnAssetIssue({assetRecordId:asset.id,issueType:'damage',description:'خرابی برای آزمون تخصیص امن مسئول فعال'});
+      const report=state.operationalRecords.find((item)=>item.moduleId==='asset-maintenance'&&item.relatedRecordId===asset.id)!;
+      expect(report.assigneeUserId).toBe('persona-asset-manager');
+      expect((await storage.getAll<{userId:string;relatedRecordId?:string}>('notifications')).some((item)=>item.userId==='persona-asset-manager'&&item.relatedRecordId===report.id)).toBe(true);
+    }
+    {
+      const{storage,service}=await setup();await addAssetManager(storage);const{asset}=await assignAssetToSeller(storage,service,'دارایی بازگشت اتمیک اعلان');
+      await switchActiveUser(storage,'persona-seller');storage.failNextPut('notifications');
+      await expect(service.reportOwnAssetIssue({assetRecordId:asset.id,issueType:'damage',description:'خرابی برای آزمون بازگشت اتمیک اعلان'})).rejects.toThrow('injected notifications failure');
+      expect((await storage.getAll<OperationalRecord>('asset_maintenance')).some((item)=>item.relatedRecordId===asset.id)).toBe(false);
+    }
+  });
+
   it('requires both employee and asset officer confirmations and never persists plaintext OTP', async () => {
     const {storage, service} = await setup();
     let state = await service.createOperationalRecord('fixed-asset', {title: 'لپ‌تاپ آزمایشی', description: 'دارایی تست چرخه تحویل', payload: {serialNumber: 'QA-001'}});
@@ -290,7 +422,7 @@ describe('asset custody with local OTP', () => {
     let challenge = await service.createAssetCustodyChallenge({assetRecordId: asset.id, personnelId: 'personnel-arman', action: 'delivery'});
     await confirmAssetCustodyBoth(storage, service, challenge.transferId);
     await switchActiveUser(storage, 'persona-product-owner');
-    state = await service.schedulePersonnelEnd('personnel-arman', state.personnel.find((person)=>person.id==='personnel-arman')!.updatedAt, {effectiveDate: todayIsoDate(), departureInitiator: 'organization', reason: 'خروج همراه با دارایی'});
+    state = await service.schedulePersonnelEnd('personnel-arman', state.personnel.find((person)=>person.id==='personnel-arman')!.updatedAt, {effectiveDate: todayIsoDate(), departureInitiator: 'organization', reason: 'خروج همراه با دارایی', continuityPlan: await continuityPlan(service)});
     let offboarding = state.operationalRecords.find((item) => item.moduleId === 'offboarding' && item.ownerPersonnelId === 'personnel-arman')!;
     expect(offboarding.payload.assetClearanceStatus).toBe('pending');
     expect(offboarding.payload.pendingAssetIds).toContain(asset.id);

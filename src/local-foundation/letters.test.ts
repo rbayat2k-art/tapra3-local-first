@@ -1,5 +1,5 @@
 import {describe,expect,it} from 'vitest';
-import type {FoundationSession,FoundationStoreName,LocalUser,MetaRecord,OperationalRecord,OperationalRecordHistory,SecurityRole,SnapshotManifest} from './model';
+import type {AuditEvent,FoundationSession,FoundationStoreName,LocalUser,MetaRecord,OperationalRecord,OperationalRecordHistory,OrganizationalUnit,PersonnelRecord,SecurityRole,SnapshotManifest,WorkflowDefinition} from './model';
 import {FOUNDATION_STORES} from './model';
 import {createSeedData} from './seed';
 import {LocalFoundationService,userConcurrencyToken} from './service';
@@ -9,8 +9,10 @@ import {letterDigitalSignature,letterIsArchivedForUser,letterPdfBaseName,letterR
 class MemoryStorage implements StorageAdapter{
   private stores=new Map<FoundationStoreName,Map<IDBValidKey,unknown>>(FOUNDATION_STORES.map((store)=>[store,new Map()]));
   private beforeNextReadwrite?:()=>void;
+  failReadAfterCommandId?:string;
+  private failNextReadonly=false;
   mutateUserBeforeNextReadwrite(userId:string,mutate:(user:LocalUser)=>LocalUser){this.beforeNextReadwrite=()=>{const user=this.stores.get('users')?.get(userId) as LocalUser;this.stores.get('users')!.set(userId,structuredClone(mutate(user)));};}
-  async transaction<T>(stores:FoundationStoreName[],mode:IDBTransactionMode,work:(transaction:StorageTransaction)=>Promise<T>):Promise<T>{if(mode==='readwrite'&&this.beforeNextReadwrite){const mutate=this.beforeNextReadwrite;this.beforeNextReadwrite=undefined;mutate();}const snapshots=new Map(stores.map((store)=>[store,new Map(this.stores.get(store)!)]));const tx:StorageTransaction={get:async<T>(store,id)=>this.stores.get(store)?.get(id) as T|undefined,getAll:async<T>(store)=>[...(this.stores.get(store)?.values()??[])] as T[],put:async(store,value)=>{this.stores.get(store)!.set((value as {id:IDBValidKey}).id,structuredClone(value));},delete:async(store,id)=>{this.stores.get(store)!.delete(id);},clear:async(store)=>{this.stores.get(store)!.clear();}};try{return await work(tx);}catch(error){for(const [store,snapshot] of snapshots)this.stores.set(store,snapshot);throw error;}}
+  async transaction<T>(stores:FoundationStoreName[],mode:IDBTransactionMode,work:(transaction:StorageTransaction)=>Promise<T>):Promise<T>{if(mode==='readonly'&&this.failNextReadonly){this.failNextReadonly=false;throw new Error('injected post-commit read failure');}if(mode==='readwrite'&&this.beforeNextReadwrite){const mutate=this.beforeNextReadwrite;this.beforeNextReadwrite=undefined;mutate();}const snapshots=new Map(stores.map((store)=>[store,new Map(this.stores.get(store)!)]));const tx:StorageTransaction={get:async<T>(store,id)=>this.stores.get(store)?.get(id) as T|undefined,getAll:async<T>(store)=>[...(this.stores.get(store)?.values()??[])] as T[],put:async(store,value)=>{this.stores.get(store)!.set((value as {id:IDBValidKey}).id,structuredClone(value));if(store==='idempotency_keys'&&(value as {id?:string}).id===this.failReadAfterCommandId){this.failReadAfterCommandId=undefined;this.failNextReadonly=true;}},delete:async(store,id)=>{this.stores.get(store)!.delete(id);},clear:async(store)=>{this.stores.get(store)!.clear();}};try{return await work(tx);}catch(error){for(const [store,snapshot] of snapshots)this.stores.set(store,snapshot);throw error;}}
   get<T>(store:FoundationStoreName,id:IDBValidKey){return this.transaction([store],'readonly',(tx)=>tx.get<T>(store,id));}getAll<T>(store:FoundationStoreName){return this.transaction([store],'readonly',(tx)=>tx.getAll<T>(store));}put<T>(store:FoundationStoreName,value:T){return this.transaction([store],'readwrite',(tx)=>tx.put(store,value));}delete(store:FoundationStoreName,id:IDBValidKey){return this.transaction([store],'readwrite',(tx)=>tx.delete(store,id));}
   async replaceAll(stores:Record<FoundationStoreName,unknown[]>){for(const store of FOUNDATION_STORES){this.stores.get(store)!.clear();for(const value of stores[store])this.stores.get(store)!.set((value as {id:IDBValidKey}).id,structuredClone(value));}}
   async exportSnapshot():Promise<SnapshotManifest>{throw new Error('not used');}async importSnapshot():Promise<void>{throw new Error('not used');}
@@ -20,6 +22,25 @@ async function enrollSecondaryPassword(storage:MemoryStorage,service:LocalFounda
 async function sha256(value:string){const bytes=new TextEncoder().encode(value);const digest=await crypto.subtle.digest('SHA-256',bytes);return [...new Uint8Array(digest)].map((item)=>item.toString(16).padStart(2,'0')).join('');}
 
 describe('specialized formal correspondence',()=>{
+  it('replays letter creation after an ambiguous refresh failure and rejects command reuse',async()=>{
+    const storage=new MemoryStorage();await storage.replaceAll(createSeedData());const service=new LocalFoundationService(storage);await sessionAs(storage,'persona-seller');
+    const input={direction:'internal' as const,classification:'normal' as const,subject:'نامه با فرمان پایدار',body:'این نامه فقط یک بار باید در مخزن ثبت شود.',recipientUserIds:['persona-user-manager']};
+    storage.failReadAfterCommandId='letter-stable-command';
+    await expect(service.createLetter(input,undefined,'letter-stable-command')).rejects.toThrow('post-commit');
+    await expect(service.createLetter(input,undefined,'letter-stable-command')).resolves.toBeTruthy();
+    expect((await storage.getAll<OperationalRecord>('letters')).filter((record)=>record.title===input.subject)).toHaveLength(1);
+    await expect(service.createLetter({...input,subject:'نامه متفاوت'},undefined,'letter-stable-command')).rejects.toThrow('شناسه این فرمان');
+  });
+
+  it('rejects a recipient unit owned by another company without creating a draft',async()=>{
+    const storage=new MemoryStorage();await storage.replaceAll(createSeedData());const service=new LocalFoundationService(storage);await sessionAs(storage,'persona-seller');
+    const outsiderUnit:OrganizationalUnit={id:'unit-letter-other-company',companyId:'company-other',name:'واحد مقصد شرکت دیگر',type:'اداره',status:'active',order:999,description:'',createdAt:'',updatedAt:''};
+    await storage.put('organizational_units',outsiderUnit);
+    const before=(await storage.getAll<OperationalRecord>('letters')).length;
+    await expect(service.createLetter({direction:'internal',classification:'normal',subject:'نامه خارج از شرکت',body:'این نامه نباید ثبت شود.',recipientUnitIds:[outsiderUnit.id]})).rejects.toThrow('متعلق به همین شرکت');
+    expect(await storage.getAll<OperationalRecord>('letters')).toHaveLength(before);
+  });
+
   it.each([
     ['company',(user:LocalUser)=>({...user,companyId:'company-other'} as LocalUser)],
     ['unit',(user:LocalUser)=>({...user,unitId:'unit-finance'} as LocalUser)],
@@ -87,6 +108,18 @@ describe('specialized formal correspondence',()=>{
     await sessionAs(storage,'persona-purchase-requester');expect((await service.loadState()).operationalRecords.some((record)=>record.id===letter.id)).toBe(false);
   });
 
+  it('does not expose a nonparticipant letter or its audit metadata to an audit viewer',async()=>{
+    const storage=new MemoryStorage();await storage.replaceAll(createSeedData());const service=new LocalFoundationService(storage);
+    await sessionAs(storage,'persona-seller');const created=await service.createLetter({direction:'internal',classification:'normal',subject:'نامه خصوصی از ممیز',body:'این نامه فقط برای اعضای مشخص است.',recipientUserIds:['persona-user-manager']});
+    const letter=created.operationalRecords.find((item)=>item.title==='نامه خصوصی از ممیز')!;
+    expect((await storage.getAll<{metadata?:Record<string,unknown>}>('audit_events')).some((item)=>item.metadata?.letterId===letter.id)).toBe(true);
+    const role:SecurityRole={id:'role-letter-auditor-nonparticipant',name:'ممیز غیرعضو نامه',description:'',status:'active',protected:false,scope:'COMPANY',permissions:['foundation.audit.view','letter.letter.view'],createdAt:'',updatedAt:'',version:1};
+    await storage.put('security_roles',role);const viewer=(await storage.get<LocalUser>('users','persona-purchase-requester'))!;await storage.put('users',{...viewer,roleId:role.id,roleIds:[role.id],permissionGrants:[],permissionDenials:[]});
+    await sessionAs(storage,viewer.id);const projected=await service.loadState();
+    expect(projected.operationalRecords.some((item)=>item.id===letter.id)).toBe(false);
+    expect(projected.audits.some((item)=>item.metadata?.letterId===letter.id)).toBe(false);
+  });
+
   it('delivers an internal letter to every active member of the selected organizational unit',async()=>{
     const storage=new MemoryStorage();await storage.replaceAll(createSeedData());const service=new LocalFoundationService(storage);
     await enrollSecondaryPassword(storage,service,'persona-seller','4827');await enrollSecondaryPassword(storage,service,'persona-product-owner','5938');await sessionAs(storage,'persona-seller');let state=await service.createLetter({direction:'internal',classification:'normal',subject:'هماهنگی زیرساخت فناوری اطلاعات',body:'این نامه برای همه اعضای فعال واحد فناوری اطلاعات ارسال می‌شود.',recipientUnitIds:['unit-it']});let letter=state.operationalRecords.find((record)=>record.title==='هماهنگی زیرساخت فناوری اطلاعات')!;
@@ -139,12 +172,24 @@ describe('specialized formal correspondence',()=>{
     const storage=new MemoryStorage();await storage.replaceAll(createSeedData());const service=new LocalFoundationService(storage);await sessionAs(storage,'persona-seller');
     const before=await service.loadState();expect(before.activeUser.hasSecondaryPassword).toBe(false);
     const preview=await service.requestOwnSecondaryPasswordOtp();expect(preview.maskedMobile).toMatch(/^09\d{2}\*\*\*\d{4}$/);expect(preview.verificationCode).toMatch(/^\d{6}$/);
+    const pendingRaw=await storage.get<LocalUser>('users','persona-seller');expect(pendingRaw?.secondaryPasswordOtpHash).toMatch(/^pbkdf2\$/);expect(pendingRaw?.secondaryPasswordOtpHash).not.toContain(preview.verificationCode!);
     await expect(service.setOwnSecondaryPassword(userConcurrencyToken(before.activeUser),{verificationCode:'000000',secondaryPassword:'4827'})).rejects.toThrow('کد تأیید');
     const after=await service.setOwnSecondaryPassword(userConcurrencyToken(before.activeUser),{verificationCode:preview.verificationCode!,secondaryPassword:'4827'});
-    expect(after.activeUser.hasSecondaryPassword).toBe(true);expect(after.activeUser.secondaryPasswordHash).toBeUndefined();expect(after.activeUser.secondaryPasswordOtpHash).toBeUndefined();
+    expect(after.activeUser.hasSecondaryPassword).toBe(true);
+    for(const projectedUser of [after.activeUser,...after.users]){
+      expect(projectedUser.secondaryPasswordHash).toBeUndefined();
+      expect(projectedUser.secondaryPasswordOtpHash).toBeUndefined();
+      expect(projectedUser.secondaryPasswordOtpExpiresAt).toBeUndefined();
+      expect(projectedUser.secondaryPasswordOtpRequestedAt).toBeUndefined();
+      expect(projectedUser.secondaryPasswordOtpAttempts).toBeUndefined();
+    }
     const raw=await storage.get<LocalUser>('users','persona-seller');expect(raw?.secondaryPasswordHash).toMatch(/^pbkdf2\$/);expect(raw?.secondaryPasswordHash).not.toContain('4827');expect(raw?.secondaryPasswordOtpHash).toBeUndefined();
-    const persistedText=JSON.stringify({audits:await storage.getAll('audit_events'),history:await storage.getAll('workflow_history'),letters:await storage.getAll('letters')});
-    expect(persistedText).not.toContain('4827');expect(persistedText).not.toContain(preview.verificationCode!);
+    const audits=await storage.getAll<AuditEvent>('audit_events');
+    for(const audit of audits){
+      const exposedAuditText=[audit.summary,audit.reason??'',...Object.values(audit.metadata??{}).map(String)].join(' ');
+      expect(exposedAuditText).not.toContain(preview.verificationCode!);
+      expect(exposedAuditText).not.toContain('4827');
+    }
   });
 
   it('redacts a protected letter until each authorized user enters their own secondary password',async()=>{
@@ -169,5 +214,31 @@ describe('specialized formal correspondence',()=>{
     await sessionAs(storage,'persona-product-owner');state=await service.loadState();letter=state.operationalRecords.find((record)=>record.id===letter.id)!;await expect(service.transitionLetter(letter.id,letter.version,'approve')).rejects.toThrow('۴ رقم');
     for(let attempt=0;attempt<5;attempt+=1)await expect(service.transitionLetter(letter.id,letter.version,'approve','1112')).rejects.toThrow(attempt===4?'۱۵ دقیقه':'صحیح نیست');
     await expect(service.transitionLetter(letter.id,letter.version,'approve','5938')).rejects.toThrow('موقتاً قفل');expect((await storage.get<OperationalRecord>('letters',letter.id))?.status).toBe('in_review');
+  });
+
+  it('requires every frozen reviewer and each reviewer secondary password for an explicit ALL letter approval',async()=>{
+    const storage=new MemoryStorage();await storage.replaceAll(createSeedData());const service=new LocalFoundationService(storage);
+    const workflow=(await storage.getAll<WorkflowDefinition>('workflow_definitions')).find((item)=>item.moduleId==='letter')!;
+    const pinned=(await storage.getAll<WorkflowDefinition>('workflow_versions')).find((item)=>item.moduleId==='letter'&&item.version===workflow.version)!;
+    const reviewerRole='role-letter-reviewer';
+    const makeAll=(item:WorkflowDefinition):WorkflowDefinition=>({...item,approvalStages:item.approvalStages?.map((stage)=>({...stage,roleIds:[reviewerRole],approvalMode:'ALL',requiredApprovals:undefined}))});
+    await storage.put('workflow_definitions',makeAll(workflow));await storage.put('workflow_versions',makeAll(pinned));
+    const template=(await storage.get<LocalUser>('users','persona-system-admin'))!;
+    const first:LocalUser={...template,isAdmin:false,roleId:reviewerRole,roleIds:[reviewerRole],permissionGrants:[],permissionDenials:[]};
+    const secondPersonnelId='personnel-letter-reviewer-two';
+    const second:LocalUser={...first,id:'persona-letter-reviewer-two',actorId:'actor-letter-reviewer-two',username:'letter.reviewer.two',name:'بازبین دوم نامه',personnelId:secondPersonnelId};
+    const personnelTemplate=(await storage.get<PersonnelRecord>('personnel',template.personnelId!))!;
+    await storage.put('users',first);await storage.put('users',second);await storage.put('personnel',{...personnelTemplate,id:secondPersonnelId,personnelCode:'P-LETTER-REVIEWER-2',primaryMobile:'09120000042',linkedUserId:second.id});
+    await enrollSecondaryPassword(storage,service,first.id,'5938');await enrollSecondaryPassword(storage,service,second.id,'6842');
+    await sessionAs(storage,'persona-seller');let state=await service.createLetter({direction:'internal',classification:'normal',subject:'نامه با تأیید همه بازبینان',body:'این نامه فقط پس از رأی هر دو بازبین مجاز آماده ارسال می‌شود.',recipientUserIds:['persona-user-manager']});
+    let letter=state.operationalRecords.find((record)=>record.title==='نامه با تأیید همه بازبینان')!;state=await service.transitionLetter(letter.id,letter.version,'submit_review');letter=state.operationalRecords.find((record)=>record.id===letter.id)!;const entryVersion=letter.version;
+    await sessionAs(storage,first.id);await service.transitionLetter(letter.id,entryVersion,'approve','5938','letter-all-vote-one');
+    let stored=(await storage.get<OperationalRecord>('letters',letter.id))!;expect(stored).toMatchObject({status:'in_review',version:entryVersion});
+    let round=(await storage.getAll<{recordId:string;requiredCount:number;votes:unknown[];status:string}>('workflow_approval_rounds')).find((item)=>item.recordId===letter.id)!;expect(round).toMatchObject({requiredCount:2,status:'open'});expect(round.votes).toHaveLength(1);
+    await sessionAs(storage,second.id);state=await service.transitionLetter(letter.id,entryVersion,'approve','6842','letter-all-vote-two');stored=(await storage.get<OperationalRecord>('letters',letter.id))!;
+    expect(stored.status).toBe('approved_for_send');round=(await storage.getAll<{recordId:string;requiredCount:number;votes:unknown[];status:string}>('workflow_approval_rounds')).find((item)=>item.recordId===letter.id)!;expect(round.status).toBe('approved');expect(round.votes).toHaveLength(2);
+    const projected=state.approvalRounds?.find((item)=>item.recordId===letter.id);
+    expect(projected).toMatchObject({approvedCount:2,electorateSize:2,pendingUserIds:[]});
+    expect(projected).not.toHaveProperty('votes');expect(projected).not.toHaveProperty('eligibleUserIds');expect(projected).not.toHaveProperty('completionIntentHash');
   });
 });

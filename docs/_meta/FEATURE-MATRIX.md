@@ -22,6 +22,7 @@
 | سازمان/شعبه | Admin/HR | Organization/Branches | CRUD/status | permission + scope | `organizationAccess.test.ts` — `Verified` | hierarchy analytics محدود |
 | واحد و سمت | Admin/HR | Organization pages | CRUD/status/delete | منع حذف تخصیص جاری | organization tests — `Verified` | سابقه حذف در Audit است |
 | پرسنل | HR/Admin | `PersonnelPages.tsx` | create/update/movement/export | required profile + unique identifiers | profile/export/seed tests — `Verified` | فایل پرسنلی عمیق محدود |
+| جذب، بانک متقاضیان، رزومه و پرسنل آموزشی | متقاضی عمومی + HR/مدیران مجاز + فرد آموزشی | `RecruitmentPage.tsx`, `RecruitmentCandidateProfileDialog.tsx`, `RecruitmentTrainingStartDialog.tsx`, `PersonnelPages.tsx`, صفحه ورود | request/transition/reuse + public/HR profile + versioned file store + شروع اتمیک دوره + linked training personnel/login | public write-only؛ permission/scope؛ raw file خارج State/Audit/History؛ پرونده پرسنلی اجباری، حساب آموزشی اختیاری و محدود، مساعده غیرفعال | `recruitmentCandidateProfile.test.ts`, `recruitment.test.ts`, `seed.test.ts`, Playwright — `Verified (Local-first)` | دریافت اینترنتی/ضدبدافزار/Object Storage و نگهداشت حقوقی نیازمند Server است |
 | حساب کاربری | Admin/خود کاربر | Users/My Account | account CRUD/credential change | unique username، own-account guard | user override/profile tests — `Verified` | policy رمز Production ندارد |
 | تغییر پروفایل | کاربر/HR | My Account/Change Queue | submit/review | expectedVersion، reviewer permission | `profileChangeWorkflow.test.ts` — `Verified` | approval یک‌مرحله‌ای |
 | نقش و مجوز | Admin | Roles/User detail | role CRUD/clone/delete + grants/denials | denial wins، active role | override/auth tests — `Verified` | شرط‌های ABAC عمومی ندارد |
@@ -127,6 +128,8 @@
 | 67 | `document` | document | `documents` | `Implemented-Unverified` |
 
 ## وابستگی و Side effect
+
+- `Verified (Local-first)` — موتور چندتأییدی نسخه‌دار `ANY / ALL / N_OF_M` برای مساعده، خرید، تأیید نامه و مرحله‌های عمومی maker-checker؛ electorate ثابت، رأی append-only، تداوم مسئولیت و transition/handoff اتمیک. این وضعیت ادعای هم‌زمانی چنددستگاهی سرور را شامل نمی‌شود.
 
 - `Verified` — وابستگی عملیاتی بیرونی همه قابلیت‌های بالا: هیچ‌کدام.
 - `Verified` — Side effectها فقط mutation در IndexedDB، دانلود فایل/چاپ Browser، History API و local notification/SMS preview هستند.

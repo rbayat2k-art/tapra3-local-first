@@ -1,4 +1,4 @@
-import {useMemo, useState} from 'react';
+import {useMemo, useRef, useState} from 'react';
 import {ArrowLeft, BellRing, Building2, CheckCircle2, Download, Eye, FileImage, FileText, Landmark, Pencil, Plus, Search, Trash2, UploadCloud, UserRound, X} from 'lucide-react';
 import {can} from './authorization';
 import {permissionFor, stateLabel, type ErpModuleDefinition} from './erpCatalog';
@@ -17,6 +17,7 @@ import {formatPortalAmount, normalizeBankCard} from '../utils/operationalFormat'
 import {canRequestTreasuryFollowUp} from './purchaseFollowUp';
 import {decisionsForWorkflowState, roleIdsForWorkflowState} from './workflowPolicy';
 import {readFinancialPaymentProgress} from './financialCore';
+import {ApprovalRoundProgress} from './ApprovalRoundProgress';
 
 type Execute = (label: string, work: () => Promise<FoundationState>, success: string) => Promise<boolean>;
 const today = () => new Date().toISOString().slice(0, 10);
@@ -53,7 +54,8 @@ export function PurchaseRequestTable({records, state, module, onOpen, onEdit, on
     <th><SortHeader columnKey="updated" label="آخرین تغییر" sort={sort} onSort={requestSort}/></th><th><span className="sr-only">اقدام‌ها</span></th>
   </tr></thead><tbody>{sortedRows.map((record, index) => {
     const payload = readPurchaseRequestPayload(record.payload);
-    const editable = can(state.activeUser, permissionFor(module.id, 'edit')) && record.createdByUserId === state.activeUser.id && ['draft', 'needs_correction'].includes(record.status);
+    const correctionRecipient=typeof record.payload.continuityCorrectionRecipientUserId==='string'?record.payload.continuityCorrectionRecipientUserId:undefined;
+    const editable = can(state.activeUser, permissionFor(module.id, 'edit')) && (record.createdByUserId === state.activeUser.id || (record.status==='needs_correction'&&correctionRecipient===state.activeUser.id)) && ['draft', 'needs_correction'].includes(record.status);
     const followUpAvailable = canRequestTreasuryFollowUp(state, record);
     return <tr key={record.id} onDoubleClick={() => onOpen(record)}><td className="operational-row-number">{(index + 1).toLocaleString('en-US')}</td>
       <td><button className="record-link" onClick={() => onOpen(record)}><strong>{record.title}</strong><code dir="ltr">{record.trackingCode}</code></button></td>
@@ -165,32 +167,37 @@ export function PurchaseRequestEditor({state, record, onClose, onSave}: {state: 
 
 export function PurchaseRequestDrawer({state, record, module, service, execute, onClose, onEdit}: {state: FoundationState; record: OperationalRecord; module: ErpModuleDefinition; service: LocalFoundationService; execute: Execute; onClose: () => void; onEdit: () => void}) {
   const [reason, setReason] = useState(''); const [assignee, setAssignee] = useState(''); const [errors, setErrors] = useState<string[]>([]);
+  const decisionCommand=useRef<{id:string;fingerprint:string}|undefined>(undefined);const decisionBusy=useRef(false);
   const payload = readPurchaseRequestPayload(record.payload); const history = state.operationalHistory.filter((item) => item.recordId === record.id).sort((a, b) => b.sequence - a.sequence);
   const decisionStage = ['submitted', 'purchase_review', 'purchase_approved'].includes(record.status);
   const currentApprovalState = record.status === 'submitted' ? 'submitted' : 'purchase_review';
   const currentApprovalRoles = roleIdsForWorkflowState(state, 'purchase-request', currentApprovalState, ['role-purchase-approver']);
   const allowedDecisions = decisionsForWorkflowState(state, 'purchase-request', currentApprovalState, ['approve','reject','needs_correction']);
   const isDecisionMaker = decisionStage && record.createdByUserId !== state.activeUser.id && can(state.activeUser, permissionFor('purchase-request', 'approve')) && (state.activeUser.isAdmin || state.activeUser.roleIds.some((roleId) => currentApprovalRoles.includes(roleId)));
-  const transitions = module.workflow.transitions.filter((item) => item.from.includes(record.status) && can(state.activeUser, item.permission) && !item.makerChecker && record.createdByUserId === state.activeUser.id);
+  const correctionRecipient=typeof record.payload.continuityCorrectionRecipientUserId==='string'?record.payload.continuityCorrectionRecipientUserId:undefined;
+  const isCorrectionOwner=record.createdByUserId===state.activeUser.id||(record.status==='needs_correction'&&correctionRecipient===state.activeUser.id);
+  const transitions = module.workflow.transitions.filter((item) => item.from.includes(record.status) && can(state.activeUser, item.permission) && !item.makerChecker && isCorrectionOwner);
   const approverRoleIds = roleIdsForWorkflowState(state, 'purchase-request', 'purchase_review', ['role-purchase-approver']);
   const payerRoleIds = roleIdsForWorkflowState(state, 'purchase-request', 'sent_to_treasury', ['role-treasury-executor-v1']);
   const approvers = state.users.filter((user) => user.status === 'active' && !user.isAdmin && user.id !== state.activeUser.id && user.id !== record.createdByUserId && user.roleIds.some((roleId)=>approverRoleIds.includes(roleId)) && can(user, permissionFor('purchase-request', 'approve')));
   const payers = state.users.filter((user) => user.status === 'active' && !user.isAdmin && user.id !== state.activeUser.id && user.roleIds.some((roleId)=>payerRoleIds.includes(roleId)) && can(user, permissionFor('treasury-execution', 'transition')) && !approvers.some((approver) => approver.id === user.id));
-  const editable = can(state.activeUser, permissionFor(module.id, 'edit')) && record.createdByUserId === state.activeUser.id && ['draft', 'needs_correction'].includes(record.status);
-  const decide = (transition: ErpModuleDefinition['workflow']['transitions'][number]) => {const next = transition.reasonRequired && reason.trim().length < 3 ? ['دلیل تصمیم یا توضیح برای خزانه را کامل وارد کنید.'] : []; setErrors(next); if (next.length) return; void execute('purchase-transition', () => service.transitionOperationalRecord(module.id, record.id, transition.id, reason), `وضعیت درخواست به «${stateLabel(module.workflow, transition.to)}» تغییر کرد.`).then((succeeded) => {if (succeeded) {setReason(''); setErrors([]);}});};
+  const editable = can(state.activeUser, permissionFor(module.id, 'edit')) && isCorrectionOwner && ['draft', 'needs_correction'].includes(record.status);
+  const decide = (transition: ErpModuleDefinition['workflow']['transitions'][number]) => {const next = transition.reasonRequired && reason.trim().length < 3 ? ['دلیل تصمیم یا توضیح برای خزانه را کامل وارد کنید.'] : []; setErrors(next); if(next.length||decisionBusy.current)return;const fingerprint=JSON.stringify({recordId:record.id,version:record.version,transitionId:transition.id,reason});if(!decisionCommand.current||decisionCommand.current.fingerprint!==fingerprint)decisionCommand.current={id:`ui-purchase-transition:${crypto.randomUUID()}`,fingerprint};const commandId=decisionCommand.current.id;decisionBusy.current=true;void execute('purchase-transition', () => service.transitionOperationalRecord(module.id, record.id, transition.id, reason,commandId), `وضعیت درخواست به «${stateLabel(module.workflow, transition.to)}» تغییر کرد.`).then((succeeded) => {if (succeeded) {decisionCommand.current=undefined;setReason(''); setErrors([]);}}).finally(()=>{decisionBusy.current=false;});};
   const submitDecision = (decision: 'approve_and_forward' | 'needs_correction' | 'rejected') => {
     const next = [
       ...(reason.trim().length < 3 ? ['توضیح تصمیم را کامل وارد کنید.'] : []),
       ...(decision === 'approve_and_forward' && !assignee ? ['تأییدکننده بعدی یا پرداخت‌کننده مقصد را انتخاب کنید.'] : []),
     ];
     setErrors(next);
-    if (next.length) return;
+    if (next.length||decisionBusy.current) return;
     const message = decision === 'approve_and_forward' ? 'درخواست تأیید و به مقصد بعدی ارجاع شد.' : decision === 'needs_correction' ? 'درخواست برای اصلاح به کارتابل درخواست‌کننده بازگشت.' : 'درخواست رد و بسته شد.';
-    void execute('purchase-decision', () => service.decidePurchaseRequest(record.id, decision, assignee, reason, record.version), message).then((succeeded) => {if (succeeded) {setReason(''); setAssignee(''); setErrors([]);}});
+    const fingerprint=JSON.stringify({recordId:record.id,version:record.version,decision,assignee,reason});if(!decisionCommand.current||decisionCommand.current.fingerprint!==fingerprint)decisionCommand.current={id:`ui-purchase-decision:${crypto.randomUUID()}`,fingerprint};const commandId=decisionCommand.current.id;decisionBusy.current=true;
+    void execute('purchase-decision', () => service.decidePurchaseRequest(record.id, decision, assignee, reason, record.version,commandId), message).then((succeeded) => {if (succeeded) {decisionCommand.current=undefined;setReason(''); setAssignee(''); setErrors([]);}}).finally(()=>{decisionBusy.current=false;});
   };
   return <RecordDialog ariaLabel={`جزئیات ${record.title}`} className="purchase-drawer" onClose={onClose}><header><div><span className="eyebrow">{record.trackingCode}</span><h2>{record.title}</h2><p>{record.description}</p></div><button className="icon-button" onClick={onClose} aria-label="بستن"><X size={20}/></button></header><div className="drawer-body">
     <div className="record-status-hero"><span className={`state-badge state-badge--${tone(record.status)}`}>{stateLabel(module.workflow, record.status)}</span><span>نسخه {record.version.toLocaleString('en-US')}</span><span>{priorityLabel(record.priority)}</span><strong>{rial(record.amountRial)}</strong></div>
     <PurchaseRequestDetails state={state} record={record}/>
+    <ApprovalRoundProgress state={state} record={record}/>
     <section className="workflow-box"><h3>{isDecisionMaker ? 'تصمیم تأییدکننده' : 'اقدام بعدی'}</h3><FormValidationSummary errors={errors}/>{(isDecisionMaker || transitions.some((item) => item.reasonRequired)) && <label className="field"><RequiredLabel>توضیح تصمیم</RequiredLabel><textarea aria-required="true" value={reason} onChange={(event) => setReason(event.target.value)} placeholder="توضیحی بنویسید که در تاریخچه پرونده ثبت شود…"/></label>}
       {isDecisionMaker && <div className="purchase-assignment"><label className="field"><RequiredLabel>مقصد پس از تأیید</RequiredLabel><select value={assignee} onChange={(event) => setAssignee(event.target.value)}><option value="">انتخاب تأییدکننده بعدی یا پرداخت‌کننده…</option>{approvers.length > 0 && <optgroup label="تأییدکنندگان بعدی">{approvers.map((user) => <option key={user.id} value={user.id}>{user.name} — {user.roleTitle}</option>)}</optgroup>}{payers.length > 0 && <optgroup label="پرداخت‌کنندگان خزانه">{payers.map((user) => <option key={user.id} value={user.id}>{user.name} — {user.roleTitle}</option>)}</optgroup>}</select></label><span className="quiet-state"><UserRound size={16}/>با انتخاب تأییدکننده، پرونده در زنجیره تأیید می‌ماند؛ با انتخاب پرداخت‌کننده، سهم‌های شعب وارد صف خزانه می‌شوند.</span></div>}
       {isDecisionMaker ? <div className="transition-actions">{allowedDecisions.includes('approve') && <button className="button button--primary" type="button" onClick={() => submitDecision('approve_and_forward')}>تأیید و ارجاع به نفر بعدی<ArrowLeft size={16}/></button>}{allowedDecisions.includes('needs_correction') && <button className="button button--secondary" type="button" onClick={() => submitDecision('needs_correction')}>نیازمند اصلاح<ArrowLeft size={16}/></button>}{allowedDecisions.includes('reject') && <button className="button button--danger" type="button" onClick={() => submitDecision('rejected')}>رد و بستن پرونده<ArrowLeft size={16}/></button>}</div> : <div className="transition-actions">{transitions.map((transition) => <button className={`button ${transition.to === 'cancelled' ? 'button--danger' : 'button--primary'}`} key={transition.id} onClick={() => decide(transition)}>{transition.label}<ArrowLeft size={16}/></button>)}{!transitions.length && <span className="quiet-state"><CheckCircle2 size={18}/>اقدام مجاز بعدی برای این نقش وجود ندارد.</span>}</div>}

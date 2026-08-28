@@ -37,6 +37,8 @@ export function CommunicationsPage({state, service, execute, initialConversation
   const [creating,setCreating]=useState(false);
   const [drafts,setDrafts]=useState<Record<string,ChatDraft>>({});
   const [recordingChatId,setRecordingChatId]=useState<string>();
+  const chatCreateCommandRef=useRef<{id:string;fingerprint:string}|undefined>(undefined);
+  const chatCreateBusyRef=useRef(false);
   const selected=conversations.find((record)=>record.id===selectedId)??conversations[0];
   const workspaceDirty=Boolean(recordingChatId||Object.values(drafts).some((draft)=>Boolean(draft.body.trim()||draft.attachment||draft.replyToMessageId||draft.editingMessageId)));
   const updateSelectedDraft=useCallback((draft:ChatDraft)=>{if(selected?.id)setDrafts((current)=>({...current,[selected.id]:draft}));},[selected?.id]);
@@ -54,7 +56,13 @@ export function CommunicationsPage({state, service, execute, initialConversation
       </button>;})}{visible.length===0&&<div className="chat-empty"><MessageCircle size={32}/><strong>گفت‌وگویی پیدا نشد</strong><span>عبارت دیگری جست‌وجو کنید یا گفت‌وگوی تازه بسازید.</span></div>}</div>
     </aside>
     <main className="chat-workspace">{selected?<ChatThread key={selected.id} conversation={selected} state={state} service={service} execute={execute} draft={drafts[selected.id]} onDraftChange={updateSelectedDraft} onRecordingChange={updateRecordingState}/>:<div className="chat-empty chat-empty--large"><MessageCircle size={48}/><h2>همکاری از همین‌جا شروع می‌شود</h2><p>پیام شخصی، گروه کاری و گفت‌وگوی واحدی را با فایل و ویس کنار هم داشته باشید.</p>{mayCreateChat&&<button className="button button--primary" onClick={()=>setCreating(true)}><Plus size={18}/> ساخت اولین گفت‌وگو</button>}</div>}</main>
-    {creating&&mayCreateChat&&<NewConversationDialog state={state} onClose={()=>setCreating(false)} onSave={async(input)=>{const ok=await execute('chat-create',()=>service.createChatConversation(input),'گفت‌وگو آماده شد.');if(ok)setCreating(false);}}/>}
+    {creating&&mayCreateChat&&<NewConversationDialog state={state} onClose={()=>{chatCreateCommandRef.current=undefined;setCreating(false);}} onSave={async(input)=>{
+      if(chatCreateBusyRef.current)return;
+      const fingerprint=JSON.stringify(input);
+      if(!chatCreateCommandRef.current||chatCreateCommandRef.current.fingerprint!==fingerprint)chatCreateCommandRef.current={id:`chat-create-${crypto.randomUUID()}`,fingerprint};
+      const commandId=chatCreateCommandRef.current.id;chatCreateBusyRef.current=true;
+      try{const ok=await execute('chat-create',()=>service.createChatConversation(input,commandId),'گفت‌وگو آماده شد.');if(ok){chatCreateCommandRef.current=undefined;setCreating(false);}}finally{chatCreateBusyRef.current=false;}
+    }}/>}
   </section>;
 }
 
@@ -96,6 +104,8 @@ function ChatThread({conversation,state,service,execute,draft,onDraftChange,onRe
   const timerRef=useRef<number|null>(null);
   const discardRecording=useRef(false);
   const readBusyRef=useRef(false);
+  const sendBusyRef=useRef(false);
+  const messageCommandRef=useRef<{id:string;fingerprint:string}|undefined>(undefined);
 
   const normalizedMessageQuery=normalizeChatSearch(messageQuery);
   const searchResultIds=useMemo(()=>normalizedMessageQuery?messages.filter((message)=>{if(chatMessageIsDeleted(message))return false;const sender=state.users.find((user)=>user.id===message.createdByUserId);const itemAttachment=chatAttachment(message);return normalizeChatSearch(`${message.description} ${sender?.name??''} ${sender?.username??''} ${itemAttachment?.fileName??''}`).includes(normalizedMessageQuery);}).map((message)=>message.id):[],[messages,normalizedMessageQuery,state.users]);
@@ -169,10 +179,10 @@ function ChatThread({conversation,state,service,execute,draft,onDraftChange,onRe
   const onDragEnter=(event:DragEvent<HTMLDivElement>)=>{if(!event.dataTransfer.types.includes('Files'))return;event.preventDefault();dragDepth.current+=1;setDragging(true);};
   const onDragLeave=(event:DragEvent<HTMLDivElement>)=>{event.preventDefault();dragDepth.current=Math.max(0,dragDepth.current-1);if(!dragDepth.current)setDragging(false);};
   const onDrop=(event:DragEvent<HTMLDivElement>)=>{event.preventDefault();dragDepth.current=0;setDragging(false);const file=event.dataTransfer.files?.[0];if(file)acceptFile(file);};
-  const send=async()=>{if((editingMessage?!mayEditMessage:!mayCreateMessage)||sending||recording||(editingMessage?!body.trim():(!body.trim()&&!attachment)))return;setSending(true);try{const ok=editingMessage
+  const send=async()=>{if((editingMessage?!mayEditMessage:!mayCreateMessage)||sendBusyRef.current||sending||recording||(editingMessage?!body.trim():(!body.trim()&&!attachment)))return;sendBusyRef.current=true;setSending(true);try{const messageInput={conversationId:conversation.id,body,attachment,replyToMessageId:replyTo?.id};const fingerprint=JSON.stringify(messageInput);if(!editingMessage&&(!messageCommandRef.current||messageCommandRef.current.fingerprint!==fingerprint))messageCommandRef.current={id:`message-create-${crypto.randomUUID()}`,fingerprint};const ok=editingMessage
     ?await execute('chat-edit-message',()=>service.editChatMessage(editingMessage.id,body,editingMessage.version),'پیام ویرایش شد.')
-    :await execute('chat-send',()=>service.sendChatMessage({conversationId:conversation.id,body,attachment,replyToMessageId:replyTo?.id}),'پیام ارسال شد.');
-    if(ok){setBody('');setAttachment(undefined);setReplyTo(undefined);setEditingMessage(undefined);}}finally{setSending(false);}};
+    :await execute('chat-send',()=>service.sendChatMessage(messageInput,messageCommandRef.current!.id),'پیام ارسال شد.');
+    if(ok){messageCommandRef.current=undefined;setBody('');setAttachment(undefined);setReplyTo(undefined);setEditingMessage(undefined);}}finally{sendBusyRef.current=false;setSending(false);}};
   const hide=async()=>{if(hiding)return;setHiding(true);try{const ok=await execute('chat-hide',()=>service.hideChatForMe(conversation.id,conversation.version),'گفت‌وگو از فهرست شما حذف شد.');if(ok)setConfirmHide(false);}finally{setHiding(false);}};
   const removeMessage=async()=>{if(!confirmDelete||messageBusy)return;setMessageBusy(true);try{const ok=await execute('chat-delete-message',()=>service.deleteChatMessage(confirmDelete.id,confirmDelete.version),'پیام برای اعضای گفتگو حذف شد.');if(ok)setConfirmDelete(undefined);}finally{setMessageBusy(false);}};
   const beginReply=(message:OperationalRecord)=>{setEditingMessage(undefined);setReplyTo(message);setBody('');window.setTimeout(()=>composerRef.current?.focus(),0);};

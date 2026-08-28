@@ -17,8 +17,10 @@ export function toIsoDate(value: Date): string {
   return `${year}-${month}-${day}`;
 }
 
-export function todayIsoDate(): string {
-  return toIsoDate(new Date());
+export function todayIsoDate(value = new Date(), timeZone = 'Asia/Tehran'): string {
+  const parts = new Intl.DateTimeFormat('en-CA', {timeZone, year:'numeric', month:'2-digit', day:'2-digit'}).formatToParts(value);
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === type)?.value ?? '';
+  return `${part('year')}-${part('month')}-${part('day')}`;
 }
 
 export function formatPersianDate(value?: string): string {

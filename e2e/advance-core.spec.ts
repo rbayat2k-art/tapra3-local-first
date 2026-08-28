@@ -87,7 +87,7 @@ test('منابع انسانی می‌تواند استحقاق مساعده فر
   const initialDefer = page.getByRole('button', {name:'فعلاً وارد می‌شوم؛ بعداً تکمیل می‌کنم'}).first();
   if (await initialDefer.isVisible()) await initialDefer.click();
   if (!await page.getByRole('heading', {name:'خوش آمدید'}).isVisible()) await signOut(page);
-  await signIn(page, 'admin');
+  await signIn(page, 'n.akbari');
   await page.goto('/?page=personnel');
   await page.getByPlaceholder('جست‌وجوی نام، کد پرسنلی، کد ملی یا همراه').fill('آرمان فرهمند');
   await page.getByRole('button', {name:/آرمان فرهمند/}).first().click();

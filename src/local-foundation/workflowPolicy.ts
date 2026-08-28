@@ -4,6 +4,7 @@ import type {
   OperationalRecord,
   SecurityRole,
   WorkflowApprovalStageDefinition,
+  WorkflowApprovalMode,
   WorkflowDefinition,
   WorkflowRouteVariantDefinition,
   WorkflowStageDecision,
@@ -18,6 +19,7 @@ const ROLE_HINTS: Record<string, string[]> = {
   'purchase-request': ['role-purchase-approver','role-purchase-approver','role-treasury-executor-v1'],
   'employee-advance': ['role-advance-branch-manager','role-advance-accounting-reviewer','role-sales-advance-approver','role-treasury-executor-v1'],
   'treasury-execution': ['role-treasury-executor-v1','role-treasury-manager-v1'],
+  letter: ['role-letter-reviewer'],
 };
 
 const MANAGED_SEQUENCE_EDGES: Record<string, Array<[string,string]>> = {
@@ -34,15 +36,37 @@ export function assignmentModeForStage(stage: WorkflowApprovalStageDefinition) {
   return stage.assignmentMode ?? (stage.stateId === 'branch_review' ? 'branch_manager' : 'role_queue');
 }
 
+export function approvalModeForStage(stage: WorkflowApprovalStageDefinition): WorkflowApprovalMode {
+  return stage.approvalMode ?? 'ANY';
+}
+
+export function requiredApprovalCount(stage: WorkflowApprovalStageDefinition, electorateSize: number): number {
+  if (!Number.isInteger(electorateSize) || electorateSize < 1) throw new Error('برای این مرحله هیچ تأییدکننده واجد شرایطی وجود ندارد.');
+  const mode = approvalModeForStage(stage);
+  if (mode === 'ANY') return 1;
+  if (mode === 'ALL') return electorateSize;
+  const required = stage.requiredApprovals;
+  if (!Number.isInteger(required) || !required || required < 1 || required > electorateSize) {
+    throw new Error(`حد نصاب این مرحله باید عددی بین ۱ تا ${electorateSize} باشد.`);
+  }
+  return required;
+}
+
 export function defaultApprovalStages(workflow: WorkflowDefinition, roles: SecurityRole[]): WorkflowApprovalStageDefinition[] {
   const hinted = (ROLE_HINTS[workflow.moduleId] ?? []).filter((roleId) => roles.some((role) => role.id === roleId));
   const states = workflow.moduleId === 'employee-advance'
     ? EMPLOYEE_ADVANCE_ORDER
     : workflow.moduleId === 'purchase-request'
       ? ['submitted','purchase_review','sent_to_treasury']
-      : workflow.moduleId === 'treasury-execution'
-        ? ['queued','payment_recorded','verified']
-        : [...new Set(workflow.transitions.filter((transition) => transition.makerChecker || transition.handoffModuleId).map((transition) => transition.to))];
+        : workflow.moduleId === 'treasury-execution'
+          ? ['queued','payment_recorded','verified']
+          // A letter approval vote is cast while the letter is in_review. The
+          // successful vote moves it to approved_for_send; using the target
+          // state here would skip the real draft -> in_review edge and produce
+          // an unpublishable default policy.
+          : workflow.moduleId === 'letter'
+            ? ['in_review']
+            : [...new Set(workflow.transitions.filter((transition) => transition.makerChecker || transition.handoffModuleId).map((transition) => transition.to))];
   return states.map((stateId, index) => ({
     id: `${workflow.moduleId}-stage-${index + 1}`,
     title: titleForState(workflow, stateId),
@@ -136,6 +160,18 @@ function validateStages(
     if (assignmentMode === 'specific_user' && !stage.assigneeUserId) errors.push(`${row}: کاربر مسئول این مرحله را انتخاب کنید.`);
     if (assignmentMode === 'specific_user' && stage.assigneeUserId && users.length && !users.some((user) => user.id === stage.assigneeUserId && user.status === 'active')) errors.push(`${row}: کاربر مسئول انتخاب‌شده فعال نیست.`);
     if (assignmentMode === 'branch_manager' && stage.scope !== 'BRANCH') errors.push(`${row}: روش «مدیر همان شعبه» فقط با محدوده شعبه قابل استفاده است.`);
+    const approvalMode = approvalModeForStage(stage);
+    if (!['ANY','ALL','N_OF_M'].includes(approvalMode)) errors.push(`${row}: روش حد نصاب تأیید معتبر نیست.`);
+    if (approvalMode === 'N_OF_M') {
+      const required = stage.requiredApprovals;
+      if (!Number.isInteger(required) || !required || required < 1) errors.push(`${row}: حد نصاب «تعداد مشخص» باید یک عدد صحیح مثبت باشد.`);
+      const knownEligibleCount = assignmentMode === 'specific_user'
+        ? (stage.assigneeUserId ? 1 : 0)
+        : users.filter((user) => user.status === 'active' && (!stage.roleIds.length || user.roleIds.some((roleId) => stage.roleIds.includes(roleId)))).length;
+      if (knownEligibleCount > 0 && Number.isInteger(required) && required! > knownEligibleCount) {
+        errors.push(`${row}: حد نصاب نمی‌تواند بیشتر از ${knownEligibleCount} تأییدکننده واجد شرایط فعلی باشد.`);
+      }
+    }
   });
 
   if (workflow.moduleId === 'employee-advance') {

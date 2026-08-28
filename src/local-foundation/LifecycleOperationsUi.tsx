@@ -8,6 +8,9 @@ import type {LocalAssetCustodyChallenge, LocalFoundationService, OperationalReco
 import {FormValidationSummary, OptionalLabel, RequiredLabel, validateRequired} from './FormValidation';
 import {formatPortalAmount, toLatinDigits} from '../utils/operationalFormat';
 import {RecordDialog} from './RecordDialog';
+import {WorkContinuityDialog} from './WorkContinuityDialog';
+import type {WorkContinuityPlan} from './model';
+import {offboardingActionVisibility} from './offboardingAuthorization';
 
 type Execute = (label: string, work: () => Promise<FoundationState>, success: string) => Promise<boolean>;
 
@@ -27,14 +30,14 @@ export function OffboardingDrawer({state, record, service, execute, onClose}: {s
   const [note, setNote] = useState('');
   const [challenges, setChallenges] = useState<Record<string, LocalAssetCustodyChallenge>>({});
   const [errors, setErrors] = useState<string[]>([]);
+  const [continuityOpen,setContinuityOpen]=useState(false);
   const history = state.operationalHistory.filter((item) => item.recordId === record.id).sort((a, b) => b.sequence - a.sequence);
-  const canFinance = state.activeUser.isAdmin || state.activeUser.roleIds.some((id) => ['role-accountant', 'role-senior-accountant', 'role-chief-accountant'].includes(id));
-  const canOrganization = state.activeUser.isAdmin || state.activeUser.roleIds.some((id) => ['role-hr-operator', 'role-hr-manager', 'role-personnel-reviewer'].includes(id));
-  const canClose = state.activeUser.isAdmin || state.activeUser.roleIds.some((id) => ['role-hr-manager', 'role-personnel-reviewer'].includes(id));
+  const {canFinance,canOrganization,canClose}=offboardingActionVisibility(state,record);
   const canRequestReturn = state.activeUser.isAdmin || can(state.activeUser, permissionFor('asset-transfer', 'create'));
   const allClear = record.payload.accountClosureStatus === 'disabled' && record.payload.assetClearanceStatus === 'clear' && record.payload.financialClearanceStatus === 'clear' && record.payload.organizationalClearanceStatus === 'clear';
   const isEmploymentEndRequest = ['requested', 'scheduled'].includes(record.status);
   const isRequester = record.createdByUserId === state.activeUser.id;
+  const targetUser=state.users.find((user)=>user.id===person?.linkedUserId||user.personnelId===person?.id);
 
   const requireNote = () => {
     const next = validateRequired([{label: 'توضیح تصمیم', value: note}]);
@@ -60,9 +63,8 @@ export function OffboardingDrawer({state, record, service, execute, onClose}: {s
     if (ok) onClose();
   };
 
-  const approveEndRequest = async () => {
-    if (!requireNote()) return;
-    const ok = await execute('offboarding-request-approve', () => service.approvePersonnelEndRequest(record.id, record.version, note), 'درخواست تأیید شد؛ اجرای خروج فقط در تاریخ مؤثر انجام می‌شود.');
+  const approveEndRequest = async (continuityPlan?:WorkContinuityPlan) => {
+    const ok = await execute('offboarding-request-approve', () => service.approvePersonnelEndRequest(record.id, record.version, note,continuityPlan), 'درخواست تأیید شد؛ اجرای خروج فقط در تاریخ مؤثر انجام می‌شود.');
     if (ok) onClose();
   };
   const cancelEndRequest = async () => {
@@ -71,16 +73,16 @@ export function OffboardingDrawer({state, record, service, execute, onClose}: {s
     if (ok) onClose();
   };
 
-  if (isEmploymentEndRequest) return <RecordDialog ariaLabel={`درخواست بررسی پایان همکاری ${person?.firstName ?? ''}`} className="offboarding-drawer" onClose={onClose}>
+  if (isEmploymentEndRequest) return <><RecordDialog ariaLabel={`درخواست بررسی پایان همکاری ${person?.firstName ?? ''}`} className="offboarding-drawer" onClose={onClose}>
     <header><div><span className="eyebrow">{record.trackingCode} · درخواست بررسی پایان همکاری</span><h2>{person ? `${person.firstName} ${person.lastName}` : record.title}</h2><p>{record.payload.personnelCode ? `کد پرسنلی ${record.payload.personnelCode}` : ''}</p></div><button className="icon-button" onClick={onClose} aria-label="بستن"><X size={20}/></button></header>
     <div className="drawer-body form-stack">
       <div className="waiting-banner"><CircleAlert size={20}/><div><span>مرحله جاری</span><strong>{record.status === 'requested' ? 'در انتظار بررسی منابع انسانی' : text(record.payload.currentWaitingFor) || 'تأییدشده و در انتظار تاریخ اجرا'}</strong></div></div>
       <section className="detail-section"><h3>اطلاعات درخواست</h3><div className="structured-facts"><Fact label="موضوع درخواست" value={text(record.payload.departureInitiator) === 'employee' ? 'اعلام استعفا / عدم تمایل پرسنل' : 'بررسی قطع همکاری با تصمیم سازمان'}/><Fact label="ثبت‌کننده" value={text(record.payload.requesterName) || 'ثبت نشده'}/><Fact label="تاریخ پیشنهادی" value={formatPersianDate(text(record.payload.proposedEmploymentEndDate))}/><Fact label="دلیل درخواست" value={text(record.payload.employmentEndReason) || 'ثبت نشده'}/><Fact label="وضعیت همکاری" value={record.status === 'requested' ? 'فعال و بدون تغییر' : 'فعال تا تاریخ اجرای مصوب'}/><Fact label="وضعیت حساب و پنل" value="فعال و بدون تغییر"/></div>{record.description && <p className="record-description">{record.description}</p>}</section>
       <div className="success-panel"><ShieldCheck size={21}/><div><strong>ثبت درخواست اثر عملیاتی ندارد</strong><span>نقش‌ها، حقوق، دسترسی‌ها، حساب کاربری و پنل این فرد تا اجرای نهایی خروج تغییر نمی‌کنند.</span></div></div>
-      {(record.status === 'requested' && canOrganization || isRequester || canClose) && <section className="workflow-box"><h3>{record.status === 'requested' && canOrganization ? 'تصمیم منابع انسانی' : 'لغو درخواست'}</h3><FormValidationSummary errors={errors}/><label className="field"><RequiredLabel>توضیح تصمیم</RequiredLabel><textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="دلیل تأیید یا پس‌گرفتن درخواست را ثبت کنید…"/></label><div className="transition-actions">{record.status === 'requested' && canOrganization && <button className="button button--primary" onClick={() => void approveEndRequest()}><BadgeCheck size={17}/> تأیید درخواست و ثبت تاریخ اجرا</button>}{(isRequester || canClose) && <button className="button button--secondary" onClick={() => void cancelEndRequest()}><RotateCcw size={17}/> {record.status === 'requested' ? 'لغو درخواست' : 'لغو پیش از اجرا'}</button>}</div></section>}
+      {(record.status === 'requested' && canOrganization || isRequester || canClose) && <section className="workflow-box"><h3>{record.status === 'requested' && canOrganization ? 'تصمیم منابع انسانی' : 'لغو درخواست'}</h3><FormValidationSummary errors={errors}/><label className="field"><RequiredLabel>توضیح تصمیم</RequiredLabel><textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="دلیل تأیید یا پس‌گرفتن درخواست را ثبت کنید…"/></label><div className="transition-actions">{record.status === 'requested' && canOrganization && <button className="button button--primary" onClick={() => {if(!requireNote())return;if(targetUser)setContinuityOpen(true);else void approveEndRequest();}}><BadgeCheck size={17}/> {targetUser?'تأیید و برنامه تحویل مسئولیت':'تأیید پایان همکاری'}</button>}{(isRequester || canClose) && <button className="button button--secondary" onClick={() => void cancelEndRequest()}><RotateCcw size={17}/> {record.status === 'requested' ? 'لغو درخواست' : 'لغو پیش از اجرا'}</button>}</div></section>}
       <section className="history-box"><h3>تاریخچه غیرقابل حذف</h3>{history.map((item) => <article key={item.id}><span/><div><strong>{item.actorName}</strong><p>{item.reason || 'رویداد سیستمی ثبت شد.'}</p><small>{formatPersianDateTime(item.occurredAt)} · #{item.sequence.toLocaleString('fa-IR')}</small></div></article>)}</section>
     </div><footer><button className="button button--ghost" onClick={onClose}>بستن</button></footer>
-  </RecordDialog>;
+  </RecordDialog>{continuityOpen&&targetUser&&<WorkContinuityDialog state={state} service={service} target={targetUser} initialReason={note} confirmLabel="ثبت برنامه و تأیید پایان همکاری" onClose={()=>setContinuityOpen(false)} onConfirm={approveEndRequest}/>}</>;
 
   return <RecordDialog ariaLabel={`پرونده خروج ${person?.firstName ?? ''}`} className="offboarding-drawer" onClose={onClose}>
     <header><div><span className="eyebrow">{record.trackingCode} · پرونده خروج</span><h2>{person ? `${person.firstName} ${person.lastName}` : record.title}</h2><p>{record.payload.personnelCode ? `کد پرسنلی ${record.payload.personnelCode}` : ''}</p></div><button className="icon-button" onClick={onClose} aria-label="بستن"><X size={20}/></button></header>

@@ -26,7 +26,7 @@ import {BranchesPage} from './BranchesPage';
 import {SalesStructuresPage} from './SalesStructuresPage';
 import {FormValidationSummary, OptionalLabel, RequiredLabel, validateRequired} from './FormValidation';
 import {SortHeader, useSortableRows, type SortColumn} from './Sorting';
-import {formatPersianDateTime} from './PersianDate';
+import {formatPersianDateTime, todayIsoDate} from './PersianDate';
 import {ProfileCompletionGate} from './ProfileCompletionGate';
 import {type ProfileCompletionInput} from './profileCompletion';
 import {PERSONNEL_DOCUMENT_PERMISSION_QUEUE, personnelCompletionSummary} from './personnelDocuments';
@@ -41,6 +41,7 @@ import {PRODUCT_NAME, PRODUCT_TAGLINE} from './branding';
 import {DEFAULT_PREFERENCES, normalizeUiPreferences, type UiPreferences} from './appearancePreferences';
 import {WorkflowAdminPage} from './WorkflowAdminPage';
 import {RecruitmentPage} from './RecruitmentPage';
+import {RecruitmentCandidateProfileDialog} from './RecruitmentCandidateProfileDialog';
 import {CommunicationsPage} from './CommunicationsPage';
 import {LettersPage} from './LettersPage';
 import {CollaborationDashboardPanel, CollaborationHubPage} from './CollaborationHubPage';
@@ -55,6 +56,7 @@ import {
   saveNavigationUsage,
   type NavigationUsageEntry,
 } from './navigationDiscovery';
+import {createActingManagerBoundaryCheck, subscribeActingManagerBoundaryChecks} from './actingManagerBoundary';
 
 type PageId = string;
 interface NavigationItem {
@@ -181,6 +183,8 @@ function workspaceTabIdFromUrl(href: string) {
 
 export function LocalFoundationApp() {
   const [foundation, setFoundation] = useState<FoundationState | null>(null);
+  const lastActingManagerTehranDateRef=useRef(todayIsoDate());
+  const actingManagerBoundaryInFlightRef=useRef<Promise<void>|null>(null);
   const initialPage = pageFromUrl(window.location.href);
   const initialWorkspaceUrl = currentRouteText();
   const initialWorkspaceTabId = workspaceTabIdFromUrl(window.location.href);
@@ -208,6 +212,7 @@ export function LocalFoundationApp() {
   const [loginOpen, setLoginOpen] = useState(false);
   const [logoutOpen, setLogoutOpen] = useState(false);
   const [registrationOpen, setRegistrationOpen] = useState(false);
+  const [recruitmentApplicationOpen, setRecruitmentApplicationOpen] = useState(false);
   const [editUser, setEditUser] = useState<LocalUser | 'new' | null>(null);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => safeLocalStorage.getItem(SIDEBAR_COLLAPSED_KEY) === 'true');
@@ -261,6 +266,25 @@ export function LocalFoundationApp() {
     setMobileOpen(false);
     window.setTimeout(() => mobileMenuButtonRef.current?.focus(), 0);
   }, []);
+
+  useEffect(()=>{
+    const check=createActingManagerBoundaryCheck({
+      lastTehranDateRef:lastActingManagerTehranDateRef,
+      inFlightRef:actingManagerBoundaryInFlightRef,
+      currentTehranDate:todayIsoDate,
+      reconcile:()=>service.reconcileActingManagerBoundaries(),
+      onState:(next)=>setFoundation(next),
+      onError:(cause)=>setError(messageOf(cause)),
+    });
+    return subscribeActingManagerBoundaryChecks({
+      windowTarget:window,
+      documentTarget:document,
+      documentIsVisible:()=>document.visibilityState==='visible',
+      check,
+      setInterval:(callback,delay)=>window.setInterval(callback,delay),
+      clearInterval:(timer)=>window.clearInterval(timer),
+    });
+  },[]);
 
   const visibleNavigation = useMemo(() => foundation
     ? NAVIGATION.filter((item) => {
@@ -458,6 +482,15 @@ export function LocalFoundationApp() {
       .catch((cause) => { if (active) setError(messageOf(cause)); })
       .finally(() => { if (active) setBusy(null); });
     return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    const invalidateSession = () => {
+      setFoundation((current) => current ? {...current, session: {...current.session, stale: true}} : current);
+      setError('هویت فعال در تب دیگری تغییر کرده است. برای جلوگیری از ثبت با حساب اشتباه، این صفحه را تازه‌سازی کنید.');
+    };
+    window.addEventListener('shahrah-session-invalidated', invalidateSession);
+    return () => window.removeEventListener('shahrah-session-invalidated', invalidateSession);
   }, []);
 
   useEffect(() => {
@@ -732,9 +765,11 @@ export function LocalFoundationApp() {
       onClearError={() => setError(null)}
       onClose={signedOut ? undefined : () => setLoginOpen(false)}
       onRegister={() => setRegistrationOpen(true)}
+      onApply={() => setRecruitmentApplicationOpen(true)}
       onSubmit={signIn}
     />
     {registrationOpen && <RegistrationDialog service={service} onClose={() => setRegistrationOpen(false)} onDone={(state) => {setFoundation(state);setRegistrationOpen(false);setToast('درخواست ثبت‌نام با کد پیگیری ثبت شد.');}} />}
+    {recruitmentApplicationOpen&&<RecruitmentCandidateProfileDialog state={foundation} service={service} mode="public" onClose={()=>setRecruitmentApplicationOpen(false)} onSubmitted={(result)=>{setRecruitmentApplicationOpen(false);setToast(`رزومه با کد پیگیری ${result.trackingCode} ثبت شد.`);}}/>}
     {busy && <div className="busy-indicator"><span /><b>در حال بررسی امن اطلاعات…</b></div>}
     {toast && <div className="toast" role="status" aria-live="polite"><BadgeCheck size={20} /><span>{toast}</span></div>}
   </>;
@@ -849,6 +884,7 @@ export function LocalFoundationApp() {
         />
 
         {foundation.session.actingAdminUserId && <div className="access-view-banner"><Eye size={19} /><span>در حال مشاهده با دسترسی: <strong>{userDisplayLabel(foundation.activeUser,foundation)}</strong></span><button onClick={endQaSession}>بازگشت به دسترسی ادمین <ArrowLeft size={16} /></button></div>}
+        {foundation.session.stale && <div className="access-view-banner" role="alert"><CircleAlert size={19}/><span><strong>نشست این تب قدیمی شده است.</strong> هویت فعال در تب دیگری تغییر کرده؛ پیش از هر اقدام صفحه را تازه‌سازی کنید.</span><button type="button" onClick={() => window.location.reload()}>تازه‌سازی صفحه <RotateCcw size={16}/></button></div>}
 
         <div className="page-frame">
           {error && <div className="notice notice--danger global-operation-error" role="alert" aria-live="assertive"><CircleAlert size={19} /><span>{error}</span><button type="button" aria-label="بستن پیام خطا" onClick={() => setError(null)}>بستن</button></div>}
@@ -1160,7 +1196,9 @@ function DataPage({state, onExport, onEncrypted, onRestore, onReset, onGenerateQ
   const persona = state.activeUser;
   const mayExport = can(persona, 'foundation.data.export');
   const mayManage = can(persona, 'foundation.data.manage');
-  const hasSensitiveDocuments = state.operationalRecords.some((record) => record.moduleId === 'personnel-document' && typeof record.payload.fileRef === 'string');
+  const hasSensitiveDocuments = state.operationalRecords.some((record) =>
+    (record.moduleId === 'personnel-document' && typeof record.payload.fileRef === 'string')
+    || (record.moduleId === 'recruitment-case' && Array.isArray(record.payload.candidateDocuments) && record.payload.candidateDocuments.length > 0));
   return (
     <div className="page-stack">
       <PageIntro icon={Database} eyebrow="Local data controls" title="پشتیبان‌گیری و بازیابی روی همین دستگاه" description="داده عملیاتی فقط در IndexedDB است. ترجیحات ظاهری تنها داده‌هایی هستند که در localStorage نگهداری می‌شوند." />
@@ -1589,7 +1627,7 @@ function PasswordDialog({title, description, actionLabel, busy, onClose, onSubmi
 
 type AuthMode = 'login' | 'password' | 'username';
 
-function AuthPortal({currentUser, busy, globalError, onClearError, onClose, onRegister, onSubmit}: {currentUser?: LocalUser; busy: boolean; globalError: string | null; onClearError: () => void; onClose?: () => void; onRegister: () => void; onSubmit: (username: string, password: string) => void}) {
+function AuthPortal({currentUser, busy, globalError, onClearError, onClose, onRegister, onApply, onSubmit}: {currentUser?: LocalUser; busy: boolean; globalError: string | null; onClearError: () => void; onClose?: () => void; onRegister: () => void; onApply: () => void; onSubmit: (username: string, password: string) => void}) {
   const [mode, setMode] = useState<AuthMode>('login');
   const [username, setUsername] = useState('');
   const [mobile, setMobile] = useState('');
@@ -1690,7 +1728,7 @@ function AuthPortal({currentUser, busy, globalError, onClearError, onClose, onRe
           <button className="auth-primary" disabled={localBusy} onClick={requestUsername}><AtSign size={19}/>{localBusy ? 'در حال بررسی…' : 'ارسال نام کاربری با پیامک'}</button>
         </div>}
 
-        <div className="auth-register"><span>حساب کاربری ندارید؟</span><button onClick={onRegister}><UserPlus size={17}/> ثبت‌نام در سامانه</button></div>
+        <div className="auth-register"><span>حساب کاربری ندارید؟</span><button onClick={onRegister}><UserPlus size={17}/> ثبت‌نام در سامانه</button><button onClick={onApply}><BriefcaseBusiness size={17}/> ارسال رزومه برای همکاری</button></div>
         <div className="auth-security"><LockKeyhole size={15}/><span>رمزها به‌صورت متن ساده ذخیره یا در گزارش‌ها ثبت نمی‌شوند.</span></div>
       </div>
     </section>

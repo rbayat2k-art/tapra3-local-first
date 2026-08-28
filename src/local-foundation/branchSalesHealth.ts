@@ -1,5 +1,6 @@
 import type {FoundationState, OrganizationalUnit, PersonnelRecord, SalesHierarchyLevel, SalesStructure} from './model';
 import {roleIdsForWorkflowState, routeVariantForBranch} from './workflowPolicy';
+import {resolveEffectiveUnitManager} from './workflowRouting';
 
 export type BranchHealthIssueCode =
   | 'missing-manager'
@@ -42,13 +43,13 @@ export function branchHealthInsight(branch: OrganizationalUnit, state: Organizat
   const activePersonnelCount = activePersonnel.length + activeStandaloneUsers.length;
   const activeSellers = activePersonnel.filter((person) => person.salesHierarchyLevel === 'seller');
   const activeSalesRoutes = state.salesStructures.filter((structure) => structure.branchUnitId === branch.id && structure.status === 'active');
-  const manager = state.users.find((user) => user.id === branch.managerUserId);
+  const manager = resolveEffectiveUnitManager(state, branch)?.effectiveManager;
   const advanceWorkflow = state.workflows.find((workflow) => workflow.moduleId === 'employee-advance');
   const routeId = advanceWorkflow ? routeVariantForBranch(advanceWorkflow, branch.id)?.id : undefined;
   const managerRoleIds = roleIdsForWorkflowState(state, 'employee-advance', 'branch_review', ['role-advance-branch-manager'], advanceWorkflow?.version, routeId);
 
-  if (branch.status === 'active' && !branch.managerUserId) issues.push('missing-manager');
-  if (branch.managerUserId && (!manager || manager.status !== 'active' || !manager.roleIds.some((roleId) => managerRoleIds.includes(roleId)))) issues.push('invalid-manager');
+  if (branch.status === 'active' && !manager) issues.push('missing-manager');
+  if (manager && !state.roles.some((role) => role.status === 'active' && manager.roleIds.includes(role.id) && managerRoleIds.includes(role.id))) issues.push('invalid-manager');
   if (branch.status === 'active' && activePersonnelCount === 0) issues.push('no-active-personnel');
   if (branch.status === 'inactive' && activePersonnelCount > 0) issues.push('inactive-with-active-personnel');
   if (activeSellers.length > 0 && activeSalesRoutes.length === 0) issues.push('missing-sales-route');

@@ -3,6 +3,7 @@ import {ArrowDown, ArrowLeft, ArrowUp, Check, ChevronDown, CircleHelp, GitBranch
 import type {
   FoundationState,
   WorkflowApprovalStageDefinition,
+  WorkflowApprovalMode,
   WorkflowDefinition,
   WorkflowRouteVariantDefinition,
   WorkflowStageAssignmentMode,
@@ -11,7 +12,7 @@ import type {
 } from './model';
 import type {LocalFoundationService} from './service';
 import {ERP_MODULES} from './erpCatalog';
-import {approvalStagesFor, assignmentModeForStage, defaultApprovalStages, validateWorkflowPolicy} from './workflowPolicy';
+import {approvalModeForStage, approvalStagesFor, assignmentModeForStage, defaultApprovalStages, validateWorkflowPolicy} from './workflowPolicy';
 import {FormValidationSummary, OptionalLabel, RequiredLabel, validateRequired} from './FormValidation';
 import {userDisplayLabel} from './personIdentity';
 
@@ -27,6 +28,8 @@ const queueDescriptions:Record<string,string>={
 };
 const scopeLabels:Record<WorkflowStageScope,string>={COMPANY:'کل شرکت',UNIT:'واحد سازمانی',BRANCH:'شعبه',SELF:'خود کاربر'};
 const assignmentModeLabels:Record<WorkflowStageAssignmentMode,string>={role_queue:'یکی از کاربران دارای نقش',specific_user:'یک کاربر مشخص',branch_manager:'مدیر ثبت‌شده همان شعبه'};
+const approvalModeLabels:Record<WorkflowApprovalMode,string>={ANY:'تأیید یک نفر کافی است',ALL:'تأیید همه لازم است',N_OF_M:'تعداد مشخص از تأییدکنندگان'};
+const approvalModeHelp:Record<WorkflowApprovalMode,string>={ANY:'با اولین رأی تأیید معتبر، مرحله کامل می‌شود.',ALL:'تمام افراد فهرست ثابت این دور باید رأی تأیید بدهند.',N_OF_M:'مرحله پس از رسیدن رأی‌های مثبت به حد نصاب انتخاب‌شده کامل می‌شود.'};
 const decisionLabels:Record<WorkflowStageDecision,string>={approve:'تأیید',reject:'رد',needs_correction:'نیازمند اصلاح',return_previous:'بازگشت به مرحله قبل',handoff:'ارجاع به مرحله بعد'};
 const stageTitleLabels:Record<string,string>={branch_review:'بررسی مدیر شعبه',accounting_review:'بررسی حسابداری',final_review:'تأیید نهایی',sent_to_treasury:'ارسال به خزانه'};
 const decisions=Object.keys(decisionLabels) as WorkflowStageDecision[];
@@ -43,12 +46,14 @@ const newStage=(workflow:WorkflowDefinition,index:number):WorkflowApprovalStageD
   stateId:Object.keys(workflow.stateLabels)[index]??Object.keys(workflow.stateLabels)[0]??workflow.initialState,
   roleIds:[],scope:'COMPANY',decisions:['approve'],required:true,allowSelfApproval:false,
   assignmentMode:'role_queue',
+  approvalMode:'ANY',
 });
 
 export function WorkflowAdminPage({state,execute,service}:Props){
   const [selected,setSelected]=useState(state.workflows[0]?.moduleId??'');
   const [editing,setEditing]=useState(false);
   const [query,setQuery]=useState('');
+  const policyCommands=useRef<Record<string,{fingerprint:string;commandId:string}>>({});
   const workflow=state.workflows.find((item)=>item.moduleId===selected)??state.workflows[0];
   const visible=useMemo(()=>{
     const q=query.trim().toLocaleLowerCase('fa-IR');
@@ -57,7 +62,7 @@ export function WorkflowAdminPage({state,execute,service}:Props){
   useEffect(()=>{if(visible.length&&!visible.some((item)=>item.moduleId===selected))setSelected(visible[0].moduleId);},[selected,visible]);
   if(!workflow)return <div className="empty-state empty-state--page"><Workflow/><strong>گردش‌کاری پیدا نشد.</strong></div>;
   const stages=approvalStagesFor(workflow,state.roles);
-  const runtimeEditable=workflow.moduleId==='employee-advance';
+  const runtimeEditable=['employee-advance','purchase-request','letter'].includes(workflow.moduleId);
   return <div className="page-stack workflow-manager">
     <section className="page-intro"><div className="page-intro__icon"><Workflow size={24}/></div><div><span className="eyebrow">طراح کنترل‌شده و نسخه‌دار</span><h2>مدیریت گردش‌کار</h2><p>مسیر پایه شرکت و مسیرهای استثنایی شعب را تنظیم کنید. هر پرونده هنگام ثبت به همان نسخه و مسیر قفل می‌شود.</p></div></section>
     <div className="workflow-admin-grid">
@@ -71,12 +76,12 @@ export function WorkflowAdminPage({state,execute,service}:Props){
         <details className="workflow-locked-map"><summary><ShieldCheck size={18}/> نمایش ماشین وضعیت محافظت‌شده</summary><div className="workflow-state-map">{Object.entries(workflow.stateLabels).map(([id,label])=><span key={id}>{label}</span>)}</div><div className="transition-map">{workflow.transitions.map((item)=><article key={item.id}><span>{item.from.map((from)=>workflow.stateLabels[from]??'وضعیت تعریف‌شده').join(' / ')}</span><ArrowLeft size={17}/><strong>{workflow.stateLabels[item.to]??'وضعیت تعریف‌شده'}</strong><small>{item.label}</small></article>)}</div></details>
       </section>
     </div>
-    {editing&&runtimeEditable&&<WorkflowPolicyDialog state={state} workflow={workflow} onClose={()=>setEditing(false)} onSave={(input)=>{if(!service)throw new Error('سرویس گردش‌کار در دسترس نیست.');return execute('workflow-policy',()=>service.updateWorkflowPolicy(workflow.moduleId,workflow.version,input),'نسخه جدید گردش‌کار منتشر شد.').then((succeeded)=>{if(succeeded)setEditing(false);return succeeded;});}}/>}
+    {editing&&runtimeEditable&&<WorkflowPolicyDialog state={state} workflow={workflow} onClose={()=>{delete policyCommands.current[workflow.moduleId];setEditing(false);}} onSave={(input)=>{if(!service)throw new Error('سرویس گردش‌کار در دسترس نیست.');const fingerprint=JSON.stringify(input);const existing=policyCommands.current[workflow.moduleId];if(!existing||existing.fingerprint!==fingerprint)policyCommands.current[workflow.moduleId]={fingerprint,commandId:`ui-workflow-policy:${crypto.randomUUID()}`};const commandId=policyCommands.current[workflow.moduleId].commandId;return execute('workflow-policy',()=>service.updateWorkflowPolicy(workflow.moduleId,workflow.version,input,commandId),'نسخه جدید گردش‌کار منتشر شد.').then((succeeded)=>{if(succeeded){delete policyCommands.current[workflow.moduleId];setEditing(false);}return succeeded;});}}/>}
   </div>;
 }
 
 function RoutePreview({title,subtitle,stages,workflow,state}:{title:string;subtitle?:string;stages:WorkflowApprovalStageDefinition[];workflow:WorkflowDefinition;state:FoundationState}){
-  return <div className="workflow-route"><header><div><GitBranch size={19}/><strong>{title}</strong>{subtitle&&<small>{subtitle}</small>}</div><span>{persianNumber(stages.length)} مرحله</span></header>{stages.length?stages.map((stage,index)=>{const assignee=state.users.find((user)=>user.id===stage.assigneeUserId);return <article key={stage.id}><i>{persianNumber(index+1)}</i><div><strong>{stageDisplayTitle(workflow,stage)}</strong><small>{workflow.stateLabels[stage.stateId]??'وضعیت تعریف‌شده'}</small></div><div className="workflow-role-chips"><span className="workflow-assignment-chip">{assignmentModeForStage(stage)==='specific_user'?(assignee?userDisplayLabel(assignee,state):'کاربر تعیین نشده'):assignmentModeLabels[assignmentModeForStage(stage)]}</span>{stage.roleIds.map((roleId)=><span key={roleId}>{state.roles.find((role)=>role.id===roleId)?.name??'نقش سازمانی'}</span>)}</div><b>{scopeLabels[stage.scope]}</b><div className="workflow-decision-chips">{stage.decisions.map((item)=><span key={item}>{decisionLabels[item]}</span>)}</div></article>}):<div className="quiet-state">مرحله‌ای تعریف نشده است.</div>}</div>;
+  return <div className="workflow-route"><header><div><GitBranch size={19}/><strong>{title}</strong>{subtitle&&<small>{subtitle}</small>}</div><span>{persianNumber(stages.length)} مرحله</span></header>{stages.length?stages.map((stage,index)=>{const assignee=state.users.find((user)=>user.id===stage.assigneeUserId);const approvalMode=approvalModeForStage(stage);return <article key={stage.id}><i>{persianNumber(index+1)}</i><div><strong>{stageDisplayTitle(workflow,stage)}</strong><small>{workflow.stateLabels[stage.stateId]??'وضعیت تعریف‌شده'} · {approvalModeLabels[approvalMode]}{approvalMode==='N_OF_M'?` (${persianNumber(stage.requiredApprovals??0)} رأی)`:''}</small></div><div className="workflow-role-chips"><span className="workflow-assignment-chip">{assignmentModeForStage(stage)==='specific_user'?(assignee?userDisplayLabel(assignee,state):'کاربر تعیین نشده'):assignmentModeLabels[assignmentModeForStage(stage)]}</span>{stage.roleIds.map((roleId)=><span key={roleId}>{state.roles.find((role)=>role.id===roleId)?.name??'نقش سازمانی'}</span>)}</div><b>{scopeLabels[stage.scope]}</b><div className="workflow-decision-chips">{stage.decisions.map((item)=><span key={item}>{decisionLabels[item]}</span>)}</div></article>}):<div className="quiet-state">مرحله‌ای تعریف نشده است.</div>}</div>;
 }
 
 interface PolicyInput {queueStrategy:WorkflowDefinition['queueStrategy'];assignmentPolicy:string;approvalPolicyId?:string;allowSelfSubmission?:boolean;approvalStages:WorkflowApprovalStageDefinition[];routeVariants:WorkflowRouteVariantDefinition[];changeSummary:string}
@@ -201,7 +206,7 @@ function StageEditor({title,errorLabel=title,description,state,workflow,stages,e
           </div>
           <details className="workflow-role-picker"><summary><span><strong>نقش‌های مسئول</strong><small>{stage.roleIds.length?stage.roleIds.map((id)=>state.roles.find((role)=>role.id===id)?.name??'نقش حذف‌شده').join('، '):'هنوز نقشی انتخاب نشده است'}</small></span><b>{persianNumber(stage.roleIds.length)} انتخاب</b><ChevronDown size={17}/></summary><div><span className="workflow-role-search"><Search size={15}/><input aria-label="جست‌وجوی نقش مسئول" value={roleSearch[stage.id]??''} onChange={(event)=>setRoleSearch((current)=>({...current,[stage.id]:event.target.value}))} placeholder="جست‌وجوی نقش…"/></span><div className="workflow-role-options">{visibleRoles.map((role)=>{const selected=stage.roleIds.includes(role.id);return <label key={role.id} className={selected?'selected':''}><input type="checkbox" checked={selected} onChange={(event)=>update(index,{roleIds:event.target.checked?[...stage.roleIds,role.id]:stage.roleIds.filter((id)=>id!==role.id),assigneeUserId:undefined})}/><span className="workflow-option-check">{selected&&<Check size={13}/>}</span><span><strong>{role.name}</strong><small>{role.description}</small></span></label>;})}{!visibleRoles.length&&<p>نقشی با این جست‌وجو پیدا نشد.</p>}</div></div></details>
           </fieldset>
-          <fieldset className="workflow-stage-group"><legend>تصمیم‌ها و کنترل مرحله</legend><div className="workflow-decision-options">{decisions.map((decision)=>{const selected=stage.decisions.includes(decision);return <label key={decision} className={selected?'selected':''}><input type="checkbox" checked={selected} onChange={(event)=>update(index,{decisions:event.target.checked?[...stage.decisions,decision]:stage.decisions.filter((item)=>item!==decision)})}/><span className="workflow-option-check">{selected&&<Check size={13}/>}</span><span>{decisionLabels[decision]}</span></label>;})}</div><div className="workflow-stage-fixed-row"><div className="workflow-fixed-setting"><ShieldCheck size={17}/><span><strong>مرحله الزامی</strong><small>عبور از این مرحله طبق سیاست مساعده اجباری است.</small></span></div><label className="switch-row"><input type="checkbox" checked={stage.allowSelfApproval} onChange={(event)=>update(index,{allowSelfApproval:event.target.checked})}/><span><strong>تأیید درخواست خود مجاز باشد</strong><small>در حالت عادی برای تفکیک ثبت‌کننده و تأییدکننده خاموش بماند.</small></span></label></div></fieldset>
+          <fieldset className="workflow-stage-group"><legend>تصمیم‌ها و کنترل مرحله</legend><div className="workflow-stage-fields"><label className="field"><RequiredLabel>روش رسیدن به تأیید مرحله</RequiredLabel><select value={approvalModeForStage(stage)} onChange={(event)=>update(index,{approvalMode:event.target.value as WorkflowApprovalMode,requiredApprovals:event.target.value==='N_OF_M'?(stage.requiredApprovals??2):undefined})}>{Object.entries(approvalModeLabels).map(([id,label])=><option key={id} value={id}>{label}</option>)}</select><small className="field-help">{approvalModeHelp[approvalModeForStage(stage)]}</small></label>{approvalModeForStage(stage)==='N_OF_M'&&<label className="field"><RequiredLabel>حد نصاب رأی مثبت</RequiredLabel><input type="number" min="1" inputMode="numeric" value={stage.requiredApprovals??2} onChange={(event)=>update(index,{requiredApprovals:Number(event.target.value)})}/><small className="field-help">عدد باید از تعداد افراد واجد شرایط این مرحله بیشتر نباشد.</small></label>}</div><div className="workflow-decision-options">{decisions.map((decision)=>{const selected=stage.decisions.includes(decision);return <label key={decision} className={selected?'selected':''}><input type="checkbox" checked={selected} onChange={(event)=>update(index,{decisions:event.target.checked?[...stage.decisions,decision]:stage.decisions.filter((item)=>item!==decision)})}/><span className="workflow-option-check">{selected&&<Check size={13}/>}</span><span>{decisionLabels[decision]}</span></label>;})}</div><div className="workflow-stage-fixed-row"><div className="workflow-fixed-setting"><ShieldCheck size={17}/><span><strong>مرحله الزامی</strong><small>عبور از این مرحله طبق سیاست گردش‌کار اجباری است.</small></span></div><label className="switch-row"><input type="checkbox" checked={stage.allowSelfApproval} onChange={(event)=>update(index,{allowSelfApproval:event.target.checked})}/><span><strong>تأیید درخواست خود مجاز باشد</strong><small>در حالت عادی برای تفکیک ثبت‌کننده و تأییدکننده خاموش بماند.</small></span></label></div></fieldset>
         </div>}
       </article>;
     })}</div>

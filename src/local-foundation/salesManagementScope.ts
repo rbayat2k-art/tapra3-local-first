@@ -1,4 +1,6 @@
 import type {FoundationState, LocalUser, PersonnelRecord, SalesHierarchyLevel, SalesStructure} from './model';
+import {authorizeWithActiveRole} from './authorization';
+import {permissionFor} from './erpCatalog';
 
 export interface SalesManagementScope {
   source: 'active_sales_structure' | 'assigned_branch' | 'company';
@@ -53,7 +55,11 @@ export function activeSalesStructuresForUser(state: FoundationState, user: Local
 
 export function resolveWorkforceRequestScope(state: FoundationState, user: LocalUser = state.activeUser): SalesManagementScope {
   const activeBranches = state.units.filter((unit) => unit.type === 'شعبه' && unit.status === 'active');
-  if (user.isAdmin || user.roleIds.includes('role-recruitment-manager')) {
+  const canManageRecruitment = authorizeWithActiveRole({
+    persona:user, roles:state.roles, allowedRoleIds:['role-recruitment-manager'],
+    permission:permissionFor('recruitment-case','create'), action:'create', allowAdminWithoutRole:false,
+  }).allowed;
+  if (canManageRecruitment) {
     return {
       source: 'company',
       branchUnitIds: activeBranches.map((branch) => branch.id),
@@ -63,7 +69,11 @@ export function resolveWorkforceRequestScope(state: FoundationState, user: Local
     };
   }
 
-  if (!user.roleIds.includes('role-workforce-requester')) {
+  const canRequestWorkforce = authorizeWithActiveRole({
+    persona:user, roles:state.roles, allowedRoleIds:['role-workforce-requester'],
+    permission:permissionFor('recruitment-case','create'), action:'create', allowAdminWithoutRole:false,
+  }).allowed;
+  if (!canRequestWorkforce) {
     return {source: 'assigned_branch', branchUnitIds: [], structureIds: [], seniorSupervisorPersonnelIds: [], callCenterSupervisorPersonnelIds: []};
   }
 

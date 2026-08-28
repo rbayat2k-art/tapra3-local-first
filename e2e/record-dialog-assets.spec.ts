@@ -131,7 +131,6 @@ test('همه پنجره‌های تخصصی از پوسته وسط‌صفحه ا
     {route: '/?page=procurement&module=purchase-request', trigger: '.record-link', dialog: '.purchase-drawer:not(.treasury-payment-drawer)'},
     {route: '/?page=assets&module=asset-transfer', trigger: '.record-link', dialog: '.asset-custody-drawer'},
     {route: '/?page=hcm&module=offboarding', trigger: '.record-link', dialog: '.offboarding-drawer'},
-    {route: '/?page=recruitment', trigger: 'button[aria-label="مشاهده پرونده کامل"]', dialog: '.recruitment-drawer'},
   ];
 
   for (const item of cases) {

@@ -1,4 +1,4 @@
-import {useMemo, useState, type ReactNode} from 'react';
+import {useMemo, useRef, useState, type ReactNode} from 'react';
 import {CheckCircle2, Download, Eye, FileText, Pencil, Printer, ReceiptText, RotateCcw, Trash2, UploadCloud, X} from 'lucide-react';
 import {can} from './authorization';
 import {ERP_MODULES, permissionFor, stateLabel, type ErpModuleDefinition} from './erpCatalog';
@@ -7,7 +7,7 @@ import type {FoundationState, OperationalRecord} from './model';
 import {formatPersianDate, formatPersianDateTime, PersianDateInput} from './PersianDate';
 import {PurchaseRequestDetails} from './PurchaseRequestUi';
 import {readPurchaseRequestPayload} from './purchaseRequest';
-import type {LocalFoundationService, TreasuryPaymentInput} from './service';
+import type {LocalFoundationService, TreasuryPaymentInput, TreasurySourceInvariant} from './service';
 import {SortHeader, useSortableRows, type SortColumn} from './Sorting';
 import {formatPortalAmount} from '../utils/operationalFormat';
 import {EmployeeAdvanceDetails} from './EmployeeAdvanceUi';
@@ -23,6 +23,14 @@ const newId = () => `receipt-${globalThis.crypto?.randomUUID?.() ?? Date.now()}`
 const rial = (value?: string) => `${BigInt(value || '0').toLocaleString('en-US')} ریال`;
 const fileSize = (size: number) => size >= 1024 * 1024 ? `${(size / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(size / 1024)).toLocaleString('en-US')} KB`;
 const fileToDataUrl = (file: File) => new Promise<string>((resolve, reject) => {const reader = new FileReader(); reader.onload = () => resolve(String(reader.result ?? '')); reader.onerror = () => reject(new Error('خواندن فایل رسید ناموفق بود.')); reader.readAsDataURL(file);});
+
+function storedTreasurySourceInvariant(record: OperationalRecord): TreasurySourceInvariant | undefined {
+  const value=record.payload.sourceInvariant;
+  if(!value||typeof value!=='object'||Array.isArray(value))return undefined;
+  const candidate=value as Record<string,unknown>;
+  if(typeof candidate.id!=='string'||(candidate.moduleId!=='employee-advance'&&candidate.moduleId!=='purchase-request')||typeof candidate.version!=='number'||typeof candidate.status!=='string'||candidate.treasuryRecordId!==record.id)return undefined;
+  return {id:candidate.id,moduleId:candidate.moduleId,version:candidate.version,status:candidate.status,treasuryRecordId:record.id};
+}
 
 export function isTreasuryRecordVisibleToUser(record: OperationalRecord, state: FoundationState): boolean {
   if (state.activeUser.isAdmin) return true;
@@ -86,6 +94,8 @@ export function TreasuryExecutionDrawer({state, record, module, service, execute
   const [confirmingRevert, setConfirmingRevert] = useState(false);
   const [revertReason, setRevertReason] = useState('');
   const [errors, setErrors] = useState<string[]>([]);
+  const paymentCommand=useRef<{id:string;fingerprint:string}|undefined>(undefined);const revisionCommand=useRef<{id:string;fingerprint:string}|undefined>(undefined);const revertCommand=useRef<{id:string;fingerprint:string}|undefined>(undefined);const paymentBusy=useRef(false);const revisionBusy=useRef(false);const revertBusy=useRef(false);
+  const sourceInvariant: TreasurySourceInvariant|undefined=source&&(source.moduleId==='employee-advance'||source.moduleId==='purchase-request')?{id:source.id,moduleId:source.moduleId,version:source.version,status:source.status,treasuryRecordId:record.id}:storedTreasurySourceInvariant(record);
   const canRecordPayment = ['queued', 'claimed'].includes(record.status) && record.assigneeUserId === state.activeUser.id && can(state.activeUser, permissionFor('treasury-execution', 'transition'));
   const canManageRecordedPayment = record.status === 'payment_recorded' && record.assigneeUserId === state.activeUser.id && can(state.activeUser, permissionFor('treasury-execution', 'edit'));
 
@@ -101,18 +111,18 @@ export function TreasuryExecutionDrawer({state, record, module, service, execute
   };
   const submitPayment = () => {
     const next = !paidAt ? ['تاریخ پرداخت الزامی است.'] : [];
-    setErrors(next); if (next.length) return;
-    void execute('treasury-payment', () => service.recordTreasuryPayment(record.id, {paidAt, paymentReference, note, receipt}, record.version), 'پرداخت ثبت و برای راستی‌آزمایی ارسال شد.').then((succeeded) => {if (succeeded) setErrors([]);});
+    setErrors(next); if (next.length||paymentBusy.current||!sourceInvariant) return;const input={paidAt,paymentReference,note,receipt};const fingerprint=JSON.stringify({recordId:record.id,version:record.version,input,sourceInvariant});if(!paymentCommand.current||paymentCommand.current.fingerprint!==fingerprint)paymentCommand.current={id:`ui-treasury-payment:${crypto.randomUUID()}`,fingerprint};paymentBusy.current=true;
+    void execute('treasury-payment', () => service.recordTreasuryPayment(record.id,input,record.version,paymentCommand.current!.id,sourceInvariant), 'پرداخت ثبت و برای راستی‌آزمایی ارسال شد.').then((succeeded) => {if (succeeded){paymentCommand.current=undefined;setErrors([]);}}).finally(()=>{paymentBusy.current=false;});
   };
   const savePaymentRevision = () => {
     const next = [...(!paidAt ? ['تاریخ پرداخت الزامی است.'] : []), ...(revisionReason.trim().length < 3 ? ['دلیل اصلاح اطلاعات پرداخت را وارد کنید.'] : [])];
-    setErrors(next); if (next.length) return;
-    void execute('treasury-payment-revision', () => service.reviseTreasuryPayment(record.id, {paidAt, paymentReference, note, receipt}, revisionReason, record.version), 'اصلاحات پرداخت با حفظ نسخه قبلی ثبت شد.').then((succeeded) => {if (succeeded) {setEditingPayment(false); setRevisionReason(''); setErrors([]);}});
+    setErrors(next); if (next.length||revisionBusy.current||!sourceInvariant) return;const input={paidAt,paymentReference,note,receipt};const fingerprint=JSON.stringify({recordId:record.id,version:record.version,input,revisionReason,sourceInvariant});if(!revisionCommand.current||revisionCommand.current.fingerprint!==fingerprint)revisionCommand.current={id:`ui-treasury-revision:${crypto.randomUUID()}`,fingerprint};revisionBusy.current=true;
+    void execute('treasury-payment-revision', () => service.reviseTreasuryPayment(record.id,input,revisionReason,record.version,revisionCommand.current!.id,sourceInvariant), 'اصلاحات پرداخت با حفظ نسخه قبلی ثبت شد.').then((succeeded) => {if (succeeded) {revisionCommand.current=undefined;setEditingPayment(false); setRevisionReason(''); setErrors([]);}}).finally(()=>{revisionBusy.current=false;});
   };
   const revertPayment = () => {
     const next = revertReason.trim().length < 3 ? ['دلیل بازگشت از پرداخت را وارد کنید.'] : [];
-    setErrors(next); if (next.length) return;
-    void execute('treasury-payment-revert', () => service.revertTreasuryPayment(record.id, revertReason, record.version), 'پرداخت با حفظ سابقه به وضعیت «در اختیار مجری پرداخت» بازگشت.').then((succeeded) => {if (succeeded) {setConfirmingRevert(false); setRevertReason(''); setErrors([]);}});
+    setErrors(next); if (next.length||revertBusy.current||!sourceInvariant) return;const fingerprint=JSON.stringify({recordId:record.id,version:record.version,revertReason,sourceInvariant});if(!revertCommand.current||revertCommand.current.fingerprint!==fingerprint)revertCommand.current={id:`ui-treasury-revert:${crypto.randomUUID()}`,fingerprint};revertBusy.current=true;
+    void execute('treasury-payment-revert', () => service.revertTreasuryPayment(record.id,revertReason,record.version,revertCommand.current!.id,sourceInvariant), 'پرداخت با حفظ سابقه به وضعیت «در اختیار مجری پرداخت» بازگشت.').then((succeeded) => {if (succeeded) {revertCommand.current=undefined;setConfirmingRevert(false); setRevertReason(''); setErrors([]);}}).finally(()=>{revertBusy.current=false;});
   };
   const cancelPaymentRevision = () => {
     setPaidAt(payment?.paidAt ?? today());
@@ -120,6 +130,7 @@ export function TreasuryExecutionDrawer({state, record, module, service, execute
     setNote(payment?.note ?? '');
     setReceipt(payment?.receipt);
     setRevisionReason('');
+    revisionCommand.current=undefined;
     setErrors([]);
     setEditingPayment(false);
   };

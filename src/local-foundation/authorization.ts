@@ -1,4 +1,4 @@
-import type {AuthorizationDecision, AuthorizationRequest, DemoResource, OperationalRecord, QaPersona} from './model';
+import type {AuthorizationDecision, AuthorizationRequest, DemoResource, OperationalRecord, QaPersona, SecurityRole} from './model';
 
 const deny = (code: string, reasonFa: string, progress: Partial<AuthorizationDecision> = {}): AuthorizationDecision => ({
   allowed: false,
@@ -69,16 +69,43 @@ export function authorize(request: AuthorizationRequest): AuthorizationDecision 
 }
 
 /**
+ * A persisted role id is only an assignment reference. Authority exists only
+ * while the referenced role definition is active and its current effective
+ * entitlement authorizes the exact resource/action.
+ */
+export function authorizeWithActiveRole(
+  request: AuthorizationRequest & {roles: SecurityRole[]; allowedRoleIds: readonly string[]; allowAdminWithoutRole?: boolean},
+): AuthorizationDecision {
+  const {roles, allowedRoleIds, allowAdminWithoutRole = true, ...authorizationRequest} = request;
+  if (!request.persona.isAdmin || !allowAdminWithoutRole) {
+    const allowed = new Set(allowedRoleIds);
+    const hasActiveRole = roles.some((role) => role.status === 'active'
+      && allowed.has(role.id)
+      && request.persona.roleIds.includes(role.id));
+    if (!hasActiveRole) {
+      return deny('role.inactive_or_missing', 'نقش تخصصی فعال برای این اقدام به کاربر تخصیص داده نشده است.');
+    }
+  }
+  return authorize(authorizationRequest);
+}
+
+/**
  * Builds the exact same authorization resource for list visibility and service
  * actions. An explicitly assigned SELF-scoped user owns the work item for
  * authorization purposes while the immutable creator remains available for
  * maker/checker enforcement.
  */
 export function operationalRecordResource(persona: QaPersona, record: OperationalRecord): DemoResource {
+  const payloadTeamId = typeof record.payload.teamId === 'string'
+    ? record.payload.teamId
+    : typeof record.payload.salesStructureId === 'string'
+      ? record.payload.salesStructureId
+      : undefined;
   return {
     id: record.id,
     companyId: record.companyId,
     unitId: record.unitId,
+    teamId: payloadTeamId,
     ownerId: record.assigneeUserId === persona.id ? persona.actorId : record.createdByActorId,
     createdBy: record.createdByActorId,
     state: record.status,
