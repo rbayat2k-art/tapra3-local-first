@@ -20,6 +20,8 @@ import {workflowWithActivePolicy} from './workflowPolicy';
 import {AssetCustodyDrawer, AssetCustodyEditor} from './AssetCustodyUi';
 import {OffboardingDrawer, StructuredPayloadDetails, StructuredRecordEditor, structuredOperationalModules} from './LifecycleOperationsUi';
 import {ContinuityReassignmentPanel} from './ContinuityReassignmentPanel';
+import {TreasuryMasterDataPage} from './treasury-master/TreasuryMasterDataPage';
+import {treasuryMasterRouteAllowed} from './treasury-master/policy';
 
 interface Props {
   state: FoundationState;
@@ -51,7 +53,7 @@ export function isWorkspaceRecordVisible(record: OperationalRecord, state: Found
 
 export function ErpWorkspacePage({state, moduleIds, service, execute, routeUrl = window.location.href, onRouteChange, onOpenModule, onNavigateModule, initialRecordId}: Props) {
   const modules = ERP_MODULES.filter((item) => moduleIds.includes(item.id)).map((item) => workflowWithActivePolicy(state, item));
-  const visible = modules.filter((item) => can(state.activeUser, permissionFor(item.id, 'view')));
+  const visible = modules.filter((item) => can(state.activeUser, permissionFor(item.id, 'view')) || (item.id==='bank-account'&&treasuryMasterRouteAllowed(state.activeUser)));
   const visibleModuleIds=visible.map((module)=>module.id);
   const requestedModule = workspaceParam(routeUrl, 'module');
   const initialRecord=state.operationalRecords.find((record)=>record.id===initialRecordId&&isWorkspaceRecordVisible(record,state,visibleModuleIds))??null;
@@ -79,6 +81,7 @@ export function ErpWorkspacePage({state, moduleIds, service, execute, routeUrl =
     else window.history.replaceState(window.history.state, '', nextUrl);
   }, [onRouteChange, requestedModule, resolvedActiveModuleId, routeUrl]);
   if (!active) return <EmptyAccess />;
+  if(active.id==='bank-account')return <TreasuryMasterDataPage state={state} service={service} execute={execute} onOpenOperations={()=>onOpenModule?.('treasury-execution')}/>;
   const closeEditor=()=>{saveCommand.current=undefined;setEditing(null);};
   const stableSaveCommand=(kind:string,input:unknown)=>{
     const fingerprint=JSON.stringify({kind,moduleId:active.id,recordId:editing==='new'?null:editing?.id??null,version:editing==='new'?null:editing?.version??null,input});

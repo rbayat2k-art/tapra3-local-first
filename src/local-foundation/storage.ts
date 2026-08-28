@@ -7,6 +7,7 @@ import {
   type FoundationStoreName,
   type SnapshotManifest,
 } from './model';
+import {LEGAL_ENTITY_PROFILE_STORES,LEGAL_INSPECTION_STORES,LEGAL_OPERATION_STORES} from './legal-inspection/model';
 
 export interface StorageTransaction {
   get<T>(store: FoundationStoreName, id: IDBValidKey): Promise<T | undefined>;
@@ -166,27 +167,35 @@ export class IndexedDBAdapter implements StorageAdapter {
   }
 
   async importSnapshot(snapshot: SnapshotManifest): Promise<void> {
-    validateSnapshotShape(snapshot);
-    const {checksum, ...payload} = snapshot;
-    const actualChecksum = await sha256(JSON.stringify(payload));
-    if (checksum !== actualChecksum) throw new Error('صحت فایل پشتیبان تأیید نشد؛ فایل ممکن است تغییر کرده باشد.');
-    const stores = Object.fromEntries(FOUNDATION_STORES.map((store) => [store, snapshot.stores[store] ?? []])) as Record<FoundationStoreName, unknown[]>;
-    const meta = (stores.meta as Array<{id?: unknown; value?: unknown}>).filter((item) => item.id !== 'schemaVersion');
-    stores.meta = [...meta, {id: 'schemaVersion', value: FOUNDATION_SCHEMA_VERSION}];
+    const stores=await snapshotStoresForImport(snapshot);
     await this.replaceAll(stores);
   }
+}
+
+export async function snapshotStoresForImport(snapshot:SnapshotManifest):Promise<Record<FoundationStoreName,unknown[]>>{
+  validateSnapshotShape(snapshot);
+  const {checksum,...payload}=snapshot;
+  const actualChecksum=await sha256(JSON.stringify(payload));
+  if(checksum!==actualChecksum)throw new Error('صحت فایل پشتیبان تأیید نشد؛ فایل ممکن است تغییر کرده باشد.');
+  const stores=Object.fromEntries(FOUNDATION_STORES.map((store)=>[store,snapshot.stores[store]??[]])) as Record<FoundationStoreName,unknown[]>;
+  const meta=(stores.meta as Array<{id?:unknown;value?:unknown}>).filter((item)=>item.id!=='schemaVersion');
+  stores.meta=[...meta,{id:'schemaVersion',value:FOUNDATION_SCHEMA_VERSION}];
+  return stores;
 }
 
 export function validateSnapshotShape(value: unknown): asserts value is SnapshotManifest {
   if (!value || typeof value !== 'object') throw new Error('ساختار فایل پشتیبان معتبر نیست.');
   const snapshot = value as Partial<SnapshotManifest>;
   if (snapshot.format !== 'tapra2-local-snapshot') throw new Error('این فایل، پشتیبان معتبر شاهراه نیست.');
-  if (![11, 12, 13, FOUNDATION_SCHEMA_VERSION].includes(snapshot.schemaVersion)) throw new Error('نسخه این پشتیبان با نسخه فعلی سازگار نیست.');
+  if (![11, 12, 13, 14, 15, 16, FOUNDATION_SCHEMA_VERSION].includes(snapshot.schemaVersion)) throw new Error('نسخه این پشتیبان با نسخه فعلی سازگار نیست.');
   if (!snapshot.stores || typeof snapshot.stores !== 'object') throw new Error('داده‌های فایل پشتیبان ناقص است.');
   for (const store of FOUNDATION_STORES) {
     if (snapshot.schemaVersion === 11 && (store === 'projects' || store === 'chat_preferences' || store === 'recruitment_candidate_files')) continue;
     if (snapshot.schemaVersion === 12 && store === 'recruitment_candidate_files') continue;
     if (snapshot.schemaVersion <= 13 && store === 'workflow_approval_rounds') continue;
+    if (snapshot.schemaVersion <= 14 && LEGAL_INSPECTION_STORES.includes(store as (typeof LEGAL_INSPECTION_STORES)[number])) continue;
+    if (snapshot.schemaVersion === 15 && LEGAL_OPERATION_STORES.includes(store as (typeof LEGAL_OPERATION_STORES)[number])) continue;
+    if ((snapshot.schemaVersion === 15 || snapshot.schemaVersion === 16) && LEGAL_ENTITY_PROFILE_STORES.includes(store as (typeof LEGAL_ENTITY_PROFILE_STORES)[number])) continue;
     if (!Array.isArray(snapshot.stores[store])) throw new Error(`بخش ${store} در فایل پشتیبان وجود ندارد.`);
   }
   if (typeof snapshot.checksum !== 'string') throw new Error('کد صحت فایل پشتیبان وجود ندارد.');

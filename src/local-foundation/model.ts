@@ -1,6 +1,9 @@
-export const FOUNDATION_SCHEMA_VERSION = 14;
+import {LEGAL_INSPECTION_STORES, type LegalInspectionProjection} from './legal-inspection/model';
+import type {TreasuryMasterProjection} from './treasury-master/model';
+
+export const FOUNDATION_SCHEMA_VERSION = 17;
 export const FOUNDATION_DB_NAME = 'tapra2_local';
-export const FOUNDATION_SEED_VERSION = 'complete-local-erp-v1.41-letter-policy-repair';
+export const FOUNDATION_SEED_VERSION = 'complete-local-erp-v1.46-legal-entity-profiles';
 
 export type ScopeType = 'COMPANY' | 'UNIT' | 'TEAM' | 'SELF' | 'RECORD';
 /** Permission codes are registry-driven and always use domain.resource.action. */
@@ -480,7 +483,7 @@ export interface IdempotencyRecord {
   createdAt: string;
 }
 
-export type AuditCategory = 'session' | 'authorization' | 'data' | 'system';
+export type AuditCategory = 'session' | 'authorization' | 'data' | 'system' | 'workflow';
 export type AuditOutcome = 'success' | 'denied' | 'info';
 
 export interface AuditEvent {
@@ -970,6 +973,7 @@ export const FOUNDATION_STORES = [
   'messages',
   'letters',
   'documents',
+  ...LEGAL_INSPECTION_STORES,
 ] as const;
 
 export type FoundationStoreName = typeof FOUNDATION_STORES[number];
@@ -1009,6 +1013,10 @@ export interface FoundationState {
   workflowVersions: WorkflowDefinition[];
   /** Added in schema 14; optional only for older in-memory test fixtures. */
   approvalRounds?: WorkflowApprovalRoundProjection[];
+  /** Added in schema 15. Raw identity and banking values are intentionally excluded. */
+  legalInspection?: LegalInspectionProjection;
+  /** Shared masked references used by Treasury and read-only Legal consumers. */
+  treasuryMaster?: TreasuryMasterProjection;
   operationalRecords: OperationalRecord[];
   operationalHistory: OperationalRecordHistory[];
   /** Added in schema 12; optional only for in-memory fixtures built against schema 11. */

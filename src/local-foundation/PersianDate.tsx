@@ -10,6 +10,13 @@ function parseDate(value: string): Date {
   return DATE_ONLY.test(value) ? new Date(`${value}T12:00:00`) : new Date(value);
 }
 
+function parseMinimumDate(value: string): Date {
+  // Calendar cells represent the beginning of a day. A noon-valued minimum
+  // made the same Tehran day look disabled even though its end-of-day deadline
+  // is still valid.
+  return DATE_ONLY.test(value) ? new Date(`${value}T00:00:00`) : new Date(value);
+}
+
 export function toIsoDate(value: Date): string {
   const year = value.getFullYear();
   const month = String(value.getMonth() + 1).padStart(2, '0');
@@ -86,12 +93,15 @@ export function PersianDateInput({value = '', onChange, disabled = false, requir
   return <DatePicker
     ref={pickerRef}
     value={pickerValue}
-    onChange={(selected: DateObject | null) => onChange(selected ? toIsoDate(selected.toDate()) : '')}
+    onChange={(selected: DateObject | null) => {
+      onChange(selected ? toIsoDate(selected.toDate()) : '');
+      if (selected) closeCalendar();
+    }}
     calendar={persian}
     locale={persianEn}
     format="YYYY/MM/DD"
     calendarPosition="bottom-right"
-    minDate={min && !Number.isNaN(parseDate(min).getTime()) ? parseDate(min) : undefined}
+    minDate={min && !Number.isNaN(parseMinimumDate(min).getTime()) ? parseMinimumDate(min) : undefined}
     containerClassName="persian-date-container"
     inputClass="persian-date-input"
     className="tapra-persian-calendar"

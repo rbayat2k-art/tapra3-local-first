@@ -9,12 +9,45 @@ import type {
   WorkContinuityDependencyPreview, WorkContinuityExecutionResult, WorkContinuityPlan, WorkContinuityResponsibilityKind,
 } from './model';
 import {FOUNDATION_SCHEMA_VERSION, FOUNDATION_SEED_VERSION, FOUNDATION_STORES} from './model';
+import {emptyLegalInspectionProjection, projectLegalInspection} from './legal-inspection/projection';
+import {LEGAL_PERMISSIONS, legalAllowed, legalBankAccountResource, legalCaseResource, legalEntityResource} from './legal-inspection/policy';
+import {emptyTreasuryMasterProjection} from './treasury-master/model';
+import {projectTreasuryMaster} from './treasury-master/projection';
+import {TREASURY_MASTER_PERMISSIONS,treasuryMasterAllowed,treasuryMasterResource} from './treasury-master/policy';
+import {normalizeLegalEntityProfileInput,type LegalEntityProfileInput} from './treasury-master/entityProfile';
+import {buildLegalQaScenarioBlueprints} from './legal-inspection/qaScenarios';
+import {assertLegalSyntheticPrototypeEnabled, assertSyntheticLabel, legalSyntheticPrototypeEnabled} from './legal-inspection/feature';
+import {
+  assertLegalStatusReasonCategory, contactMask, jalaliTrackingYear, legalAccountLast4, maskSensitiveValue, normalizeLegalCaseInput, validateLegalBankAccountInput,
+  type LegalBankAccountInput, type LegalBankInput, type LegalCaseInput, type LegalCaseUpdateInput, type LegalEntityInput,
+} from './legal-inspection/service';
+import {
+  LEGAL_INSPECTION_STORES,
+  type LegalStatusReasonCategory,
+  type BankInstitution,
+  type CompanyBankAccountDetail,
+  type LegalCase,
+  type LegalCaseCompanyLink,
+  type LegalCaseHistory,
+  type LegalCaseParty,
+  type LegalEntity,
+  type LegalEntityOfficer,
+  type LegalEntityProfileHistory,
+  type LegalPartyProfile,
+  type LegalCaseStatus,
+  type LegalRecordStatus,
+  type LegalProceeding,
+  type LegalNotice,
+  type LegalDeadline,
+  type LegalDocumentMetadata,
+} from './legal-inspection/model';
+import {normalizeLegalNoticeInput,normalizeLegalProceedingInput,type LegalNoticeInput,type LegalProceedingInput} from './legal-inspection/operations';
 import {
   COMPANY_ID, createSeedData, CUSTOMER_RECORDS, LOCAL_USERS, ORGANIZATIONAL_POSITIONS, ORGANIZATIONAL_UNITS,
   PERMISSION_CATALOG, PERSONNEL_RECORDS, resolveUserAccess, ROLE_TEMPLATES, SALES_STRUCTURES, SECURITY_ROLES,
   SEED_UNIT_MANAGER_ASSIGNMENTS, SEED_USER_ROLE_ADDITIONS,
 } from './seed';
-import {decryptSnapshot, encryptSnapshot, IndexedDBAdapter, type StorageAdapter, type StorageTransaction, validateSnapshotShape} from './storage';
+import {decryptSnapshot, encryptSnapshot, IndexedDBAdapter, snapshotStoresForImport, type StorageAdapter, type StorageTransaction, validateSnapshotShape} from './storage';
 import {ERP_MODULES, ERP_OPERATIONAL_STORES, permissionFor, stateLabel} from './erpCatalog';
 import {normalizeCardNumber, validateRequiredProfile, type ProfileCompletionInput} from './profileCompletion';
 import {salesStructureHasAssignmentHistory, salesStructureSupervisorName} from './salesStructureIdentity';
@@ -43,6 +76,7 @@ import {
   chatMessageIsDeleted, chatOwnerUserId, chatReadAt, isChatMember, validateChatAttachment,
   type ChatConversationInput, type ChatGroupUpdateInput, type ChatMessageInput,
 } from './communications';
+
 import {
   financialPaymentProgress, fiscalPeriodForPayment, nextFinancialDocumentNumber, paymentReferenceKey, requirePositiveRialAmount, validateFinancialPayment,
   type FinancialObligation, type FinancialPaymentInput,
@@ -68,6 +102,8 @@ import {
 import {authorizedAssetManagers, authorizeOffboardingClearance, authorizeOffboardingCompletion, canReceiveContinuityNeedsAction} from './offboardingAuthorization';
 import {resolveEffectiveUnitManager} from './workflowRouting';
 import {todayIsoDate} from './PersianDate';
+
+const LEGAL_QA_DATASET_ID='legal-qa-scenarios-v1';
 
 export type {RecruitmentCandidateProfileInput} from './recruitmentCandidateProfile';
 
@@ -1019,6 +1055,14 @@ export class LocalFoundationService {
       && ['organization.user.updated', 'organization.user.permission_overrides_changed', 'organization.user.activated', 'organization.user.deactivated'].includes(event.action),
     );
     for (const store of FOUNDATION_STORES) if (existing[store].length) seeded[store] = existing[store];
+    const legacyBankAccounts=seeded.company_bank_account_details as CompanyBankAccountDetail[];
+    const knownCompanies=[...new Set((seeded.users as LocalUser[]).map((user)=>user.companyId).filter(Boolean))];
+    seeded.bank_institutions=(seeded.bank_institutions as Array<BankInstitution & {tenantId?:string;companyId?:string}>).map((bank)=>{
+      if(bank.companyId&&bank.tenantId)return bank as BankInstitution;
+      const referencedCompanies=[...new Set(legacyBankAccounts.filter((account)=>account.bankInstitutionId===bank.id).map((account)=>account.companyId))];
+      const companyId=referencedCompanies.length===1?referencedCompanies[0]:referencedCompanies.length===0&&knownCompanies.length===1?knownCompanies[0]:`unresolved-company:${bank.id}`;
+      return {...bank,tenantId:companyId,companyId};
+    });
     const priorWorkflowDefinitions = existing.workflow_definitions as WorkflowDefinition[];
     seeded.workflow_definitions = [
       ...priorWorkflowDefinitions,
@@ -1602,6 +1646,29 @@ export class LocalFoundationService {
     };
     const visibleCustomerIds=new Set(projectedCustomers.map((customer)=>customer.id));
     const visibleCustomerImportIds=new Set(projectedCustomerImports.map((job)=>job.id));
+    const legalProjectionResource:DemoResource={id:'legal-projection',companyId:activeUser.companyId,createdBy:'system',state:'active'};
+    const mayLoadLegal=legalSyntheticPrototypeEnabled()&&!effectiveSession.actingAdminUserId&&(roles.some((role)=>role.status==='active'&&activeUser.roleIds.includes(role.id)&&role.permissions.some((permission)=>permission.startsWith('legal.')||permission.startsWith('treasury.reference.')||permission.startsWith('treasury.bank.')))||activeUser.permissionGrants?.some((permission)=>permission.startsWith('legal.')||permission.startsWith('treasury.reference.')||permission.startsWith('treasury.bank.'))===true);
+    const legalParts=mayLoadLegal?await this.storage.transaction([...LEGAL_INSPECTION_STORES],'readonly',async(tx)=>{
+      const entities=await tx.getAll<LegalEntity>('organization_legal_entities');
+      if(!entities.length)return [entities,[],[],[],[],[],[],[],[],[],[],[],[],[]];
+      const remainder=await Promise.all([tx.getAll<LegalEntityOfficer>('organization_legal_entity_officers'),tx.getAll<LegalEntityProfileHistory>('organization_legal_entity_history'),tx.getAll<BankInstitution>('bank_institutions'),tx.getAll<CompanyBankAccountDetail>('company_bank_account_details'),tx.getAll<LegalCase>('legal_cases'),tx.getAll<LegalCaseCompanyLink>('legal_case_company_links'),tx.getAll<LegalPartyProfile>('legal_party_profiles'),tx.getAll<LegalCaseParty>('legal_case_parties'),tx.getAll<LegalCaseHistory>('legal_case_history'),tx.getAll<LegalProceeding>('legal_proceedings'),tx.getAll<LegalNotice>('legal_notices'),tx.getAll<LegalDeadline>('legal_deadlines'),tx.getAll<LegalDocumentMetadata>('legal_document_metadata')]);
+      return [entities,...remainder];
+    }):[[],[],[],[],[],[],[],[],[],[],[],[],[],[]];
+    const [legalEntities,legalEntityOfficers,legalEntityHistory,bankInstitutions,bankAccounts,legalCases,legalCompanyLinks,legalParties,legalCaseParties,legalHistory,legalProceedings,legalNotices,legalDeadlines,legalDocuments]=legalParts as [LegalEntity[],LegalEntityOfficer[],LegalEntityProfileHistory[],BankInstitution[],CompanyBankAccountDetail[],LegalCase[],LegalCaseCompanyLink[],LegalPartyProfile[],LegalCaseParty[],LegalCaseHistory[],LegalProceeding[],LegalNotice[],LegalDeadline[],LegalDocumentMetadata[]];
+    const legalInspection=effectiveSession.actingAdminUserId||!legalSyntheticPrototypeEnabled()
+      ?emptyLegalInspectionProjection()
+      :projectLegalInspection({activeUser,users:resolvedUsers,roles,legalEntities,bankInstitutions,bankAccounts,cases:legalCases,companyLinks:legalCompanyLinks,parties:legalParties,caseParties:legalCaseParties,history:legalHistory,proceedings:legalProceedings,notices:legalNotices,deadlines:legalDeadlines,documents:legalDocuments,operationalRecords:allOperationalRecords});
+    const treasuryMaster=effectiveSession.actingAdminUserId||!legalSyntheticPrototypeEnabled()
+      ?emptyTreasuryMasterProjection()
+      :projectTreasuryMaster({activeUser,roles,legalEntities,legalEntityOfficers,legalEntityHistory,bankInstitutions,bankAccounts});
+    const visibleLegalCaseIds=new Set(legalInspection.cases.map((record)=>record.id));
+    const visibleLegalEntityIds=new Set(legalInspection.legalEntities.map((record)=>record.id));
+    const visibleLegalAccountIds=new Set(legalInspection.bankAccounts.map((record)=>record.id));
+    const visibleLegalBankIds=new Set(legalInspection.bankInstitutions.map((record)=>record.id));
+    const visibleLegalProceedingIds=new Set(legalInspection.proceedings.map((record)=>record.id));
+    const visibleLegalNoticeIds=new Set(legalInspection.notices.map((record)=>record.id));
+    const visibleLegalDeadlineIds=new Set(legalInspection.deadlines.map((record)=>record.id));
+    const visibleLegalDocumentIds=new Set(legalInspection.documents.map((record)=>record.id));
     const crmAuditVisible=(event:AuditEvent):boolean=>{
       const metadata=event.metadata??{};
       if(event.action==='crm.customer.imported'){
@@ -1621,9 +1688,20 @@ export class LocalFoundationService {
     };
     const projectedAudits = auditorView || !can(activeUser,'foundation.audit.view') ? [] : normalizedAudits.filter((event)=>{
       if(event.companyId!==activeUser.companyId)return false;
+      if(event.action.startsWith('legal.')&&effectiveSession.actingAdminUserId)return false;
       if(event.action.startsWith('organization.')&&!organizationAuditVisible(event))return false;
       if(event.action.startsWith('crm.customer.')&&!crmAuditVisible(event))return false;
       const metadata=event.metadata??{};const projectId=typeof metadata.projectId==='string'?metadata.projectId:undefined;const previousProjectId=typeof metadata.previousProjectId==='string'?metadata.previousProjectId:undefined;const taskId=typeof metadata.taskId==='string'?metadata.taskId:undefined;
+      if(event.action.startsWith('legal.case.')){const id=typeof metadata.legalCaseId==='string'?metadata.legalCaseId:undefined;if(!id||!visibleLegalCaseIds.has(id))return false;}
+      if(event.action.startsWith('legal.proceeding.')){const id=typeof metadata.proceedingId==='string'?metadata.proceedingId:undefined;if(!id||!visibleLegalProceedingIds.has(id))return false;}
+      if(event.action.startsWith('legal.notice.')){const id=typeof metadata.noticeId==='string'?metadata.noticeId:undefined;if(!id||!visibleLegalNoticeIds.has(id))return false;}
+      if(event.action.startsWith('legal.deadline.')){const id=typeof metadata.deadlineId==='string'?metadata.deadlineId:undefined;if(!id||!visibleLegalDeadlineIds.has(id))return false;}
+      if(event.action.startsWith('legal.document.')){const id=typeof metadata.documentId==='string'?metadata.documentId:undefined;if(!id||!visibleLegalDocumentIds.has(id))return false;}
+      if(event.action.startsWith('legal.entity.')){const id=typeof metadata.legalEntityId==='string'?metadata.legalEntityId:undefined;if(!id||!visibleLegalEntityIds.has(id))return false;}
+      if(event.action.startsWith('legal.bank_account.')){const id=typeof metadata.bankAccountId==='string'?metadata.bankAccountId:undefined;if(!id||!visibleLegalAccountIds.has(id))return false;}
+      if(event.action.startsWith('legal.bank.')){const id=typeof metadata.bankInstitutionId==='string'?metadata.bankInstitutionId:undefined;if(!id||!visibleLegalBankIds.has(id))return false;}
+      if(event.action.startsWith('legal.qa.')){if(!legalAllowed(activeUser,roles,LEGAL_PERMISSIONS.masterDataView,legalProjectionResource,'view')||!legalAllowed(activeUser,roles,LEGAL_PERMISSIONS.caseView,legalProjectionResource,'view'))return false;}
+      else if(event.action.startsWith('legal.')&&!event.action.startsWith('legal.case.')&&!event.action.startsWith('legal.proceeding.')&&!event.action.startsWith('legal.notice.')&&!event.action.startsWith('legal.deadline.')&&!event.action.startsWith('legal.document.')&&!event.action.startsWith('legal.entity.')&&!event.action.startsWith('legal.bank_account.')&&!event.action.startsWith('legal.bank.'))return false;
       const recordId=typeof metadata.recordId==='string'?metadata.recordId:undefined;
       const letterId=typeof metadata.letterId==='string'?metadata.letterId:undefined;
       const conversationId=typeof metadata.chatId==='string'?metadata.chatId:typeof metadata.conversationId==='string'?metadata.conversationId:undefined;
@@ -1643,8 +1721,366 @@ export class LocalFoundationService {
       if(event.action.startsWith('collaboration.record.')&&(!recordId||!visibleOperationalRecordIds.has(recordId)||(!projectId&&!previousProjectId)))return false;
       if(event.action.startsWith('hr.recruitment-case.')&&(!recordId||!visibleRecruitmentIds.has(recordId)))return false;
       return true;
+    }).map((event)=>{
+      if(!event.action.startsWith('legal.notice.'))return event;
+      const metadata={...(event.metadata??{})};
+      delete metadata.hasDeadline;
+      delete metadata.hasDocumentMetadata;
+      return {...event,metadata};
     });
-    return {users: projectedUsers, activeUser: projectedActiveUser, session: effectiveSession, units: tenantUnits.sort((a, b) => a.order - b.order || a.name.localeCompare(b.name, 'fa')), positions: tenantPositions.sort((a, b) => a.title.localeCompare(b.title, 'fa')), roles: roles.sort((a, b) => Number(b.protected) - Number(a.protected) || a.name.localeCompare(b.name, 'fa')), personnel: projectedPersonnel.sort((a, b) => a.personnelCode.localeCompare(b.personnelCode, 'fa')), personnelProfileChangeRequests: auditorView ? [] : projectedProfileChangeRequests.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), salesStructures: auditorView ? [] : tenantSalesStructures.sort((a, b) => salesStructureSupervisorName(a, personnel).localeCompare(salesStructureSupervisorName(b, personnel), 'fa')), customers: auditorView ? [] : projectedCustomers.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), customerImports: auditorView ? [] : projectedCustomerImports.sort((a, b) => b.createdAt.localeCompare(a.createdAt)), workflows, workflowVersions, approvalRounds:projectedApprovalRounds, operationalRecords, operationalHistory: projectedOperationalHistory, chatPreferences: projectedChatPreferences, notifications: notifications.filter((item) => item.userId === activeUser.id).sort((a, b) => b.createdAt.localeCompare(a.createdAt)), registrationRequests: auditorView ? [] : projectedRegistrations.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), qaDataset: qaManifests.find((item) => item.id === 'large-qa') ?? {id: 'large-qa', status: 'empty', roleCount: 0, userCount: 0, seed: 'tapra2-large-qa-v1'}, projections: projectedProjections, audits: projectedAudits.sort((a, b) => b.sequence - a.sequence), recordCount: auditorView ? projectedAudits.length : records.length + projectedPersonnel.length + projectedProfileChangeRequests.length + tenantSalesStructures.length + projectedCustomers.length + operationalRecords.length + projectedChatPreferences.length + notifications.length, lastPersistedAt: typeof persistedAt?.value === 'string' ? persistedAt.value : effectiveSession.switchedAt};
+    return {users: projectedUsers, activeUser: projectedActiveUser, session: effectiveSession, units: tenantUnits.sort((a, b) => a.order - b.order || a.name.localeCompare(b.name, 'fa')), positions: tenantPositions.sort((a, b) => a.title.localeCompare(b.title, 'fa')), roles: roles.sort((a, b) => Number(b.protected) - Number(a.protected) || a.name.localeCompare(b.name, 'fa')), personnel: projectedPersonnel.sort((a, b) => a.personnelCode.localeCompare(b.personnelCode, 'fa')), personnelProfileChangeRequests: auditorView ? [] : projectedProfileChangeRequests.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), salesStructures: auditorView ? [] : tenantSalesStructures.sort((a, b) => salesStructureSupervisorName(a, personnel).localeCompare(salesStructureSupervisorName(b, personnel), 'fa')), customers: auditorView ? [] : projectedCustomers.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), customerImports: auditorView ? [] : projectedCustomerImports.sort((a, b) => b.createdAt.localeCompare(a.createdAt)), workflows, workflowVersions, approvalRounds:projectedApprovalRounds, legalInspection, treasuryMaster, operationalRecords, operationalHistory: projectedOperationalHistory, chatPreferences: projectedChatPreferences, notifications: notifications.filter((item) => item.userId === activeUser.id).sort((a, b) => b.createdAt.localeCompare(a.createdAt)), registrationRequests: auditorView ? [] : projectedRegistrations.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), qaDataset: qaManifests.find((item) => item.id === 'large-qa') ?? {id: 'large-qa', status: 'empty', roleCount: 0, userCount: 0, seed: 'tapra2-large-qa-v1'}, projections: projectedProjections, audits: projectedAudits.sort((a, b) => b.sequence - a.sequence), recordCount: auditorView ? projectedAudits.length : records.length + projectedPersonnel.length + projectedProfileChangeRequests.length + tenantSalesStructures.length + projectedCustomers.length + legalInspection.cases.length + operationalRecords.length + projectedChatPreferences.length + notifications.length, lastPersistedAt: typeof persistedAt?.value === 'string' ? persistedAt.value : effectiveSession.switchedAt};
+  }
+
+  async createLegalEntity(input: LegalEntityInput, commandId?: string): Promise<FoundationState> {
+    assertLegalSyntheticPrototypeEnabled();
+    const normalized=normalizeLegalEntityProfileInput(input);
+    const state = await this.loadState();
+    const actor = state.activeUser;
+    const expectedSession = sessionIdentitySnapshot(state.session);
+    const effectiveCommandId = commandId ?? newId('command');
+    const requestHash = await commandRequestHash({kind:'legal.entity.create', input:normalized, actorUserId:actor.id, session:expectedSession});
+    const now = new Date().toISOString();
+    const entityId = newId('legal-entity');
+    const correlationId = newId('correlation');
+    await this.storage.transaction(['sessions','users','security_roles','organization_legal_entities','organization_legal_entity_officers','organization_legal_entity_history','audit_events','domain_events','idempotency_keys','meta'],'readwrite',async(tx)=>{
+      const currentActor = await this.requireActiveMutationIdentity(tx, expectedSession, actor);
+      const roles = await tx.getAll<SecurityRole>('security_roles');
+      const resource=treasuryMasterResource(entityId,currentActor.companyId);
+      if (!treasuryMasterAllowed(currentActor, roles, TREASURY_MASTER_PERMISSIONS.manage, resource, 'create')) throw new Error('مجوز فعال مدیریت اطلاعات پایه خزانه را ندارید.');
+      if (!treasuryMasterAllowed(currentActor, roles, TREASURY_MASTER_PERMISSIONS.officerManage, resource, 'create')) throw new Error('مجوز فعال مدیریت مدیران و اعضای شخصیت حقوقی را ندارید.');
+      const receipt = await tx.get<IdempotencyRecord>('idempotency_keys', effectiveCommandId);
+      if (receipt) { if (receipt.requestHash !== requestHash || !receipt.result) throw new Error('شناسه فرمان قبلاً با اطلاعات دیگری استفاده شده است.'); return; }
+      const entities = await tx.getAll<LegalEntity>('organization_legal_entities');
+      if (entities.some((item)=>item.companyId===currentActor.companyId&&item.displayName.toLocaleLowerCase('fa')===normalized.displayName.toLocaleLowerCase('fa'))) throw new Error('این شخصیت حقوقی قبلاً ثبت شده است.');
+      const entity: LegalEntity = {id:entityId, tenantId:currentActor.companyId, companyId:currentActor.companyId, displayName:normalized.displayName,legalForm:normalized.legalForm,nationalIdentifierMasked:maskSensitiveValue(normalized.nationalIdentifier),registrationNumberMasked:maskSensitiveValue(normalized.registrationNumber),registeredAt:normalized.registeredAt,registeredAddress:normalized.registeredAddress,postalCodeMasked:maskSensitiveValue(normalized.postalCode), status:'active', qaGenerated:true, version:1, createdAt:now, updatedAt:now};
+      const officerRows=(normalized.officers??[]).map((item)=>({id:newId('legal-entity-officer'),tenantId:currentActor.companyId,companyId:currentActor.companyId,legalEntityId:entityId,displayName:item.displayName,nationalIdMasked:maskSensitiveValue(item.nationalId),role:item.role,appointmentStartDate:item.appointmentStartDate,appointmentEndDate:item.appointmentEndDate,unlimitedTenure:item.unlimitedTenure,shareAmountRial:item.shareAmountRial,status:'active' as const,version:1,createdAt:now,updatedAt:now} satisfies LegalEntityOfficer));
+      const audits = await tx.getAll<AuditEvent>('audit_events');
+      await tx.put('organization_legal_entities', entity);
+      for(const officer of officerRows)await tx.put('organization_legal_entity_officers',officer);
+      const initialChangedFields=['displayName'];if(normalized.legalForm)initialChangedFields.push('legalForm');if(normalized.nationalIdentifier)initialChangedFields.push('nationalIdentifier');if(normalized.registrationNumber)initialChangedFields.push('registrationNumber');if(normalized.registeredAt)initialChangedFields.push('registeredAt');if(normalized.registeredAddress)initialChangedFields.push('registeredAddress');if(normalized.postalCode)initialChangedFields.push('postalCode');
+      await tx.put('organization_legal_entity_history',{id:newId('legal-entity-history'),tenantId:currentActor.companyId,companyId:currentActor.companyId,legalEntityId:entityId,sequence:1,action:'created',actorId:currentActor.actorId,effectiveUserId:currentActor.id,occurredAt:now,entityVersion:1,changedFields:initialChangedFields,officerAddedCount:officerRows.length,officerUpdatedCount:0,officerEndedCount:0,correlationId} satisfies LegalEntityProfileHistory);
+      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:currentActor.companyId,category:'data',action:'legal.entity.created',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:'پروفایل شخصیت حقوقی آزمایشی ثبت شد.',outcome:'success',correlationId,metadata:{legalEntityId:entityId,officerCount:officerRows.length,syntheticDataOnly:true}} satisfies AuditEvent);
+      await tx.put('domain_events',{id:newId('event'),aggregateType:'legal-entity',aggregateId:entityId,eventType:'LegalEntityCreated',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{version:1,officerCount:officerRows.length,syntheticDataOnly:true}} satisfies DomainEvent);
+      await tx.put('idempotency_keys',{id:effectiveCommandId,recordId:entityId,requestHash,result:{recordId:entityId,version:1,status:'active'},createdAt:now} satisfies IdempotencyRecord);
+      await tx.put('meta',{id:'lastPersistedAt',value:now});
+    });
+    return this.loadState();
+  }
+
+  async updateLegalEntity(id:string,expectedVersion:number,input:LegalEntityProfileInput,commandId?:string):Promise<FoundationState>{
+    assertLegalSyntheticPrototypeEnabled();
+    const normalized=normalizeLegalEntityProfileInput(input);const state=await this.loadState();const actor=state.activeUser;const expectedSession=sessionIdentitySnapshot(state.session);
+    const effectiveCommandId=commandId??newId('command');const requestHash=await commandRequestHash({kind:'legal.entity.update',id,expectedVersion,input:normalized,actorUserId:actor.id,session:expectedSession});const now=new Date().toISOString();const correlationId=newId('correlation');
+    await this.storage.transaction(['sessions','users','security_roles','organization_legal_entities','organization_legal_entity_officers','organization_legal_entity_history','audit_events','domain_events','idempotency_keys','meta'],'readwrite',async(tx)=>{
+      const currentActor=await this.requireActiveMutationIdentity(tx,expectedSession,actor);const roles=await tx.getAll<SecurityRole>('security_roles');const current=await tx.get<LegalEntity>('organization_legal_entities',id);
+      if(!current||current.companyId!==currentActor.companyId||current.tenantId!==currentActor.companyId)throw new Error('شخصیت حقوقی در محدوده مجاز یافت نشد.');
+      const resource=treasuryMasterResource(current.id,current.companyId,current.status);
+      if(!treasuryMasterAllowed(currentActor,roles,TREASURY_MASTER_PERMISSIONS.manage,resource,'edit')||!treasuryMasterAllowed(currentActor,roles,TREASURY_MASTER_PERMISSIONS.officerView,resource,'view')||!treasuryMasterAllowed(currentActor,roles,TREASURY_MASTER_PERMISSIONS.officerManage,resource,'edit'))throw new Error('مجوز فعال مشاهده و ویرایش پروفایل شخصیت حقوقی را ندارید.');
+      const receipt=await tx.get<IdempotencyRecord>('idempotency_keys',effectiveCommandId);if(receipt){if(receipt.requestHash!==requestHash||!receipt.result)throw new Error('شناسه فرمان قبلاً با اطلاعات دیگری استفاده شده است.');return;}
+      if(current.qaDatasetId)throw new Error('پروفایل دیتاست QA از مسیر دستی قابل ویرایش نیست.');if(current.version!==expectedVersion)throw new Error('اطلاعات شخصیت حقوقی هم‌زمان تغییر کرده است؛ صفحه را تازه کنید.');
+      const entities=await tx.getAll<LegalEntity>('organization_legal_entities');if(entities.some((item)=>item.id!==id&&item.companyId===currentActor.companyId&&item.displayName.toLocaleLowerCase('fa')===normalized.displayName.toLocaleLowerCase('fa')))throw new Error('این شخصیت حقوقی قبلاً ثبت شده است.');
+      const submittedIds=(normalized.officers??[]).map((item)=>item.id).filter((officerId):officerId is string=>Boolean(officerId));if(new Set(submittedIds).size!==submittedIds.length)throw new Error('شناسه یک مدیر یا عضو بیش از یک‌بار در فرم تکرار شده است.');
+      const existing=(await tx.getAll<LegalEntityOfficer>('organization_legal_entity_officers')).filter((item)=>item.legalEntityId===id&&item.companyId===current.companyId&&item.tenantId===current.tenantId);const byId=new Map(existing.map((item)=>[item.id,item]));const requestedIds=new Set<string>();let added=0,updatedCount=0,ended=0;
+      for(const item of normalized.officers??[]){
+        if(item.id){const row=byId.get(item.id);if(!row||row.status!=='active')throw new Error('یکی از اعضای انتخاب‌شده برای این شخصیت حقوقی معتبر نیست.');requestedIds.add(row.id);await tx.put('organization_legal_entity_officers',{...row,displayName:item.displayName,nationalIdMasked:item.nationalId?maskSensitiveValue(item.nationalId):row.nationalIdMasked,role:item.role,appointmentStartDate:item.appointmentStartDate,appointmentEndDate:item.appointmentEndDate,unlimitedTenure:item.unlimitedTenure,shareAmountRial:item.shareAmountRial,version:row.version+1,updatedAt:now} satisfies LegalEntityOfficer);updatedCount+=1;}
+        else{await tx.put('organization_legal_entity_officers',{id:newId('legal-entity-officer'),tenantId:current.tenantId,companyId:current.companyId,legalEntityId:id,displayName:item.displayName,nationalIdMasked:maskSensitiveValue(item.nationalId),role:item.role,appointmentStartDate:item.appointmentStartDate,appointmentEndDate:item.appointmentEndDate,unlimitedTenure:item.unlimitedTenure,shareAmountRial:item.shareAmountRial,status:'active',version:1,createdAt:now,updatedAt:now} satisfies LegalEntityOfficer);added+=1;}
+      }
+      for(const row of existing.filter((item)=>item.status==='active'&&!requestedIds.has(item.id))){await tx.put('organization_legal_entity_officers',{...row,status:'inactive',version:row.version+1,updatedAt:now} satisfies LegalEntityOfficer);ended+=1;}
+      const nextVersion=current.version+1;const updatedEntity:LegalEntity={...current,displayName:normalized.displayName,legalForm:normalized.legalForm,nationalIdentifierMasked:normalized.nationalIdentifier?maskSensitiveValue(normalized.nationalIdentifier):current.nationalIdentifierMasked,registrationNumberMasked:normalized.registrationNumber?maskSensitiveValue(normalized.registrationNumber):current.registrationNumberMasked,registeredAt:normalized.registeredAt,registeredAddress:normalized.registeredAddress,postalCodeMasked:normalized.postalCode?maskSensitiveValue(normalized.postalCode):current.postalCodeMasked,version:nextVersion,updatedAt:now};
+      const changedFields=['displayName','legalForm','registeredAt','registeredAddress'].filter((field)=>(current as unknown as Record<string,unknown>)[field]!==((updatedEntity as unknown as Record<string,unknown>)[field]));if(normalized.nationalIdentifier)changedFields.push('nationalIdentifier');if(normalized.registrationNumber)changedFields.push('registrationNumber');if(normalized.postalCode)changedFields.push('postalCode');
+      const histories=await tx.getAll<LegalEntityProfileHistory>('organization_legal_entity_history');const audits=await tx.getAll<AuditEvent>('audit_events');await tx.put('organization_legal_entities',updatedEntity);
+      await tx.put('organization_legal_entity_history',{id:newId('legal-entity-history'),tenantId:current.tenantId,companyId:current.companyId,legalEntityId:id,sequence:histories.filter((item)=>item.legalEntityId===id).length+1,action:'profile_updated',actorId:currentActor.actorId,effectiveUserId:currentActor.id,occurredAt:now,entityVersion:nextVersion,changedFields:[...new Set(changedFields)],officerAddedCount:added,officerUpdatedCount:updatedCount,officerEndedCount:ended,correlationId} satisfies LegalEntityProfileHistory);
+      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:current.companyId,category:'data',action:'legal.entity.profile_updated',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:'پروفایل شخصیت حقوقی آزمایشی به‌روزرسانی شد.',outcome:'success',correlationId,metadata:{legalEntityId:id,version:nextVersion,changedFieldCount:changedFields.length,officerAddedCount:added,officerUpdatedCount:updatedCount,officerEndedCount:ended,syntheticDataOnly:true}} satisfies AuditEvent);
+      await tx.put('domain_events',{id:newId('event'),aggregateType:'legal-entity',aggregateId:id,eventType:'LegalEntityProfileUpdated',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{version:nextVersion,changedFields:[...new Set(changedFields)],officerAddedCount:added,officerUpdatedCount:updatedCount,officerEndedCount:ended,syntheticDataOnly:true}} satisfies DomainEvent);
+      await tx.put('idempotency_keys',{id:effectiveCommandId,recordId:id,requestHash,result:{recordId:id,version:nextVersion,status:updatedEntity.status},createdAt:now} satisfies IdempotencyRecord);await tx.put('meta',{id:'lastPersistedAt',value:now});
+    });return this.loadState();
+  }
+
+  async createLegalBankInstitution(input: LegalBankInput, commandId?: string): Promise<FoundationState> {
+    assertLegalSyntheticPrototypeEnabled();
+    const state=await this.loadState(); const actor=state.activeUser; const expectedSession=sessionIdentitySnapshot(state.session);
+    const code=input.code.trim().toUpperCase(); const displayName=input.displayName.trim().replace(/\s+/g,' ');
+    assertSyntheticLabel(code,displayName);
+    if(!/^[A-Z0-9-]{2,20}$/.test(code)||displayName.length<2)throw new Error('کد یا نام بانک معتبر نیست.');
+    const effectiveCommandId=commandId??newId('command'); const requestHash=await commandRequestHash({kind:'legal.bank.create',code,displayName,actorUserId:actor.id,session:expectedSession});
+    const now=new Date().toISOString(); const bankId=newId('legal-bank'); const correlationId=newId('correlation');
+    await this.storage.transaction(['sessions','users','security_roles','bank_institutions','audit_events','domain_events','idempotency_keys','meta'],'readwrite',async(tx)=>{
+      const currentActor=await this.requireActiveMutationIdentity(tx,expectedSession,actor); const roles=await tx.getAll<SecurityRole>('security_roles');
+      const resource=treasuryMasterResource(bankId,currentActor.companyId);
+      if(!treasuryMasterAllowed(currentActor,roles,TREASURY_MASTER_PERMISSIONS.manage,resource,'create'))throw new Error('مجوز فعال مدیریت اطلاعات پایه خزانه را ندارید.');
+      const receipt=await tx.get<IdempotencyRecord>('idempotency_keys',effectiveCommandId);if(receipt){if(receipt.requestHash!==requestHash||!receipt.result)throw new Error('شناسه فرمان قبلاً با اطلاعات دیگری استفاده شده است.');return;}
+      const banks=await tx.getAll<BankInstitution>('bank_institutions');if(banks.some((item)=>item.companyId===currentActor.companyId&&item.code===code))throw new Error('این بانک قبلاً ثبت شده است.');
+      const bank:BankInstitution={id:bankId,tenantId:currentActor.companyId,companyId:currentActor.companyId,code,displayName,status:'active',qaGenerated:true,version:1,createdAt:now,updatedAt:now};const audits=await tx.getAll<AuditEvent>('audit_events');
+      await tx.put('bank_institutions',bank);await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:currentActor.companyId,category:'data',action:'legal.bank.created',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:`بانک آزمایشی «${displayName}» ثبت شد.`,outcome:'success',correlationId,metadata:{bankInstitutionId:bankId,code}} satisfies AuditEvent);
+      await tx.put('domain_events',{id:newId('event'),aggregateType:'legal-bank',aggregateId:bankId,eventType:'LegalBankCreated',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{code}} satisfies DomainEvent);
+      await tx.put('idempotency_keys',{id:effectiveCommandId,recordId:bankId,requestHash,result:{recordId:bankId,version:1,status:'active'},createdAt:now} satisfies IdempotencyRecord);await tx.put('meta',{id:'lastPersistedAt',value:now});
+    });return this.loadState();
+  }
+
+  async createLegalBankAccount(input: LegalBankAccountInput, commandId?: string): Promise<FoundationState> {
+    assertLegalSyntheticPrototypeEnabled();
+    const normalized=validateLegalBankAccountInput(input);const state=await this.loadState();const actor=state.activeUser;const expectedSession=sessionIdentitySnapshot(state.session);
+    const effectiveCommandId=commandId??newId('command');const requestHash=await commandRequestHash({kind:'legal.bank-account.create',input:normalized,actorUserId:actor.id,session:expectedSession});
+    const now=new Date().toISOString();const accountId=newId('legal-account');const correlationId=newId('correlation');
+    await this.storage.transaction(['sessions','users','security_roles','organization_legal_entities','bank_institutions','company_bank_account_details','audit_events','domain_events','idempotency_keys','meta'],'readwrite',async(tx)=>{
+      const currentActor=await this.requireActiveMutationIdentity(tx,expectedSession,actor);const roles=await tx.getAll<SecurityRole>('security_roles');
+      const [entity,bank]=await Promise.all([tx.get<LegalEntity>('organization_legal_entities',normalized.legalEntityId),tx.get<BankInstitution>('bank_institutions',normalized.bankInstitutionId)]);
+      if(!entity||entity.status!=='active'||entity.companyId!==currentActor.companyId||entity.tenantId!==currentActor.companyId)throw new Error('شخصیت حقوقی فعال در شرکت جاری پیدا نشد.');
+      if(!bank||bank.status!=='active'||bank.companyId!==currentActor.companyId||bank.tenantId!==currentActor.companyId)throw new Error('بانک فعال در شرکت جاری پیدا نشد.');
+      if(entity.qaDatasetId||bank.qaDatasetId)throw new Error('داده مرجع دیتاست ۵۰ سناریوی QA را نمی‌توان در رکورد دستی استفاده کرد.');
+      const candidateResource=treasuryMasterResource(accountId,entity.companyId);
+      if(!treasuryMasterAllowed(currentActor,roles,TREASURY_MASTER_PERMISSIONS.bankAccountManage,candidateResource,'create'))throw new Error('مجوز فعال ثبت حساب بانکی خزانه را ندارید.');
+      const receipt=await tx.get<IdempotencyRecord>('idempotency_keys',effectiveCommandId);if(receipt){if(receipt.requestHash!==requestHash||!receipt.result)throw new Error('شناسه فرمان قبلاً با اطلاعات دیگری استفاده شده است.');return;}
+      const accounts=await tx.getAll<CompanyBankAccountDetail>('company_bank_account_details');
+      if(accounts.some((item)=>item.companyId===entity.companyId&&((normalized.iban&&item.iban===normalized.iban)||(normalized.cardNumber&&item.cardNumber===normalized.cardNumber)||(normalized.accountNumber&&item.accountNumber===normalized.accountNumber))))throw new Error('این حساب قبلاً ثبت شده است.');
+      const last4=legalAccountLast4(normalized);const account:CompanyBankAccountDetail={id:accountId,tenantId:entity.tenantId,companyId:entity.companyId,legalEntityId:entity.id,bankInstitutionId:bank.id,accountNumber:normalized.accountNumber,iban:normalized.iban,cardNumber:normalized.cardNumber,maskedAccountNumber:maskSensitiveValue(normalized.accountNumber),maskedIban:maskSensitiveValue(normalized.iban),maskedCardNumber:maskSensitiveValue(normalized.cardNumber),last4,status:'active',qaGenerated:true,version:1,createdAt:now,updatedAt:now};const audits=await tx.getAll<AuditEvent>('audit_events');
+      await tx.put('company_bank_account_details',account);await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:entity.companyId,category:'data',action:'legal.bank_account.created',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:`یک حساب آزمایشی با چهار رقم پایانی ${last4} ثبت شد.`,outcome:'success',correlationId,metadata:{bankAccountId:accountId,legalEntityId:entity.id,bankInstitutionId:bank.id,last4}} satisfies AuditEvent);
+      await tx.put('domain_events',{id:newId('event'),aggregateType:'legal-bank-account',aggregateId:accountId,eventType:'LegalBankAccountCreated',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{legalEntityId:entity.id,bankInstitutionId:bank.id,last4}} satisfies DomainEvent);await tx.put('idempotency_keys',{id:effectiveCommandId,recordId:accountId,requestHash,result:{recordId:accountId,version:1,status:'active'},createdAt:now} satisfies IdempotencyRecord);await tx.put('meta',{id:'lastPersistedAt',value:now});
+    });return this.loadState();
+  }
+
+  async createLegalCase(input: LegalCaseInput, commandId?: string): Promise<FoundationState> {
+    assertLegalSyntheticPrototypeEnabled();
+    const normalized=normalizeLegalCaseInput(input);const state=await this.loadState();const actor=state.activeUser;const expectedSession=sessionIdentitySnapshot(state.session);
+    const effectiveCommandId=commandId??newId('command');const requestHash=await commandRequestHash({kind:'legal.case.create',input:normalized,actorUserId:actor.id,session:expectedSession});
+    const now=new Date().toISOString();const caseId=newId('legal-case');const correlationId=newId('correlation');
+    const stores:FoundationStoreName[]=['sessions','users','security_roles','organization_legal_entities','bank_institutions','company_bank_account_details','invoices','legal_cases','legal_case_company_links','legal_party_profiles','legal_case_parties','legal_case_history','audit_events','domain_events','idempotency_keys','meta'];
+    await this.storage.transaction(stores,'readwrite',async(tx)=>{
+      const currentActor=await this.requireActiveMutationIdentity(tx,expectedSession,actor);const roles=await tx.getAll<SecurityRole>('security_roles');
+      const entities=await tx.getAll<LegalEntity>('organization_legal_entities');const owner=entities.find((item)=>item.id===normalized.owningLegalEntityId);
+      if(!owner||owner.status!=='active'||owner.companyId!==currentActor.companyId||owner.tenantId!==currentActor.companyId)throw new Error('شخصیت حقوقی مالک پرونده معتبر نیست.');
+      if(owner.qaDatasetId)throw new Error('شخصیت حقوقی دیتاست ۵۰ سناریوی QA را نمی‌توان به پرونده دستی متصل کرد.');
+      const resource:DemoResource={id:caseId,companyId:owner.companyId,ownerId:currentActor.actorId,createdBy:currentActor.actorId,state:'draft',allowedRecordActorIds:[currentActor.actorId]};
+      if(!legalAllowed(currentActor,roles,LEGAL_PERMISSIONS.caseCreate,resource,'create'))throw new Error('مجوز فعال ثبت پرونده حقوقی را ندارید.');
+      if((normalized.parties?.length??0)>0&&!legalAllowed(currentActor,roles,LEGAL_PERMISSIONS.partyManage,resource,'create'))throw new Error('مجوز فعال ثبت اشخاص پرونده را ندارید.');
+      const receipt=await tx.get<IdempotencyRecord>('idempotency_keys',effectiveCommandId);if(receipt){if(receipt.requestHash!==requestHash||!receipt.result)throw new Error('شناسه فرمان قبلاً با اطلاعات دیگری استفاده شده است.');return;}
+      const linkedEntityIds=[...new Set([owner.id,...(normalized.companyLinks??[]).map((item)=>item.legalEntityId)])];
+      if(linkedEntityIds.some((id)=>!entities.some((item)=>item.id===id&&item.status==='active'&&!item.qaDatasetId&&item.companyId===owner.companyId&&item.tenantId===owner.tenantId)))throw new Error('یکی از شخصیت‌های حقوقی مرتبط خارج از شرکت، غیرفعال یا متعلق به دیتاست ۵۰ سناریو است.');
+      if(linkedEntityIds.some((id)=>{const entity=entities.find((item)=>item.id===id)!;return !treasuryMasterAllowed(currentActor,roles,TREASURY_MASTER_PERMISSIONS.view,legalEntityResource(entity),'view');}))throw new Error('مجوز فعال مشاهده و اتصال یکی از شخصیت‌های حقوقی خزانه را ندارید.');
+      const account=normalized.bankAccountId?await tx.get<CompanyBankAccountDetail>('company_bank_account_details',normalized.bankAccountId):undefined;
+      if(normalized.bankAccountId&&(!account||account.status!=='active'||account.companyId!==owner.companyId||account.tenantId!==owner.tenantId||account.legalEntityId!==owner.id))throw new Error('حساب انتخاب‌شده فعال یا متعلق به شخصیت حقوقی مالک نیست.');
+      const accountBank=account?await tx.get<BankInstitution>('bank_institutions',account.bankInstitutionId):undefined;
+      if(account&&(!accountBank||accountBank.status!=='active'||accountBank.companyId!==owner.companyId||accountBank.tenantId!==owner.tenantId))throw new Error('بانک مرجع حساب انتخاب‌شده فعال یا متعلق به شرکت جاری نیست.');
+      if(account?.qaDatasetId)throw new Error('حساب دیتاست ۵۰ سناریوی QA را نمی‌توان به پرونده دستی متصل کرد.');
+      if(account&&!treasuryMasterAllowed(currentActor,roles,TREASURY_MASTER_PERMISSIONS.bankMaskedView,legalBankAccountResource(account),'view'))throw new Error('مجوز فعال مشاهده و اتصال حساب ماسک‌شده خزانه را ندارید.');
+      const invoices=await tx.getAll<OperationalRecord>('invoices');
+      const invoiceIds=normalized.invoiceIds??[];
+      if(invoiceIds.length&&!legalAllowed(currentActor,roles,LEGAL_PERMISSIONS.invoiceSummaryView,resource,'view'))throw new Error('مجوز فعال مشاهده خلاصه فاکتور مرتبط را ندارید.');
+      if(invoiceIds.some((invoiceId)=>!invoices.some((invoice)=>invoice.id===invoiceId&&invoice.moduleId==='invoice'&&invoice.companyId===owner.companyId)))throw new Error('یکی از فاکتورهای مرتبط معتبر یا متعلق به شرکت جاری نیست.');
+      const year=jalaliTrackingYear(new Date(now));const counterId=`legal-case-sequence:${owner.companyId}:${year}`;const counter=await tx.get<MetaRecord>('meta',counterId);const sequence=typeof counter?.value==='number'?counter.value+1:1;const trackingCode=`LEGAL-${year}-${String(sequence).padStart(5,'0')}`;
+      const record:LegalCase={id:caseId,tenantId:owner.tenantId,companyId:owner.companyId,owningLegalEntityId:owner.id,trackingCode,title:normalized.title,caseType:normalized.caseType,status:'draft',primaryOwnerUserId:currentActor.id,bankAccountId:account?.id,bankSnapshotMasked:account?[account.maskedIban,account.maskedAccountNumber,account.maskedCardNumber].find(Boolean):undefined,invoiceIds,qaGenerated:true,realDataProhibited:true,version:1,createdByActorId:currentActor.actorId,createdByUserId:currentActor.id,createdAt:now,updatedAt:now};
+      await tx.put('legal_cases',record);
+      const companyLinks=[{legalEntityId:owner.id,role:'owner' as const},...(normalized.companyLinks??[])];const uniqueLinks=[...new Map(companyLinks.map((item)=>[`${item.legalEntityId}:${item.role}`,item])).values()];
+      for(const link of uniqueLinks)await tx.put('legal_case_company_links',{id:newId('legal-company-link'),caseId,legalEntityId:link.legalEntityId,role:link.role,status:'active',createdAt:now} satisfies LegalCaseCompanyLink);
+      const [existingParties,existingCasePartyLinks,existingLegalCases,currentUsers]=await Promise.all([
+        tx.getAll<LegalPartyProfile>('legal_party_profiles'),
+        tx.getAll<LegalCaseParty>('legal_case_parties'),
+        tx.getAll<LegalCase>('legal_cases'),
+        tx.getAll<LocalUser>('users'),
+      ]);
+      const resolvedPartyIds=new Set<string>();
+      const resolvedPartyIdentityKeys=new Set<string>();
+      for(const inputParty of normalized.parties??[]){
+        const selected=inputParty.existingPartyId?existingParties.find((item)=>item.id===inputParty.existingPartyId&&item.companyId===owner.companyId&&item.status==='active'):undefined;
+        if(inputParty.existingPartyId&&!selected)throw new Error('پروفایل شخص انتخاب‌شده فعال یا در دسترس نیست.');
+        if(selected?.qaDatasetId)throw new Error('شخص دیتاست ۵۰ سناریوی QA را نمی‌توان به پرونده دستی متصل کرد.');
+        if(selected){
+          const linkedCases=existingCasePartyLinks.filter((link)=>link.partyId===selected.id&&link.status==='active').map((link)=>existingLegalCases.find((item)=>item.id===link.caseId)).filter((item):item is LegalCase=>Boolean(item));
+          if(!linkedCases.length||!linkedCases.some((linkedCase)=>legalAllowed(currentActor,roles,LEGAL_PERMISSIONS.partyManage,legalCaseResource(linkedCase,currentUsers),'edit')))throw new Error('مجوز فعال استفاده از این پروفایل شخص در پرونده جدید را ندارید.');
+        }
+        const match=!selected&&existingParties.find((item)=>item.companyId===owner.companyId&&item.status==='active'&&existingCasePartyLinks.some((link)=>link.partyId===item.id&&link.status==='active'&&existingLegalCases.some((linkedCase)=>linkedCase.id===link.caseId&&legalAllowed(currentActor,roles,LEGAL_PERMISSIONS.partyManage,legalCaseResource(linkedCase,currentUsers),'edit')))&&((inputParty.nationalId&&item.nationalId===inputParty.nationalId)||(inputParty.mobile&&item.mobile===inputParty.mobile)));
+        if(match)throw new Error('یک پروفایل مشابه پیدا شد؛ برای جلوگیری از ادغام خودکار، همان شخص موجود را صریحاً انتخاب کنید.');
+        const partyId=selected?.id??newId('legal-party');
+        if(resolvedPartyIds.has(partyId))throw new Error('شاکی و پرداخت‌کننده باید دو شخص متمایز باشند.');
+        const identityKeys=[selected?.nationalId??inputParty.nationalId,selected?.mobile??inputParty.mobile].filter(Boolean).map((value)=>`identity:${value}`);
+        if(!identityKeys.length)identityKeys.push(`name:${(selected?.displayName??inputParty.displayName).toLocaleLowerCase('fa')}`);
+        if(identityKeys.some((key)=>resolvedPartyIdentityKeys.has(key)))throw new Error('شاکی و پرداخت‌کننده باید دو شخص متمایز باشند.');
+        resolvedPartyIds.add(partyId);
+        identityKeys.forEach((key)=>resolvedPartyIdentityKeys.add(key));
+        if(!selected){const party:LegalPartyProfile={id:partyId,tenantId:owner.tenantId,companyId:owner.companyId,kind:inputParty.kind,displayName:inputParty.displayName,contactMasked:contactMask(inputParty.mobile),nationalId:inputParty.nationalId,mobile:inputParty.mobile,address:inputParty.address,status:'active',version:1,createdAt:now,updatedAt:now};await tx.put('legal_party_profiles',party);}
+        await tx.put('legal_case_parties',{id:newId('legal-case-party'),caseId,partyId,role:inputParty.role,displaySnapshot:selected?.displayName??inputParty.displayName,identitySnapshotMasked:maskSensitiveValue(selected?.nationalId??inputParty.nationalId),status:'active',createdAt:now} satisfies LegalCaseParty);
+      }
+      const history:LegalCaseHistory={id:newId('legal-history'),caseId,sequence:1,action:'created',actorId:currentActor.actorId,effectiveUserId:currentActor.id,actorDisplayName:currentActor.name,toStatus:'draft',occurredAt:now,reasonCategory:'synthetic_prototype',correlationId};const audits=await tx.getAll<AuditEvent>('audit_events');
+      await tx.put('legal_case_history',history);await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:owner.companyId,category:'system',action:'legal.case.created',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:`پرونده آزمایشی ${trackingCode} ثبت شد.`,outcome:'success',correlationId,metadata:{legalCaseId:caseId,trackingCode,legalEntityId:owner.id,companyLinkCount:uniqueLinks.length,partyCount:normalized.parties?.length??0,bankLast4:account?.last4??null,syntheticDataOnly:true}} satisfies AuditEvent);
+      await tx.put('domain_events',{id:newId('event'),aggregateType:'legal-case',aggregateId:caseId,eventType:'LegalCaseCreated',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{trackingCode,legalEntityId:owner.id,syntheticDataOnly:true}} satisfies DomainEvent);await tx.put('idempotency_keys',{id:effectiveCommandId,recordId:caseId,requestHash,result:{recordId:caseId,version:1,status:'draft'},createdAt:now} satisfies IdempotencyRecord);await tx.put('meta',{id:counterId,value:sequence});await tx.put('meta',{id:'lastPersistedAt',value:now});
+    });return this.loadState();
+  }
+
+  async createLegalProceeding(input:LegalProceedingInput,expectedCaseVersion:number,commandId?:string):Promise<FoundationState>{
+    assertLegalSyntheticPrototypeEnabled();const normalized=normalizeLegalProceedingInput(input);assertSyntheticLabel(normalized.authorityName,normalized.externalReferenceMasked);const state=await this.loadState();const actor=state.activeUser;const expectedSession=sessionIdentitySnapshot(state.session);const effectiveCommandId=commandId??newId('command');const requestHash=await commandRequestHash({kind:'legal.proceeding.create',input:normalized,expectedCaseVersion,actorUserId:actor.id,session:expectedSession});const now=new Date().toISOString();const proceedingId=newId('legal-proceeding');const correlationId=newId('correlation');
+    await this.storage.transaction(['sessions','users','security_roles','legal_cases','legal_case_history','legal_proceedings','audit_events','domain_events','idempotency_keys','meta'],'readwrite',async(tx)=>{
+      const currentActor=await this.requireActiveMutationIdentity(tx,expectedSession,actor);const [roles,users,current]=await Promise.all([tx.getAll<SecurityRole>('security_roles'),tx.getAll<LocalUser>('users'),tx.get<LegalCase>('legal_cases',normalized.caseId)]);if(!current||current.companyId!==currentActor.companyId||current.tenantId!==currentActor.companyId)throw new Error('پرونده حقوقی در شرکت جاری پیدا نشد.');if(!legalAllowed(currentActor,roles,LEGAL_PERMISSIONS.proceedingManage,legalCaseResource(current,users),'create'))throw new Error('مجوز فعال ثبت روند دادرسی را ندارید.');const receipt=await tx.get<IdempotencyRecord>('idempotency_keys',effectiveCommandId);if(receipt){if(receipt.requestHash!==requestHash||!receipt.result)throw new Error('شناسه فرمان قبلاً با اطلاعات دیگری استفاده شده است.');return;}if(current.version!==expectedCaseVersion)throw new Error('پرونده هم‌زمان تغییر کرده است.');if(['closed','void'].includes(current.status))throw new Error('روی پرونده بسته یا باطل نمی‌توان روند دادرسی ساخت.');if(current.qaDatasetId)throw new Error('عملیات پرونده روی دیتاست ۵۰ سناریویی فقط از مسیر تولید همان دیتاست مجاز است.');const proceeding:LegalProceeding={id:proceedingId,tenantId:current.tenantId,companyId:current.companyId,caseId:current.id,authorityType:normalized.authorityType,authorityName:normalized.authorityName,stage:normalized.stage,externalReferenceMasked:normalized.externalReferenceMasked,primaryOwnerUserId:currentActor.id,status:'active',version:1,createdAt:now,updatedAt:now};const history=await tx.getAll<LegalCaseHistory>('legal_case_history');const audits=await tx.getAll<AuditEvent>('audit_events');await tx.put('legal_proceedings',proceeding);await tx.put('legal_case_history',{id:newId('legal-history'),caseId:current.id,sequence:nextSequence(history.filter((item)=>item.caseId===current.id)),action:'proceeding_created',actorId:currentActor.actorId,effectiveUserId:currentActor.id,actorDisplayName:currentActor.name,occurredAt:now,resourceKind:'proceeding',resourceId:proceeding.id,resourceVersion:1,toState:'active',summaryCode:'legal.proceeding.created',correlationId} satisfies LegalCaseHistory);await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:current.companyId,category:'workflow',action:'legal.proceeding.created',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:'یک روند دادرسی متادیتایی ثبت شد.',outcome:'success',correlationId,metadata:{legalCaseId:current.id,proceedingId:proceeding.id}} satisfies AuditEvent);await tx.put('domain_events',{id:newId('event'),aggregateType:'legal-proceeding',aggregateId:proceeding.id,eventType:'LegalProceedingCreated',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{legalCaseId:current.id,stage:proceeding.stage}} satisfies DomainEvent);await tx.put('idempotency_keys',{id:effectiveCommandId,recordId:proceeding.id,requestHash,result:{recordId:proceeding.id,version:1,status:'active'},createdAt:now} satisfies IdempotencyRecord);await tx.put('meta',{id:'lastPersistedAt',value:now});
+    });return this.loadState();
+  }
+
+  async recordLegalNotice(input:LegalNoticeInput,expectedProceedingVersion:number,commandId?:string):Promise<FoundationState>{
+    assertLegalSyntheticPrototypeEnabled();const normalized=normalizeLegalNoticeInput(input);if(normalized.document)assertSyntheticLabel(normalized.document.displayName);const state=await this.loadState();const actor=state.activeUser;const expectedSession=sessionIdentitySnapshot(state.session);const effectiveCommandId=commandId??newId('command');const requestHash=await commandRequestHash({kind:'legal.notice.record',input:normalized,expectedProceedingVersion,actorUserId:actor.id,session:expectedSession});const now=new Date().toISOString();const noticeId=newId('legal-notice');const correlationId=newId('correlation');
+    await this.storage.transaction(['sessions','users','security_roles','legal_cases','legal_proceedings','legal_notices','legal_deadlines','legal_document_metadata','legal_case_history','audit_events','domain_events','idempotency_keys','meta'],'readwrite',async(tx)=>{
+      const currentActor=await this.requireActiveMutationIdentity(tx,expectedSession,actor);const [roles,users,current,proceeding]=await Promise.all([tx.getAll<SecurityRole>('security_roles'),tx.getAll<LocalUser>('users'),tx.get<LegalCase>('legal_cases',normalized.caseId),tx.get<LegalProceeding>('legal_proceedings',normalized.proceedingId)]);if(!current||current.companyId!==currentActor.companyId||current.tenantId!==currentActor.companyId)throw new Error('پرونده حقوقی در شرکت جاری پیدا نشد.');const resource=legalCaseResource(current,users);if(!legalAllowed(currentActor,roles,LEGAL_PERMISSIONS.noticeManage,resource,'create'))throw new Error('مجوز فعال ثبت ابلاغ را ندارید.');if(normalized.deadline&&!legalAllowed(currentActor,roles,LEGAL_PERMISSIONS.deadlineManage,resource,'create'))throw new Error('مجوز فعال ثبت مهلت را ندارید.');if(normalized.document&&!legalAllowed(currentActor,roles,LEGAL_PERMISSIONS.documentMetadataManage,resource,'create'))throw new Error('مجوز فعال ثبت مشخصات سند را ندارید.');const receipt=await tx.get<IdempotencyRecord>('idempotency_keys',effectiveCommandId);if(receipt){if(receipt.requestHash!==requestHash||!receipt.result)throw new Error('شناسه فرمان قبلاً با اطلاعات دیگری استفاده شده است.');return;}if(!proceeding||proceeding.caseId!==current.id||proceeding.companyId!==current.companyId||proceeding.tenantId!==current.tenantId)throw new Error('روند دادرسی متعلق به این پرونده نیست.');if(proceeding.version!==expectedProceedingVersion)throw new Error('روند دادرسی هم‌زمان تغییر کرده است.');if(['closed','void'].includes(current.status)||['closed','void'].includes(proceeding.status))throw new Error('برای پرونده یا روند بسته نمی‌توان ابلاغ ثبت کرد.');if(current.qaDatasetId)throw new Error('عملیات پرونده روی دیتاست ۵۰ سناریویی فقط از مسیر تولید همان دیتاست مجاز است.');const assignee=normalized.deadline?users.find((item)=>item.id===normalized.deadline!.assigneeUserId):undefined;if(normalized.deadline&&(!assignee||assignee.status!=='active'||assignee.companyId!==current.companyId))throw new Error('مسئول فعال مهلت در شرکت جاری پیدا نشد.');const notice:LegalNotice={id:noticeId,tenantId:current.tenantId,companyId:current.companyId,caseId:current.id,proceedingId:proceeding.id,noticeType:normalized.noticeType,issuedAt:normalized.issuedAt,receivedAt:normalized.receivedAt,externalReferenceMasked:normalized.externalReferenceMasked,status:'received',version:1,createdAt:now,updatedAt:now};await tx.put('legal_notices',notice);if(normalized.deadline){const deadline:LegalDeadline={id:newId('legal-deadline'),tenantId:current.tenantId,companyId:current.companyId,caseId:current.id,sourceKind:'notice',sourceId:notice.id,dueAt:normalized.deadline.dueAt,timezone:'Asia/Tehran',priority:normalized.deadline.priority,assigneeUserId:normalized.deadline.assigneeUserId,status:'open',version:1,createdAt:now,updatedAt:now};await tx.put('legal_deadlines',deadline);}if(normalized.document){const document:LegalDocumentMetadata={id:newId('legal-document'),tenantId:current.tenantId,companyId:current.companyId,caseId:current.id,ownerKind:'notice',ownerId:notice.id,documentType:normalized.document.documentType,classification:normalized.document.classification,displayName:normalized.document.displayName,mimeType:normalized.document.mimeType,sizeBytes:normalized.document.sizeBytes,checksum:normalized.document.checksum,contentState:'metadata_only',status:'active',version:1,createdAt:now,updatedAt:now};await tx.put('legal_document_metadata',document);}const history=await tx.getAll<LegalCaseHistory>('legal_case_history');const audits=await tx.getAll<AuditEvent>('audit_events');await tx.put('legal_case_history',{id:newId('legal-history'),caseId:current.id,sequence:nextSequence(history.filter((item)=>item.caseId===current.id)),action:'notice_received',actorId:currentActor.actorId,effectiveUserId:currentActor.id,actorDisplayName:currentActor.name,occurredAt:now,resourceKind:'notice',resourceId:notice.id,resourceVersion:1,toState:'received',summaryCode:'legal.notice.received',correlationId} satisfies LegalCaseHistory);await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:current.companyId,category:'workflow',action:'legal.notice.received',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:'یک ابلاغ متادیتایی ثبت شد.',outcome:'success',correlationId,metadata:{legalCaseId:current.id,proceedingId:proceeding.id,noticeId:notice.id,hasDeadline:Boolean(normalized.deadline),hasDocumentMetadata:Boolean(normalized.document)}} satisfies AuditEvent);await tx.put('domain_events',{id:newId('event'),aggregateType:'legal-notice',aggregateId:notice.id,eventType:'LegalNoticeReceived',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{legalCaseId:current.id,proceedingId:proceeding.id,hasDeadline:Boolean(normalized.deadline)}} satisfies DomainEvent);await tx.put('idempotency_keys',{id:effectiveCommandId,recordId:notice.id,requestHash,result:{recordId:notice.id,version:1,status:'received'},createdAt:now} satisfies IdempotencyRecord);await tx.put('meta',{id:'lastPersistedAt',value:now});
+    });return this.loadState();
+  }
+
+  async closeLegalProceeding(id:string,expectedVersion:number,commandId?:string):Promise<FoundationState>{
+    assertLegalSyntheticPrototypeEnabled();const state=await this.loadState();const actor=state.activeUser;const expectedSession=sessionIdentitySnapshot(state.session);const effectiveCommandId=commandId??newId('command');const requestHash=await commandRequestHash({kind:'legal.proceeding.close',id,expectedVersion,actorUserId:actor.id,session:expectedSession});const now=new Date().toISOString();const correlationId=newId('correlation');
+    await this.storage.transaction(['sessions','users','security_roles','legal_cases','legal_proceedings','legal_notices','legal_deadlines','legal_case_history','audit_events','domain_events','idempotency_keys','meta'],'readwrite',async(tx)=>{const currentActor=await this.requireActiveMutationIdentity(tx,expectedSession,actor);const [roles,users,current]=await Promise.all([tx.getAll<SecurityRole>('security_roles'),tx.getAll<LocalUser>('users'),tx.get<LegalProceeding>('legal_proceedings',id)]);if(!current)throw new Error('روند دادرسی پیدا نشد.');const parent=await tx.get<LegalCase>('legal_cases',current.caseId);if(!parent||parent.companyId!==currentActor.companyId||parent.tenantId!==currentActor.companyId||current.companyId!==parent.companyId||current.tenantId!==parent.tenantId)throw new Error('پرونده حقوقی در شرکت جاری پیدا نشد.');if(!legalAllowed(currentActor,roles,LEGAL_PERMISSIONS.proceedingManage,legalCaseResource(parent,users),'edit'))throw new Error('مجوز فعال بستن روند دادرسی را ندارید.');const receipt=await tx.get<IdempotencyRecord>('idempotency_keys',effectiveCommandId);if(receipt){if(receipt.requestHash!==requestHash||!receipt.result)throw new Error('شناسه فرمان قبلاً با اطلاعات دیگری استفاده شده است.');return;}if(['closed','void'].includes(parent.status))throw new Error('عملیات پرونده بسته یا باطل قابل تغییر نیست.');if(current.version!==expectedVersion)throw new Error('روند دادرسی هم‌زمان تغییر کرده است.');if(!['active','on_hold'].includes(current.status))throw new Error('فقط روند فعال یا متوقف قابل بستن است.');const [notices,deadlines]=await Promise.all([tx.getAll<LegalNotice>('legal_notices'),tx.getAll<LegalDeadline>('legal_deadlines')]);const belongsToParent=(item:{caseId:string;companyId:string;tenantId:string})=>item.caseId===parent.id&&item.companyId===parent.companyId&&item.tenantId===parent.tenantId;if(notices.some((item)=>belongsToParent(item)&&item.proceedingId===current.id&&item.status==='received')||deadlines.some((item)=>belongsToParent(item)&&item.status==='open'&&((item.sourceKind==='proceeding'&&item.sourceId===current.id)||(item.sourceKind==='notice'&&notices.some((notice)=>belongsToParent(notice)&&notice.id===item.sourceId&&notice.proceedingId===current.id)))))throw new Error('تا تعیین تکلیف ابلاغ یا مهلت باز نمی‌توان روند را بست.');const updated:LegalProceeding={...current,status:'closed',version:current.version+1,updatedAt:now};await tx.put('legal_proceedings',updated);const history=await tx.getAll<LegalCaseHistory>('legal_case_history');const audits=await tx.getAll<AuditEvent>('audit_events');await tx.put('legal_case_history',{id:newId('legal-history'),caseId:parent.id,sequence:nextSequence(history.filter((item)=>item.caseId===parent.id)),action:'proceeding_closed',actorId:currentActor.actorId,effectiveUserId:currentActor.id,actorDisplayName:currentActor.name,occurredAt:now,resourceKind:'proceeding',resourceId:id,resourceVersion:updated.version,fromState:current.status,toState:'closed',summaryCode:'legal.proceeding.closed',correlationId} satisfies LegalCaseHistory);await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:parent.companyId,category:'workflow',action:'legal.proceeding.closed',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:'روند دادرسی بسته شد.',outcome:'success',correlationId,metadata:{legalCaseId:parent.id,proceedingId:id}} satisfies AuditEvent);await tx.put('domain_events',{id:newId('event'),aggregateType:'legal-proceeding',aggregateId:id,eventType:'LegalProceedingClosed',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{legalCaseId:parent.id,version:updated.version}} satisfies DomainEvent);await tx.put('idempotency_keys',{id:effectiveCommandId,recordId:id,requestHash,result:{recordId:id,version:updated.version,status:'closed'},createdAt:now} satisfies IdempotencyRecord);await tx.put('meta',{id:'lastPersistedAt',value:now});});return this.loadState();
+  }
+
+  async acknowledgeLegalNotice(id:string,expectedVersion:number,commandId?:string):Promise<FoundationState>{return this.transitionLegalOperation('notice',id,expectedVersion,'acknowledged',commandId);}
+  async completeLegalDeadline(id:string,expectedVersion:number,commandId?:string):Promise<FoundationState>{return this.transitionLegalOperation('deadline',id,expectedVersion,'completed',commandId);}
+
+  private async transitionLegalOperation(kind:'notice'|'deadline',id:string,expectedVersion:number,next:'acknowledged'|'completed',commandId?:string):Promise<FoundationState>{
+    assertLegalSyntheticPrototypeEnabled();const state=await this.loadState();const actor=state.activeUser;const expectedSession=sessionIdentitySnapshot(state.session);const effectiveCommandId=commandId??newId('command');const requestHash=await commandRequestHash({kind:`legal.${kind}.transition`,id,expectedVersion,next,actorUserId:actor.id,session:expectedSession});const now=new Date().toISOString();const correlationId=newId('correlation');const store=kind==='notice'?'legal_notices':'legal_deadlines';
+    await this.storage.transaction([...new Set<FoundationStoreName>(['sessions','users','security_roles','legal_cases','legal_proceedings','legal_notices',store,'legal_case_history','audit_events','domain_events','idempotency_keys','meta'])],'readwrite',async(tx)=>{const currentActor=await this.requireActiveMutationIdentity(tx,expectedSession,actor);const [roles,users,current]=await Promise.all([tx.getAll<SecurityRole>('security_roles'),tx.getAll<LocalUser>('users'),kind==='notice'?tx.get<LegalNotice>(store,id):tx.get<LegalDeadline>(store,id)]);if(!current)throw new Error(kind==='notice'?'ابلاغ پیدا نشد.':'مهلت پیدا نشد.');const parent=await tx.get<LegalCase>('legal_cases',current.caseId);if(!parent||parent.companyId!==currentActor.companyId||parent.tenantId!==currentActor.companyId||current.companyId!==parent.companyId||current.tenantId!==parent.tenantId)throw new Error('پرونده حقوقی در شرکت جاری پیدا نشد.');const permission=kind==='notice'?LEGAL_PERMISSIONS.noticeManage:LEGAL_PERMISSIONS.deadlineManage;if(!legalAllowed(currentActor,roles,permission,legalCaseResource(parent,users),'edit'))throw new Error(kind==='notice'?'مجوز فعال تأیید ابلاغ را ندارید.':'مجوز فعال تکمیل مهلت را ندارید.');const receipt=await tx.get<IdempotencyRecord>('idempotency_keys',effectiveCommandId);if(receipt){if(receipt.requestHash!==requestHash||!receipt.result)throw new Error('شناسه فرمان قبلاً با اطلاعات دیگری استفاده شده است.');return;}if(['closed','void'].includes(parent.status))throw new Error('عملیات پرونده بسته یا باطل قابل تغییر نیست.');const belongsToParent=(item:{caseId:string;companyId:string;tenantId:string})=>item.caseId===parent.id&&item.companyId===parent.companyId&&item.tenantId===parent.tenantId;let sourceValid:boolean;if(kind==='notice'){const sourceProceeding=await tx.get<LegalProceeding>('legal_proceedings',(current as LegalNotice).proceedingId);sourceValid=Boolean(sourceProceeding&&belongsToParent(sourceProceeding));}else{const deadline=current as LegalDeadline;if(deadline.sourceKind==='proceeding'){const sourceProceeding=await tx.get<LegalProceeding>('legal_proceedings',deadline.sourceId);sourceValid=Boolean(sourceProceeding&&belongsToParent(sourceProceeding));}else{const sourceNotice=await tx.get<LegalNotice>('legal_notices',deadline.sourceId);const sourceProceeding=sourceNotice?await tx.get<LegalProceeding>('legal_proceedings',sourceNotice.proceedingId):undefined;sourceValid=Boolean(sourceNotice&&belongsToParent(sourceNotice)&&sourceProceeding&&belongsToParent(sourceProceeding));}}if(!sourceValid)throw new Error('رابطه رکورد عملیاتی با پرونده معتبر نیست.');if(current.version!==expectedVersion)throw new Error('رکورد هم‌زمان تغییر کرده است.');if(kind==='notice'&&current.status!=='received')throw new Error('فقط ابلاغ دریافت‌شده قابل تأیید است.');if(kind==='deadline'&&current.status!=='open')throw new Error('فقط مهلت باز قابل تکمیل است.');const updated={...current,status:next,completedAt:kind==='deadline'?now:undefined,version:current.version+1,updatedAt:now};await tx.put(store,updated);const history=await tx.getAll<LegalCaseHistory>('legal_case_history');const audits=await tx.getAll<AuditEvent>('audit_events');await tx.put('legal_case_history',{id:newId('legal-history'),caseId:parent.id,sequence:nextSequence(history.filter((item)=>item.caseId===parent.id)),action:kind==='notice'?'notice_acknowledged':'deadline_completed',actorId:currentActor.actorId,effectiveUserId:currentActor.id,actorDisplayName:currentActor.name,occurredAt:now,resourceKind:kind,resourceId:id,resourceVersion:updated.version,fromState:current.status,toState:next,summaryCode:`legal.${kind}.${next}`,correlationId} satisfies LegalCaseHistory);await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:parent.companyId,category:'workflow',action:`legal.${kind}.${next}`,actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:kind==='notice'?'دریافت ابلاغ تأیید شد.':'مهلت اقدام تکمیل شد.',outcome:'success',correlationId,metadata:{legalCaseId:parent.id,[kind==='notice'?'noticeId':'deadlineId']:id}} satisfies AuditEvent);await tx.put('domain_events',{id:newId('event'),aggregateType:`legal-${kind}`,aggregateId:id,eventType:kind==='notice'?'LegalNoticeAcknowledged':'LegalDeadlineCompleted',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{legalCaseId:parent.id,version:updated.version}} satisfies DomainEvent);await tx.put('idempotency_keys',{id:effectiveCommandId,recordId:id,requestHash,result:{recordId:id,version:updated.version,status:next},createdAt:now} satisfies IdempotencyRecord);await tx.put('meta',{id:'lastPersistedAt',value:now});});return this.loadState();
+  }
+
+  async updateLegalCase(id:string,expectedVersion:number,input:LegalCaseUpdateInput,commandId?:string):Promise<FoundationState>{
+    assertLegalSyntheticPrototypeEnabled();
+    const title=input.title.trim().replace(/\s+/g,' ');const caseType=input.caseType.trim().replace(/\s+/g,' ');
+    if(title.length<3||title.length>160||caseType.length<2||caseType.length>80)throw new Error('عنوان یا نوع پرونده معتبر نیست.');
+    assertSyntheticLabel(title,caseType);
+    const companyLinks=[...new Map((input.companyLinks??[]).map((item)=>[`${item.legalEntityId.trim()}:${item.role}`,{legalEntityId:item.legalEntityId.trim(),role:item.role}])).values()];
+    const normalized={title,caseType,companyLinks,bankAccountId:input.bankAccountId?.trim()||undefined,invoiceIds:[...new Set((input.invoiceIds??[]).map((value)=>value.trim()).filter(Boolean))]};
+    const state=await this.loadState();const actor=state.activeUser;const expectedSession=sessionIdentitySnapshot(state.session);const effectiveCommandId=commandId??newId('command');
+    const requestHash=await commandRequestHash({kind:'legal.case.update',id,expectedVersion,input:normalized,actorUserId:actor.id,session:expectedSession});const now=new Date().toISOString();const correlationId=newId('correlation');
+    const stores:FoundationStoreName[]=['sessions','users','security_roles','organization_legal_entities','bank_institutions','company_bank_account_details','invoices','legal_cases','legal_case_company_links','legal_case_history','audit_events','domain_events','idempotency_keys','meta'];
+    await this.storage.transaction(stores,'readwrite',async(tx)=>{
+      const currentActor=await this.requireActiveMutationIdentity(tx,expectedSession,actor);const [roles,users,entities,current,links,histories,audits]=await Promise.all([tx.getAll<SecurityRole>('security_roles'),tx.getAll<LocalUser>('users'),tx.getAll<LegalEntity>('organization_legal_entities'),tx.get<LegalCase>('legal_cases',id),tx.getAll<LegalCaseCompanyLink>('legal_case_company_links'),tx.getAll<LegalCaseHistory>('legal_case_history'),tx.getAll<AuditEvent>('audit_events')]);
+      if(!current||current.companyId!==currentActor.companyId)throw new Error('پرونده دیگر در دسترس نیست.');
+      if(!legalAllowed(currentActor,roles,LEGAL_PERMISSIONS.caseEdit,legalCaseResource(current,users),'edit'))throw new Error('مجوز فعال ویرایش این پرونده را ندارید.');
+      const receipt=await tx.get<IdempotencyRecord>('idempotency_keys',effectiveCommandId);if(receipt){if(receipt.requestHash!==requestHash||!receipt.result)throw new Error('شناسه فرمان قبلاً با اطلاعات دیگری استفاده شده است.');return;}
+      if(current.qaDatasetId)throw new Error('پرونده دیتاست ۵۰ سناریوی QA فقط از مسیر تولید و بازنشانی همان دیتاست مدیریت می‌شود.');
+      if(['closed','void'].includes(current.status))throw new Error('پرونده نهایی‌شده قابل ویرایش نیست.');
+      if(current.version!==expectedVersion)throw new Error('پرونده هم‌زمان تغییر کرده است؛ صفحه را تازه کنید.');
+      const desiredEntityIds=[...new Set([current.owningLegalEntityId,...companyLinks.map((item)=>item.legalEntityId)])];
+      if(desiredEntityIds.some((entityId)=>!entities.some((entity)=>entity.id===entityId&&entity.status==='active'&&!entity.qaDatasetId&&entity.companyId===current.companyId&&entity.tenantId===current.tenantId)))throw new Error('یکی از شخصیت‌های حقوقی مرتبط غیرفعال، متعلق به دیتاست ۵۰ سناریو یا خارج از workspace امنیتی پرونده است.');
+      if(desiredEntityIds.some((entityId)=>{const entity=entities.find((item)=>item.id===entityId)!;return !treasuryMasterAllowed(currentActor,roles,TREASURY_MASTER_PERMISSIONS.view,legalEntityResource(entity),'view');}))throw new Error('مجوز فعال مشاهده و اتصال یکی از شخصیت‌های حقوقی خزانه را ندارید.');
+      const account=normalized.bankAccountId?await tx.get<CompanyBankAccountDetail>('company_bank_account_details',normalized.bankAccountId):undefined;
+      if(normalized.bankAccountId&&(!account||account.status!=='active'||account.companyId!==current.companyId||account.tenantId!==current.tenantId||account.legalEntityId!==current.owningLegalEntityId))throw new Error('حساب انتخاب‌شده فعال یا متعلق به شخصیت مالک پرونده نیست.');
+      const accountBank=account?await tx.get<BankInstitution>('bank_institutions',account.bankInstitutionId):undefined;
+      if(account&&(!accountBank||accountBank.status!=='active'||accountBank.companyId!==current.companyId||accountBank.tenantId!==current.tenantId))throw new Error('بانک مرجع حساب انتخاب‌شده فعال یا متعلق به شرکت پرونده نیست.');
+      if(account?.qaDatasetId)throw new Error('حساب دیتاست ۵۰ سناریوی QA را نمی‌توان به پرونده دستی متصل کرد.');
+      if(account&&!treasuryMasterAllowed(currentActor,roles,TREASURY_MASTER_PERMISSIONS.bankMaskedView,legalBankAccountResource(account),'view'))throw new Error('مجوز فعال مشاهده و اتصال حساب ماسک‌شده خزانه را ندارید.');
+      const invoices=await tx.getAll<OperationalRecord>('invoices');
+      if(normalized.invoiceIds.length&&!legalAllowed(currentActor,roles,LEGAL_PERMISSIONS.invoiceSummaryView,legalCaseResource(current,users),'view'))throw new Error('مجوز فعال مشاهده خلاصه فاکتور مرتبط را ندارید.');
+      if(normalized.invoiceIds.some((invoiceId)=>!invoices.some((invoice)=>invoice.id===invoiceId&&invoice.moduleId==='invoice'&&invoice.companyId===current.companyId)))throw new Error('یکی از فاکتورهای مرتبط معتبر یا متعلق به شرکت جاری نیست.');
+      const desired=[{legalEntityId:current.owningLegalEntityId,role:'owner' as const},...companyLinks.filter((link)=>link.legalEntityId!==current.owningLegalEntityId)];const keys=new Set(desired.map((item)=>`${item.legalEntityId}:${item.role}`));
+      for(const link of links.filter((item)=>item.caseId===current.id&&item.status==='active'&&!keys.has(`${item.legalEntityId}:${item.role}`)))await tx.put('legal_case_company_links',{...link,status:'void'});
+      for(const link of desired)if(!links.some((item)=>item.caseId===current.id&&item.status==='active'&&item.legalEntityId===link.legalEntityId&&item.role===link.role))await tx.put('legal_case_company_links',{id:newId('legal-company-link'),caseId:current.id,legalEntityId:link.legalEntityId,role:link.role,status:'active',createdAt:now} satisfies LegalCaseCompanyLink);
+      const updated:LegalCase={...current,title,caseType,bankAccountId:account?.id,bankSnapshotMasked:account?[account.maskedIban,account.maskedAccountNumber,account.maskedCardNumber].find(Boolean):undefined,invoiceIds:normalized.invoiceIds,version:current.version+1,updatedAt:now};await tx.put('legal_cases',updated);
+      await tx.put('legal_case_history',{id:newId('legal-history'),caseId:current.id,sequence:histories.filter((item)=>item.caseId===current.id).length+1,action:'basic_updated',actorId:currentActor.actorId,effectiveUserId:currentActor.id,actorDisplayName:currentActor.name,fromStatus:current.status,toStatus:current.status,occurredAt:now,reasonCategory:'qa_lifecycle',correlationId} satisfies LegalCaseHistory);
+      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:current.companyId,category:'data',action:'legal.case.updated',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:`اطلاعات پایه پرونده آزمایشی ${current.trackingCode} ویرایش شد.`,outcome:'success',correlationId,metadata:{legalCaseId:current.id,version:updated.version,companyLinkCount:desired.length,bankLast4:account?.last4??null,syntheticDataOnly:true}} satisfies AuditEvent);
+      await tx.put('domain_events',{id:newId('event'),aggregateType:'legal-case',aggregateId:current.id,eventType:'LegalCaseBasicUpdated',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{version:updated.version,syntheticDataOnly:true}} satisfies DomainEvent);await tx.put('idempotency_keys',{id:effectiveCommandId,recordId:current.id,requestHash,result:{recordId:current.id,version:updated.version,status:updated.status},createdAt:now} satisfies IdempotencyRecord);await tx.put('meta',{id:'lastPersistedAt',value:now});
+    });return this.loadState();
+  }
+
+  async setLegalRecordStatus(
+    id:string,
+    expectedVersion:number,
+    status:LegalRecordStatus|LegalCaseStatus,
+    reasonCategory:LegalStatusReasonCategory,
+    commandId?:string,
+  ):Promise<FoundationState>{
+    assertLegalSyntheticPrototypeEnabled();
+    assertLegalStatusReasonCategory(reasonCategory);
+    const state=await this.loadState();const actor=state.activeUser;const expectedSession=sessionIdentitySnapshot(state.session);
+    if(!id.trim()||!Number.isInteger(expectedVersion)||expectedVersion<1)throw new Error('شناسه یا نسخه رکورد حقوقی معتبر نیست.');
+    const effectiveCommandId=commandId??newId('command');
+    const requestHash=await commandRequestHash({kind:'legal.record.status',id,expectedVersion,status,reasonCategory,actorUserId:actor.id,session:expectedSession});
+    const now=new Date().toISOString();const correlationId=newId('correlation');
+    const stores:FoundationStoreName[]=['sessions','users','security_roles','organization_legal_entities','organization_legal_entity_history','bank_institutions','company_bank_account_details','legal_cases','legal_case_history','legal_proceedings','legal_notices','legal_deadlines','audit_events','domain_events','idempotency_keys','meta'];
+    await this.storage.transaction(stores,'readwrite',async(tx)=>{
+      const currentActor=await this.requireActiveMutationIdentity(tx,expectedSession,actor);const [roles,users]=await Promise.all([tx.getAll<SecurityRole>('security_roles'),tx.getAll<LocalUser>('users')]);
+      const legalCase=await tx.get<LegalCase>('legal_cases',id);const entity=legalCase?undefined:await tx.get<LegalEntity>('organization_legal_entities',id);const account=legalCase||entity?undefined:await tx.get<CompanyBankAccountDetail>('company_bank_account_details',id);const bank=legalCase||entity||account?undefined:await tx.get<BankInstitution>('bank_institutions',id);
+      if(!legalCase&&!entity&&!account&&!bank)throw new Error('رکورد مرجع پیدا نشد.');
+      const permission=legalCase?LEGAL_PERMISSIONS.caseEdit:account?TREASURY_MASTER_PERMISSIONS.bankAccountManage:TREASURY_MASTER_PERMISSIONS.manage;
+      if(legalCase&&(legalCase.companyId!==currentActor.companyId||legalCase.tenantId!==currentActor.companyId))throw new Error('پرونده در محدوده امنیتی جاری پیدا نشد.');
+      if(entity&&(entity.companyId!==currentActor.companyId||entity.tenantId!==currentActor.companyId))throw new Error('شخصیت حقوقی در محدوده امنیتی جاری پیدا نشد.');
+      if(account&&(account.companyId!==currentActor.companyId||account.tenantId!==currentActor.companyId))throw new Error('حساب مرجع در محدوده امنیتی جاری پیدا نشد.');
+      if(bank&&(bank.companyId!==currentActor.companyId||bank.tenantId!==currentActor.companyId))throw new Error('رکورد مرجع در شرکت جاری پیدا نشد.');
+      const resource=legalCase?legalCaseResource(legalCase,users):account?legalBankAccountResource(account):entity?legalEntityResource(entity):treasuryMasterResource(bank!.id,bank!.companyId,bank!.status);
+      const allowed=legalCase?legalAllowed(currentActor,roles,permission,resource,'edit'):treasuryMasterAllowed(currentActor,roles,permission,resource,'edit');
+      if(!allowed)throw new Error('مجوز فعال تغییر وضعیت این رکورد را ندارید.');
+      const receipt=await tx.get<IdempotencyRecord>('idempotency_keys',effectiveCommandId);
+      if(receipt){if(receipt.requestHash!==requestHash||!receipt.result)throw new Error('شناسه فرمان قبلاً با اطلاعات دیگری استفاده شده است.');return;}
+      const current=legalCase??entity??account??bank!;
+      if(current.version!==expectedVersion)throw new Error('این رکورد هم‌زمان تغییر کرده است؛ صفحه را تازه کنید.');
+      if(current.status===status)throw new Error('رکورد از قبل در همین وضعیت است.');
+      if(legalCase){
+        const allowed:Record<LegalCaseStatus,LegalCaseStatus[]>={draft:['open','on_hold','void'],open:['on_hold','closed','void'],on_hold:['open','closed','void'],closed:[],void:[]};
+        if(status==='closed'){
+          const [proceedings,notices,deadlines]=await Promise.all([tx.getAll<LegalProceeding>('legal_proceedings'),tx.getAll<LegalNotice>('legal_notices'),tx.getAll<LegalDeadline>('legal_deadlines')]);
+          const belongsToCase=(item:{caseId:string;companyId:string;tenantId:string})=>item.caseId===legalCase.id&&item.companyId===legalCase.companyId&&item.tenantId===legalCase.tenantId;
+          if(proceedings.some((item)=>belongsToCase(item)&&!['closed','void'].includes(item.status))||notices.some((item)=>belongsToCase(item)&&item.status==='received')||deadlines.some((item)=>belongsToCase(item)&&item.status==='open'))throw new Error('تا تعیین تکلیف روند، ابلاغ یا مهلت باز نمی‌توان پرونده را بست.');
+        }
+        if(!allowed[legalCase.status].includes(status as LegalCaseStatus))throw new Error('تغییر وضعیت درخواستی برای این پرونده مجاز نیست.');
+      }else if(!['active','inactive'].includes(status))throw new Error('وضعیت داده مرجع فقط فعال یا غیرفعال است.');
+      const updated={...current,status,version:current.version+1,updatedAt:now};const audits=await tx.getAll<AuditEvent>('audit_events');
+      if(legalCase){
+        await tx.put('legal_cases',updated as LegalCase);
+        const histories=await tx.getAll<LegalCaseHistory>('legal_case_history');
+        await tx.put('legal_case_history',{id:newId('legal-history'),caseId:legalCase.id,sequence:histories.filter((item)=>item.caseId===legalCase.id).length+1,action:'status_changed',actorId:currentActor.actorId,effectiveUserId:currentActor.id,actorDisplayName:currentActor.name,fromStatus:legalCase.status,toStatus:status as LegalCaseStatus,occurredAt:now,reasonCategory,correlationId} satisfies LegalCaseHistory);
+      }else if(entity){
+        await tx.put('organization_legal_entities',updated as LegalEntity);
+        const profileHistory=await tx.getAll<LegalEntityProfileHistory>('organization_legal_entity_history');
+        await tx.put('organization_legal_entity_history',{id:newId('legal-entity-history'),tenantId:entity.tenantId,companyId:entity.companyId,legalEntityId:entity.id,sequence:profileHistory.filter((item)=>item.legalEntityId===entity.id).length+1,action:'status_changed',actorId:currentActor.actorId,effectiveUserId:currentActor.id,occurredAt:now,entityVersion:updated.version,changedFields:['status'],officerAddedCount:0,officerUpdatedCount:0,officerEndedCount:0,correlationId} satisfies LegalEntityProfileHistory);
+      }
+      else if(account)await tx.put('company_bank_account_details',updated as CompanyBankAccountDetail);
+      else await tx.put('bank_institutions',updated as BankInstitution);
+      const recordKind=legalCase?'case':entity?'entity':account?'bank_account':'bank';
+      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:legalCase?.companyId??entity?.companyId??account?.companyId??currentActor.companyId,category:'data',action:`legal.${recordKind}.status_changed`,actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:`وضعیت رکورد آزمایشی مرجع به «${status}» تغییر کرد.`,outcome:'success',correlationId,metadata:{legalCaseId:legalCase?.id,legalEntityId:entity?.id,bankAccountId:account?.id,bankInstitutionId:bank?.id,status,version:updated.version,reasonCategory,syntheticDataOnly:true}} satisfies AuditEvent);
+      await tx.put('domain_events',{id:newId('event'),aggregateType:`legal-${recordKind}`,aggregateId:id,eventType:'LegalRecordStatusChanged',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{status,version:updated.version,reasonCategory,syntheticDataOnly:true}} satisfies DomainEvent);
+      await tx.put('idempotency_keys',{id:effectiveCommandId,recordId:id,requestHash,result:{recordId:id,version:updated.version,status},createdAt:now} satisfies IdempotencyRecord);await tx.put('meta',{id:'lastPersistedAt',value:now});
+    });
+    return this.loadState();
+  }
+
+  async generateLegalQaDataset(commandId?:string):Promise<FoundationState>{
+    assertLegalSyntheticPrototypeEnabled();
+    const state=await this.loadState();const actor=state.activeUser;const expectedSession=sessionIdentitySnapshot(state.session);const scenarios=buildLegalQaScenarioBlueprints();
+    const effectiveCommandId=commandId??`legal-qa-generate:${actor.companyId}`;const requestHash=await commandRequestHash({kind:'legal.qa.generate',scenarioIds:scenarios.map((item)=>item.id),actorUserId:actor.id,session:expectedSession});
+    const now=new Date().toISOString();const correlationId=newId('correlation');
+    const stores:FoundationStoreName[]=['sessions','users','security_roles','organization_legal_entities','bank_institutions','company_bank_account_details','legal_cases','legal_case_company_links','legal_party_profiles','legal_case_parties','legal_case_history','audit_events','domain_events','idempotency_keys','meta'];
+    await this.storage.transaction(stores,'readwrite',async(tx)=>{
+      const currentActor=await this.requireActiveMutationIdentity(tx,expectedSession,actor);const roles=await tx.getAll<SecurityRole>('security_roles');
+      const resource:DemoResource={id:`legal-qa-dataset:${currentActor.companyId}`,companyId:currentActor.companyId,createdBy:'system',state:'synthetic'};
+      if(!legalAllowed(currentActor,roles,LEGAL_PERMISSIONS.masterDataManage,resource,'create')||!legalAllowed(currentActor,roles,LEGAL_PERMISSIONS.bankAccountManage,resource,'create')||!legalAllowed(currentActor,roles,LEGAL_PERMISSIONS.caseCreate,resource,'create')||!legalAllowed(currentActor,roles,LEGAL_PERMISSIONS.partyManage,resource,'create'))throw new Error('مجوز فعال ساخت کامل داده آزمایشی حقوقی را ندارید.');
+      const receipt=await tx.get<IdempotencyRecord>('idempotency_keys',effectiveCommandId);if(receipt){if(receipt.requestHash!==requestHash||!receipt.result)throw new Error('شناسه فرمان قبلاً با اطلاعات دیگری استفاده شده است.');return;}
+      const existingCases=await tx.getAll<LegalCase>('legal_cases');if(existingCases.some((item)=>item.companyId===currentActor.companyId&&item.qaDatasetId===LEGAL_QA_DATASET_ID))throw new Error('دیتاست ۵۰ سناریوی حقوقی از قبل وجود دارد؛ ابتدا همان دیتاست را بازنشانی کنید.');
+      const entityIds=Array.from({length:3},(_,index)=>`legal-qa-entity:${currentActor.companyId}:${index+1}`);const bankId=`legal-qa-bank:${currentActor.companyId}`;const accountId=`legal-qa-account:${currentActor.companyId}`;
+      for(const [index,id] of entityIds.entries())await tx.put('organization_legal_entities',{id,tenantId:currentActor.companyId,companyId:currentActor.companyId,displayName:`شخصیت حقوقی کاملاً مصنوعی ${index+1}`,registrationNumberMasked:`******${String(index+1).padStart(4,'0')}`,status:'active',qaGenerated:true,qaDatasetId:LEGAL_QA_DATASET_ID,version:1,createdAt:now,updatedAt:now} satisfies LegalEntity);
+      await tx.put('bank_institutions',{id:bankId,tenantId:currentActor.companyId,companyId:currentActor.companyId,code:`QA-${currentActor.companyId.slice(-6).toUpperCase()}`,displayName:'بانک کاملاً مصنوعی حقوقی',status:'active',qaGenerated:true,qaDatasetId:LEGAL_QA_DATASET_ID,version:1,createdAt:now,updatedAt:now} satisfies BankInstitution);
+      const qaAccount:CompanyBankAccountDetail={id:accountId,tenantId:currentActor.companyId,companyId:currentActor.companyId,legalEntityId:entityIds[0],bankInstitutionId:bankId,iban:'IR000000000000000000000000',cardNumber:'9999888877776666',maskedIban:'**********************0000',maskedCardNumber:'************6666',last4:'6666',status:'active',qaGenerated:true,qaDatasetId:LEGAL_QA_DATASET_ID,version:1,createdAt:now,updatedAt:now};await tx.put('company_bank_account_details',qaAccount);
+      const year=jalaliTrackingYear(new Date(now));const counterId=`legal-case-sequence:${currentActor.companyId}:${year}`;const counter=await tx.get<MetaRecord>('meta',counterId);const firstSequence=typeof counter?.value==='number'?counter.value+1:1;const audits=await tx.getAll<AuditEvent>('audit_events');const firstAuditSequence=nextSequence(audits);
+      for(const [index,scenario] of scenarios.entries()){
+        const sequence=firstSequence+index;const caseId=`legal-qa-case:${currentActor.companyId}:${scenario.id}`;const trackingCode=`LEGAL-${year}-${String(sequence).padStart(5,'0')}`;const primaryRole=scenario.partyRole;const secondaryRole=primaryRole==='counterparty'?'complainant':'counterparty';
+        const record:LegalCase={id:caseId,tenantId:currentActor.companyId,companyId:currentActor.companyId,owningLegalEntityId:entityIds[0],trackingCode,title:scenario.title,caseType:scenario.caseType,status:'draft',primaryOwnerUserId:currentActor.id,bankAccountId:scenario.withBankAccount?accountId:undefined,bankSnapshotMasked:scenario.withBankAccount?qaAccount.maskedIban:undefined,qaGenerated:true,qaDatasetId:LEGAL_QA_DATASET_ID,realDataProhibited:true,version:1,createdByActorId:currentActor.actorId,createdByUserId:currentActor.id,createdAt:now,updatedAt:now};await tx.put('legal_cases',record);
+        await tx.put('legal_case_company_links',{id:`legal-qa-link:${caseId}:owner`,caseId,legalEntityId:entityIds[0],role:'owner',status:'active',createdAt:now} satisfies LegalCaseCompanyLink);
+        for(let linkIndex=0;linkIndex<Math.min(scenario.companyLinkCount,2);linkIndex++)await tx.put('legal_case_company_links',{id:`legal-qa-link:${caseId}:${linkIndex+1}`,caseId,legalEntityId:entityIds[linkIndex+1],role:linkIndex===0?'affected':'counterparty',status:'active',createdAt:now} satisfies LegalCaseCompanyLink);
+        const rolesForCase:LegalCaseParty['role'][]=[primaryRole,secondaryRole];for(const [partyIndex,role] of rolesForCase.entries()){
+          const partyId=`legal-qa-party:${caseId}:${partyIndex+1}`;const displayName=`شخص کاملاً مصنوعی ${scenario.id}-${partyIndex+1}`;await tx.put('legal_party_profiles',{id:partyId,tenantId:currentActor.companyId,companyId:currentActor.companyId,kind:'person',displayName,contactMasked:`0912***${String(index*2+partyIndex+1).padStart(4,'0').slice(-4)}`,status:'active',qaDatasetId:LEGAL_QA_DATASET_ID,version:1,createdAt:now,updatedAt:now} satisfies LegalPartyProfile);await tx.put('legal_case_parties',{id:`legal-qa-case-party:${caseId}:${partyIndex+1}`,caseId,partyId,role,displaySnapshot:displayName,status:'active',createdAt:now} satisfies LegalCaseParty);
+        }
+        await tx.put('legal_case_history',{id:`legal-qa-history:${caseId}`,caseId,sequence:1,action:'created',actorId:currentActor.actorId,effectiveUserId:currentActor.id,actorDisplayName:currentActor.name,toStatus:'draft',occurredAt:now,reasonCategory:'deterministic_synthetic_qa',correlationId} satisfies LegalCaseHistory);
+        await tx.put('audit_events',{id:newId('audit'),sequence:firstAuditSequence+index,companyId:currentActor.companyId,category:'system',action:'legal.case.created',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:`سناریوی آزمایشی ${scenario.id} با کد ${trackingCode} ساخته شد.`,outcome:'success',correlationId,metadata:{legalCaseId:caseId,trackingCode,legalEntityId:entityIds[0],partyCount:2,companyLinkCount:1+Math.min(scenario.companyLinkCount,2),syntheticDataOnly:true}} satisfies AuditEvent);
+        await tx.put('domain_events',{id:newId('event'),aggregateType:'legal-case',aggregateId:caseId,eventType:'LegalQaCaseGenerated',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{scenarioId:scenario.id,trackingCode,syntheticDataOnly:true}} satisfies DomainEvent);
+      }
+      await tx.put('audit_events',{id:newId('audit'),sequence:firstAuditSequence+scenarios.length,companyId:currentActor.companyId,category:'data',action:'legal.qa.generated',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:'پنجاه سناریوی کاملاً مصنوعی واحد حقوقی ساخته شد.',outcome:'success',correlationId,metadata:{scenarioCount:scenarios.length,syntheticDataOnly:true}} satisfies AuditEvent);
+      await tx.put('domain_events',{id:newId('event'),aggregateType:'legal-qa-dataset',aggregateId:resource.id,eventType:'LegalQaDatasetGenerated',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{scenarioCount:scenarios.length,syntheticDataOnly:true}} satisfies DomainEvent);await tx.put('idempotency_keys',{id:effectiveCommandId,recordId:resource.id,requestHash,result:{recordId:resource.id,version:1,status:'generated'},createdAt:now} satisfies IdempotencyRecord);await tx.put('meta',{id:counterId,value:firstSequence+scenarios.length-1});await tx.put('meta',{id:'lastPersistedAt',value:now});
+    });return this.loadState();
+  }
+
+  async resetLegalQaDataset():Promise<FoundationState>{
+    assertLegalSyntheticPrototypeEnabled();
+    const state=await this.loadState();const actor=state.activeUser;const expectedSession=sessionIdentitySnapshot(state.session);const now=new Date().toISOString();const correlationId=newId('correlation');
+    const stores:FoundationStoreName[]=['sessions','users','security_roles','organization_legal_entities','bank_institutions','company_bank_account_details','legal_cases','legal_case_company_links','legal_party_profiles','legal_case_parties','legal_case_history','audit_events','domain_events','idempotency_keys','meta'];
+    await this.storage.transaction(stores,'readwrite',async(tx)=>{
+      const currentActor=await this.requireActiveMutationIdentity(tx,expectedSession,actor);const roles=await tx.getAll<SecurityRole>('security_roles');const resource:DemoResource={id:`legal-qa-dataset:${currentActor.companyId}`,companyId:currentActor.companyId,createdBy:'system',state:'synthetic'};
+      if(!legalAllowed(currentActor,roles,LEGAL_PERMISSIONS.masterDataManage,resource,'edit')||!legalAllowed(currentActor,roles,LEGAL_PERMISSIONS.bankAccountManage,resource,'edit')||!legalAllowed(currentActor,roles,LEGAL_PERMISSIONS.caseEdit,resource,'edit')||!legalAllowed(currentActor,roles,LEGAL_PERMISSIONS.partyManage,resource,'edit'))throw new Error('مجوز فعال بازنشانی کامل دیتاست آزمایشی حقوقی را ندارید.');
+      const [cases,entities,accounts,banks,links,parties,caseParties,histories,receipts,audits]=await Promise.all([tx.getAll<LegalCase>('legal_cases'),tx.getAll<LegalEntity>('organization_legal_entities'),tx.getAll<CompanyBankAccountDetail>('company_bank_account_details'),tx.getAll<BankInstitution>('bank_institutions'),tx.getAll<LegalCaseCompanyLink>('legal_case_company_links'),tx.getAll<LegalPartyProfile>('legal_party_profiles'),tx.getAll<LegalCaseParty>('legal_case_parties'),tx.getAll<LegalCaseHistory>('legal_case_history'),tx.getAll<IdempotencyRecord>('idempotency_keys'),tx.getAll<AuditEvent>('audit_events')]);
+      const caseIds=new Set(cases.filter((item)=>item.qaDatasetId===LEGAL_QA_DATASET_ID&&item.companyId===currentActor.companyId).map((item)=>item.id));const partyIds=new Set(parties.filter((item)=>item.qaDatasetId===LEGAL_QA_DATASET_ID&&item.companyId===currentActor.companyId).map((item)=>item.id));const entityIds=new Set(entities.filter((item)=>item.qaDatasetId===LEGAL_QA_DATASET_ID&&item.companyId===currentActor.companyId).map((item)=>item.id));const accountIds=new Set(accounts.filter((item)=>item.qaDatasetId===LEGAL_QA_DATASET_ID&&item.companyId===currentActor.companyId).map((item)=>item.id));const bankIds=new Set(banks.filter((item)=>item.qaDatasetId===LEGAL_QA_DATASET_ID&&item.companyId===currentActor.companyId&&item.tenantId===currentActor.companyId).map((item)=>item.id));
+      for(const item of cases.filter((row)=>caseIds.has(row.id)))await tx.delete('legal_cases',item.id);for(const item of links.filter((row)=>caseIds.has(row.caseId)))await tx.delete('legal_case_company_links',item.id);for(const item of caseParties.filter((row)=>caseIds.has(row.caseId)))await tx.delete('legal_case_parties',item.id);for(const item of histories.filter((row)=>caseIds.has(row.caseId)))await tx.delete('legal_case_history',item.id);for(const item of parties.filter((row)=>partyIds.has(row.id)))await tx.delete('legal_party_profiles',item.id);for(const item of accounts.filter((row)=>accountIds.has(row.id)))await tx.delete('company_bank_account_details',item.id);for(const item of entities.filter((row)=>entityIds.has(row.id)))await tx.delete('organization_legal_entities',item.id);for(const item of banks.filter((row)=>bankIds.has(row.id)&&!accounts.some((account)=>!accountIds.has(account.id)&&account.bankInstitutionId===row.id)))await tx.delete('bank_institutions',item.id);
+      for(const item of receipts.filter((row)=>row.recordId===resource.id||caseIds.has(row.recordId)||entityIds.has(row.recordId)||accountIds.has(row.recordId)||bankIds.has(row.recordId)))await tx.delete('idempotency_keys',item.id);
+      await tx.put('audit_events',{id:newId('audit'),sequence:nextSequence(audits),companyId:currentActor.companyId,category:'data',action:'legal.qa.reset',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:'فقط داده کاملاً مصنوعی واحد حقوقی بازنشانی شد.',outcome:'success',correlationId,metadata:{caseCount:caseIds.size,syntheticDataOnly:true}} satisfies AuditEvent);await tx.put('domain_events',{id:newId('event'),aggregateType:'legal-qa-dataset',aggregateId:resource.id,eventType:'LegalQaDatasetReset',actorId:currentActor.actorId,occurredAt:now,correlationId,payload:{caseCount:caseIds.size,syntheticDataOnly:true}} satisfies DomainEvent);await tx.put('meta',{id:'lastPersistedAt',value:now});
+    });return this.loadState();
   }
 
   async createProject(input: ProjectInput, commandId?:string): Promise<FoundationState> {
@@ -4320,6 +4756,7 @@ async setRoleStatus(roleId: string, expectedVersion: number, status: UserStatus)
   }
 
   async createOperationalRecord(moduleId: string, input: OperationalRecordInput, commandId?: string): Promise<FoundationState> {
+    if(moduleId==='bank-account')throw new Error('ماژول قدیمی حساب بانکی بازنشسته شده است؛ از اطلاعات پایه بانکی خزانه استفاده کنید.');
     return this.createOperationalRecordInternal(moduleId, input, false, commandId);
   }
 
@@ -4860,6 +5297,7 @@ async setRoleStatus(roleId: string, expectedVersion: number, status: UserStatus)
   }
 
   async updateOperationalRecord(moduleId: string, recordId: string, expectedVersion: number, input: Partial<OperationalRecordInput>, commandId?: string): Promise<FoundationState> {
+    if(moduleId==='bank-account')throw new Error('رکوردهای قدیمی حساب بانکی فقط برای سابقه نگهداری می‌شوند و قابل ویرایش نیستند.');
     const module = ERP_MODULES.find((item) => item.id === moduleId); if (!module) throw new Error('ماژول عملیاتی پیدا نشد.');
     if (module.mutationMode === 'specialized') throw new Error('این رکورد فقط از مسیر تخصصی و مسیر اختصاصی خودش ویرایش می‌شود.');
     if (moduleId === 'personnel-document') throw new Error('جایگزینی مدرک فقط از بخش «مدارک پرسنلی» انجام می‌شود تا نسخه قبلی حفظ شود.');
@@ -4897,6 +5335,7 @@ async setRoleStatus(roleId: string, expectedVersion: number, status: UserStatus)
   }
 
   async transitionOperationalRecord(moduleId: string, recordId: string, transitionId: string, reason = '', idempotencyKey?: string): Promise<FoundationState> {
+    if(moduleId==='bank-account')throw new Error('گردش ماژول قدیمی حساب بانکی بازنشسته شده است.');
     return this.transitionOperationalRecordInternal(moduleId, recordId, transitionId, reason, idempotencyKey, false);
   }
 
@@ -5341,6 +5780,7 @@ async setRoleStatus(roleId: string, expectedVersion: number, status: UserStatus)
   }
 
   async assignOperationalRecord(moduleId: string, recordId: string, assigneeUserId: string, reason: string, expectedVersion: number, commandId?: string): Promise<FoundationState> {
+    if(moduleId==='bank-account')throw new Error('ارجاع در ماژول قدیمی حساب بانکی مجاز نیست.');
     const module = ERP_MODULES.find((item) => item.id === moduleId); if (!module) throw new Error('ماژول عملیاتی پیدا نشد.');
     if (module.mutationMode === 'specialized') throw new Error('تخصیص این رکورد فقط از مسیر تخصصی و مسیر اختصاصی خودش انجام می‌شود.');
     const state = await this.loadState(); const effectiveUser = state.activeUser;
@@ -5610,14 +6050,48 @@ async setRoleStatus(roleId: string, expectedVersion: number, status: UserStatus)
       }
     }
     const preflightSnapshot=await this.storage.exportSnapshot();
+    const legalRowCount=LEGAL_INSPECTION_STORES.reduce((sum,store)=>sum+(preflightSnapshot.stores[store]?.length??0),0);
+    if(legalRowCount>0)throw new Error('پشتیبان‌گیری عمومی در حضور داده حقوقی—even آزمایشی—در فاز اول متوقف است؛ خروجی حساس حقوقی هنوز پیاده‌سازی نشده است.');
     const sensitivePaths=findSensitiveSnapshotPaths(preflightSnapshot.stores);
     if(!password&&sensitivePaths.length)throw new Error('این پایگاه شامل رمز، اطلاعات بانکی یا فایل درون‌خطی است؛ فقط پشتیبان رمزگذاری‌شده مجاز است.');
     await this.appendAudit({actor: state.activeUser, effectiveUser: state.activeUser, category: 'data', action: password ? 'foundation.backup.encrypted' : 'foundation.backup.export', summary: password ? 'پشتیبان رمزگذاری‌شده ایجاد شد.' : 'پشتیبان محلی ایجاد شد.', outcome: 'success', metadata:{sensitivePathCount:sensitivePaths.length}});
-    const snapshot = await this.storage.exportSnapshot();
-    return password ? encryptSnapshot(snapshot, password) : snapshot;
+    return password ? encryptSnapshot(preflightSnapshot, password) : preflightSnapshot;
   }
-  async importSnapshot(input: unknown, password?: string): Promise<FoundationState> { const before = await this.loadState(); let snapshot: SnapshotManifest; if (isEncryptedSnapshot(input)) {if (!password) throw new Error('این پشتیبان رمزگذاری شده است؛ رمز را وارد کنید.'); snapshot = await decryptSnapshot(input, password);} else {validateSnapshotShape(input); snapshot = input;} await this.storage.importSnapshot(snapshot); const restored = await this.initialize(); await this.appendAudit({actor: before.activeUser, effectiveUser: restored.activeUser, category: 'data', action: 'foundation.backup.restored', summary: 'داده محلی از فایل پشتیبان بازیابی شد.', outcome: 'success', metadata: {restoredSeedVersion: snapshot.seedVersion, restoredUserId: restored.activeUser.id}}); return this.loadState(); }
-  async reset(): Promise<FoundationState> { const before = await this.loadState(); await this.storage.replaceAll(createSeedData()); const seededAdmin = (await this.storage.getAll<LocalUser>('users'))[0]; await this.appendAudit({actor: before.activeUser, effectiveUser: seededAdmin, category: 'data', action: 'foundation.local.reset', summary: 'داده‌های محلی به سناریوی قطعی ERP V1 بازنشانی شد.', reason: 'بازنشانی دستی پذیرش محصول', outcome: 'success', metadata: {seedVersion: FOUNDATION_SEED_VERSION}}); return this.loadState(); }
+  async importSnapshot(input: unknown, password?: string): Promise<FoundationState> {
+    const before=await this.loadState();
+    if(before.session.actingAdminUserId)throw new Error('بازیابی پشتیبان در حالت مشاهده دسترسی مجاز نیست.');
+    requirePermission(before.activeUser,'foundation.data.manage','مجوز مدیریت و بازیابی داده را ندارید.');
+    const expectedSession=sessionIdentitySnapshot(before.session);
+    let snapshot:SnapshotManifest;
+    if(isEncryptedSnapshot(input)){if(!password)throw new Error('این پشتیبان رمزگذاری شده است؛ رمز را وارد کنید.');snapshot=await decryptSnapshot(input,password);}else{validateSnapshotShape(input);snapshot=input;}
+    const importedStores=await snapshotStoresForImport(snapshot);
+    const legalRowCount=LEGAL_INSPECTION_STORES.reduce((sum,store)=>sum+(importedStores[store]?.length??0),0);
+    if(legalRowCount>0)throw new Error('بازیابی داده حقوقی از فایل عمومی در فاز اول ممنوع است؛ فقط fixture داخلی امضاشده مجاز خواهد بود.');
+    await this.storage.transaction([...FOUNDATION_STORES],'readwrite',async(tx)=>{
+      const currentActor=await this.requireActiveMutationIdentity(tx,expectedSession,before.activeUser);
+      requirePermission(currentActor,'foundation.data.manage','مجوز جاری مدیریت و بازیابی داده را ندارید.');
+      const currentLegalParts=await Promise.all(LEGAL_INSPECTION_STORES.map((store)=>tx.getAll(store)));
+      if(currentLegalParts.some((rows)=>rows.length>0))throw new Error('تا زمانی که داده حقوقی وجود دارد، بازیابی عمومی برای جلوگیری از حذف پرونده‌ها متوقف است.');
+      const importedAudits=importedStores.audit_events as AuditEvent[];const now=new Date().toISOString();
+      importedStores.audit_events=[...importedAudits,{id:newId('audit'),sequence:nextSequence(importedAudits),companyId:currentActor.companyId,category:'data',action:'foundation.backup.restored',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:'داده محلی از فایل پشتیبان بازیابی شد.',outcome:'success',correlationId:newId('correlation'),metadata:{restoredSeedVersion:snapshot.seedVersion}} satisfies AuditEvent];
+      for(const store of FOUNDATION_STORES)await tx.clear(store);
+      for(const store of FOUNDATION_STORES)for(const row of importedStores[store])await tx.put(store,row);
+    });
+    const restored=await this.initialize();
+    return restored;
+  }
+  async reset(): Promise<FoundationState> {
+    const before=await this.loadState();const expectedSession=sessionIdentitySnapshot(before.session);const seeded=createSeedData();const now=new Date().toISOString();
+    await this.storage.transaction([...FOUNDATION_STORES],'readwrite',async(tx)=>{
+      const currentActor=await this.requireActiveMutationIdentity(tx,expectedSession,before.activeUser);requirePermission(currentActor,'foundation.data.manage','مجوز جاری بازنشانی داده را ندارید.');
+      const currentLegalParts=await Promise.all(LEGAL_INSPECTION_STORES.map((store)=>tx.getAll(store)));
+      if(currentLegalParts.some((rows)=>rows.length>0))throw new Error('بازنشانی عمومی در حضور داده حقوقی ممنوع است؛ فقط از «بازنشانی دیتاست ۵۰ سناریوی QA» استفاده کنید.');
+      const seededAudits=seeded.audit_events as AuditEvent[];(seeded as Record<FoundationStoreName,unknown[]>).audit_events=[...seededAudits,{id:newId('audit'),sequence:nextSequence(seededAudits),companyId:currentActor.companyId,category:'data',action:'foundation.local.reset',actorId:currentActor.actorId,actorName:currentActor.name,effectiveUserId:currentActor.id,occurredAt:now,summary:'داده‌های محلی به سناریوی قطعی ERP V1 بازنشانی شد.',reason:'بازنشانی دستی پذیرش محصول',outcome:'success',correlationId:newId('correlation'),metadata:{seedVersion:FOUNDATION_SEED_VERSION}} satisfies AuditEvent];
+      for(const store of FOUNDATION_STORES)await tx.clear(store);
+      for(const store of FOUNDATION_STORES)for(const row of seeded[store])await tx.put(store,row);
+    });
+    return this.loadState();
+  }
 
   async recordPersonnelExport(personnelCount: number, movementCount: number, includesBanking: boolean): Promise<FoundationState> {
     const state = await this.loadState();
@@ -6553,7 +7027,7 @@ function base64ToBytes(value: string) { return Uint8Array.from(atob(value), (cha
 function makeInitials(name: string) { return name.trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join('.'); }
 function usernameFromName(name: string) { return `user.${name.length}`; }
 function avatarColor(index: number) { return ['#6957d9', '#0d9488', '#0284c7', '#7c3aed', '#d97706', '#e11d48'][index % 6]; }
-function nextSequence(audits: AuditEvent[]) { return audits.reduce((maximum, event) => Math.max(maximum, event.sequence), 0) + 1; }
+function nextSequence(entries: Array<{sequence:number}>) { return entries.reduce((maximum, event) => Math.max(maximum, event.sequence), 0) + 1; }
 
 function removeSensitiveFileData(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(removeSensitiveFileData);

@@ -1,6 +1,6 @@
 # ماتریس قابلیت‌ها و شواهد
 
-> **آخرین تطبیق:** baseline محلی پایدار روی شاخه قابلیت `codex/shahrah-collaboration-hub` و طراحی هاب همکاری، 2026-08-27
+> **آخرین تطبیق:** شاخه قابلیت `codex/legal-inspection-v1` و هسته مصنوعی واحد حقوقی، 2026-08-28
 
 ## روش خواندن
 
@@ -33,6 +33,7 @@
 | مساعده | پرسنل/مدیر شعبه/حسابداری/تأییدکننده/خزانه | `EmployeeAdvanceUi.tsx` | create/update/decide | branch scope، route، correction، version | `employeeAdvance.test.ts` — `Verified` | سقف و تعداد محدود نشده |
 | مدیریت گردش‌کار | Workflow Admin | `WorkflowAdminPage.tsx` | `updateWorkflowPolicy` | version، route overlap، state-machine protected | `workflowPolicy.test.ts` — `Verified` | ویرایش آزاد state ممنوع |
 | رکورد عمومی ERP | اپراتورهای دامنه | `ErpWorkspacePage.tsx` | create/update/transition/assign | permission/scope/maker-checker | catalog/auth tests — `Verified` | payload و UI عمومی است |
+| حقوقی و بازرسی — فاز اول | مدیر/پذیرش حقوقی مجاز | `LegalInspectionPage.tsx` | entity/bank/account/case چندشرکتی، party پایدار، edit/status، generator/reset ۵۰ سناریو، ۸ store اختصاصی | localhost/test، active legal role، QA-empty، field projection، workspace/resource، CAS/SHA، backup/restore deny | unit/migration/Playwright — `Verified (Synthetic-only Local-first)` | ورود داده واقعی، سند، export، پرداخت و اتصال Finance/Treasury ممنوع است؛ Production `NO-GO` |
 
 ## هاب همکاری شاهراه V1
 
@@ -95,7 +96,7 @@
 | 34 | `cost-center` | finance | `cost_centers` | `Implemented-Unverified` |
 | 35 | `budget` | finance | `budget_entries` | `Implemented-Unverified` |
 | 36 | `finance-request` | finance | `finance_requests` | `Implemented-Unverified` |
-| 37 | `bank-account` | treasury | `bank_accounts` | `Implemented-Unverified` |
+| 37 | `bank-account` | treasury | `bank_accounts` | `Verified (specialized shared master; legacy generic retired)` |
 | 38 | `treasury-execution` | treasury | `treasury_executions` | `Verified` |
 | 39 | `chart-account` | accounting | `chart_of_accounts` | `Implemented-Unverified` |
 | 40 | `accounting-period` | accounting | `accounting_periods` | `Implemented-Unverified` |

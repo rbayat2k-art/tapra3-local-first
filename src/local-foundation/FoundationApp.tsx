@@ -4,7 +4,7 @@ import {
   BriefcaseBusiness, Database, Download, Eye, FileClock, FileJson, Fingerprint, FlaskConical, GitBranch, HardDrive, KeyRound, LayoutDashboard,
   LockKeyhole, LogIn, LogOut, Menu, MessageSquareText, Monitor, Moon, MoreVertical, Palette, Pencil, Phone, RotateCcw, ScrollText, Shield, ShieldCheck,
   SlidersHorizontal, Sparkles, Sun, Upload, UserCheck, UserCog, UserPlus, UserRound, UserX, UsersRound, Workflow, X, Network, ContactRound, EyeOff,
-  PanelRightClose, PanelRightOpen, Headphones, Search, Layers3, FolderKanban,
+  PanelRightClose, PanelRightOpen, Headphones, Search, Layers3, FolderKanban, Scale,
   type LucideIcon,
 } from 'lucide-react';
 import {authorize, can} from './authorization';
@@ -28,6 +28,7 @@ import {FormValidationSummary, OptionalLabel, RequiredLabel, validateRequired} f
 import {SortHeader, useSortableRows, type SortColumn} from './Sorting';
 import {formatPersianDateTime, todayIsoDate} from './PersianDate';
 import {ProfileCompletionGate} from './ProfileCompletionGate';
+import {TREASURY_MASTER_PERMISSIONS,treasuryMasterRouteAllowed} from './treasury-master/policy';
 import {type ProfileCompletionInput} from './profileCompletion';
 import {PERSONNEL_DOCUMENT_PERMISSION_QUEUE, personnelCompletionSummary} from './personnelDocuments';
 import {MyAccountPage} from './MyAccountPage';
@@ -57,6 +58,9 @@ import {
   type NavigationUsageEntry,
 } from './navigationDiscovery';
 import {createActingManagerBoundaryCheck, subscribeActingManagerBoundaryChecks} from './actingManagerBoundary';
+import {LegalInspectionPage} from './legal-inspection/LegalInspectionPage';
+import {LEGAL_PERMISSIONS} from './legal-inspection/policy';
+import {legalSyntheticPrototypeEnabled} from './legal-inspection/feature';
 
 type PageId = string;
 interface NavigationItem {
@@ -74,7 +78,10 @@ const DOMAIN_PAGE_MODULES: Record<string, string[]> = {
   procurement: ['purchase-request','rfq','supplier-offer','offer-comparison','purchase-order','matching'], suppliers: ['supplier','supplier-invoice'], finance: ['cost-center','budget','finance-request'], treasury: ['bank-account','treasury-execution'], accounting: ['chart-account','accounting-period','journal-entry','bank-reconciliation'],
   warehouse: ['warehouse-master','location','inventory-item','receipt','reservation','transfer','adjustment','count','return','inventory-movement'], logistics: ['shipment','delivery'], service: ['service-case','service-evidence'], support: ['support-case','support-transaction'], contracts: ['contract'], assets: ['fixed-asset','asset-transfer','asset-maintenance'], tasks: ['task'], communications: ['chat','message'], letters: ['letter'], documents: ['document'],
 };
-const modulePermissions = (page: string) => (DOMAIN_PAGE_MODULES[page] ?? []).map((moduleId) => permissionFor(moduleId, 'view'));
+const modulePermissions = (page: string) => [
+  ...(DOMAIN_PAGE_MODULES[page] ?? []).map((moduleId) => permissionFor(moduleId, 'view')),
+  ...(page==='treasury'?[TREASURY_MASTER_PERMISSIONS.view]:[]),
+];
 
 const PAGE_SEARCH_ALIASES: Record<string, string[]> = {
   collaboration: ['همکاری', 'میز همکاری', 'پروژه', 'پروژه‌ها', 'کارهای من', 'وظایف تیم'],
@@ -108,6 +115,7 @@ const NAVIGATION: NavigationItem[] = [
   {id: 'roles', title: 'نقش‌ها و دسترسی‌ها', subtitle: 'مجوز و محدوده مؤثر', icon: KeyRound, anyPermissions: ['organization.roles.view'], group: 'سازمان'},
   {id: 'registrations', title: 'درخواست‌های ثبت‌نام', subtitle: 'بررسی، اتصال و فعال‌سازی', icon: UserCheck, anyPermissions: ['organization.registrations.view'], group: 'سازمان'},
   {id: 'recruitment', title: 'جذب و شروع همکاری', subtitle: 'اعلام نیاز تا حساب و قرارداد', icon: UserPlus, anyPermissions: [permissionFor('recruitment-case','view'), permissionFor('recruitment-case','create')], group: 'عملیات سازمان'},
+  ...(legalSyntheticPrototypeEnabled()?[{id:'legal-inspection',title:'حقوقی و بازرسی',subtitle:'پرونده‌ها، وضعیت‌ها، فاکتورها و تاریخچه',icon:Scale,anyPermissions:[LEGAL_PERMISSIONS.caseView,LEGAL_PERMISSIONS.caseCreate,LEGAL_PERMISSIONS.masterDataView],group:'کنترل و راهبری'} satisfies NavigationItem]:[]),
   {id: 'hcm', title: 'منابع انسانی', subtitle: 'قرارداد تا خروج و عملکرد', icon: ContactRound, anyPermissions: modulePermissions('hcm'), group: 'عملیات سازمان'},
   {id: 'customers', title: 'مشتریان', subtitle: 'فهرست و نمای ۳۶۰ مشتری', icon: UsersRound, anyPermissions: ['crm.customers.view'], group: 'مشتری و CRM'},
   {id: 'crm', title: 'CRM و سرنخ‌ها', subtitle: 'Lead، تماس، پیگیری و فرصت', icon: UserRound, anyPermissions: modulePermissions('crm'), group: 'مشتری و درآمد'},
@@ -320,7 +328,7 @@ export function LocalFoundationApp() {
       const parent = NAVIGATION.find((item) => item.id === pageId);
       if (!parent) return [];
       return ERP_MODULES
-        .filter((module) => moduleIds.includes(module.id) && can(foundation.activeUser, permissionFor(module.id, 'view')))
+        .filter((module) => moduleIds.includes(module.id) && (can(foundation.activeUser, permissionFor(module.id, 'view')) || (module.id==='bank-account'&&treasuryMasterRouteAllowed(foundation.activeUser))))
         .map((module) => ({
           id: `module:${module.id}`,
           page: pageId,
@@ -907,6 +915,7 @@ export function LocalFoundationApp() {
             {tab.page === 'registrations' && <RegistrationPage state={foundation} service={service} execute={run} />}
             {tab.page === 'recruitment' && <RecruitmentPage state={foundation} service={service} execute={run} />}
             {tab.page === 'customers' && <CustomersPage state={foundation} service={service} execute={run} />}
+            {tab.page === 'legal-inspection' && legalSyntheticPrototypeEnabled() && <LegalInspectionPage state={foundation} service={service} execute={run} />}
             {tab.page === 'collaboration' && <CollaborationHubPage state={foundation} service={service} execute={run} initialQueue={(new URL(tab.url,window.location.origin).searchParams.get('queue') as 'project'|'today'|'overdue'|'delegated'|null)??'project'} onOpenConversations={() => navigateToPage('communications')} onOpenConversation={navigateToConversation} onOpenLetters={(recordId) => recordId?navigateToOperationalRecord('letters',recordId):navigateToPage('letters')} onOpenDocuments={(recordId) => recordId?navigateToOperationalRecord('documents',recordId,'document'):navigateToPage('documents')} />}
             {tab.page === 'communications' && <CommunicationsPage state={foundation} service={service} execute={run} initialConversationId={new URL(absoluteRouteUrl(tab.url)).searchParams.get('chat') ?? undefined} />}
             {tab.page === 'letters' && <LettersPage state={foundation} service={service} execute={run} initialRecordId={new URL(absoluteRouteUrl(tab.url)).searchParams.get('record')??undefined} initialRecordRequestKey={new URL(absoluteRouteUrl(tab.url)).searchParams.get('recordOpen')??undefined} />}

@@ -7,9 +7,9 @@
 | مورد | مقدار |
 |---|---|
 | نام | `tapra2_local` |
-| نسخه schema | `9` |
-| نسخه seed | `complete-local-erp-v1.20-versioned-workflow-editing` |
-| تعداد store | `95` |
+| نسخه schema | `15` |
+| نسخه seed | `complete-local-erp-v1.42-legal-inspection-foundation` |
+| تعداد store | `109` |
 | کلید پایه | `id` در همه storeها |
 | migration | ایجاد store/index هنگام upgrade؛ migration معنایی payload وجود ندارد |
 | transaction | `StorageAdapter.transaction(stores, mode, work)` |
@@ -33,6 +33,24 @@ erDiagram
 ```
 
 روابط بالا در Service با شناسه کنترل می‌شوند و FK/unique constraint فیزیکی در IndexedDB ندارند.
+
+## حقوقی و بازرسی — فاز اول مصنوعی
+
+| Entity / Store | فیلدهای کلیدی | حساسیت | چرخه عمر و قواعد |
+|---|---|---|---|
+| `LegalEntity` / `organization_legal_entities` | tenant/company، نام، نوع شرکت، شناسه ملی/ثبت و کدپستی ماسک‌شده، تاریخ ثبت، نشانی مصنوعی، status، version | بالا | مرجع مالکیت حقوقی در خزانه؛ حذف فیزیکی ندارد و غیرفعال‌سازی نسخه‌دار است. |
+| `LegalEntityOfficer` / `organization_legal_entity_officers` | entity، نام مصنوعی، کدملی ماسک‌شده، سمت، بازه مسئولیت، سهم‌الشرکه ریالی، status/version | بالا | مدیرعامل، رئیس/نایب‌رئیس، اعضا و شرکا؛ حذف از فرم فقط رکورد را inactive می‌کند. |
+| `LegalEntityProfileHistory` / `organization_legal_entity_history` | sequence، action، کد فیلدهای تغییرکرده، تعداد افراد افزوده/ویرایش/خاتمه‌یافته، actor/correlation | بالا | append-only و بدون مقدار خام هویتی، نشانی یا داده بانکی. |
+| `BankInstitution` / `bank_institutions` | code، displayName، status، version | متوسط | مرجع بانک؛ در projection فقط برای نقش حقوقی مجاز دیده می‌شود. |
+| `CompanyBankAccountDetail` / `company_bank_account_details` | owner entity، bank id، account/IBAN/card خام، masked values، last4 | بسیار بالا | raw فقط در store محافظت‌شده؛ پرونده/history/audit/event فقط id و snapshot ماسک‌شده دارند. |
+| `LegalCase` / `legal_cases` | tenant/company، owner entity، tracking `LEGAL-year-seq`، type/status/version، bank id و masked snapshot | بالا | `qaGenerated=true` و `realDataProhibited=true`؛ status/void نسخه‌دار، بدون delete. |
+| `LegalCaseCompanyLink` / `legal_case_company_links` | case، legalEntity، role، status | بالا | ارتباط چندشخصیتی صریح در یک workspace امنیتی؛ هر `companyId` دیگر tenant جدا و ممنوع است. |
+| `LegalPartyProfile` / `legal_party_profiles` | person/organization، نام، contact mask، identity/contact raw مصنوعی | بسیار بالا | identity فقط با مجوز مستقل و resource پرونده project می‌شود؛ merge خودکار ممنوع. |
+| `LegalCaseParty` / `legal_case_parties` | case، party، role، display/identity snapshot | بالا | نقش‌های complainant/buyer/payer/cardholder/representative/counterparty مستقل‌اند. |
+| `LegalCaseHistory` / `legal_case_history` | sequence، action، from/to status، reason category ثابت، actor snapshot، time | بالا | Timeline کامل append-only؛ توضیح آزاد و PII/بانک در آن ذخیره نمی‌شود. |
+| `LegalCaseHistory` / `legal_case_history` | sequence، action، actor/effective user، reason category ثابت، correlation | بالا | append-only و metadata-only؛ توضیح آزاد و مقدار کامل بانکی/هویتی ندارد. |
+
+Schema 15 هسته حقوقی، schema 16 عملیات پرونده و schema 17 دو store نسخه‌دار پروفایل شرکت را افزایشی اضافه می‌کنند. fixture مستقل قدیمی با storeهای خالی تازه ارتقا می‌یابد و اجرای دوباره migration داده قبلی را بازنویسی نمی‌کند. این فاز فقط روی localhost/test و برای داده مصنوعی فعال است؛ generic backup/restore با وجود هر ردیف حقوقی متوقف می‌شود.
 
 ## هویت و سازمان
 
@@ -110,7 +128,7 @@ erDiagram
 ## حذف، نگه‌داری و بازیابی
 
 - `Verified` — کاربران/واحدها/ساختارها عمدتاً غیرفعال می‌شوند و تاریخچه حفظ می‌شود.
-- `Verified` — reset کل دیتابیس را با seed قطعی جایگزین می‌کند؛ داده قبلی بدون backup از دست می‌رود.
+- `Verified` — reset/restore عمومی در حضور هر داده حقوقی fail-closed است. فقط reset اختصاصی `legal-qa-scenarios-v1` اجازه حذف فیزیکی همان دیتاست مصنوعی را دارد؛ داده دستی حقوقی فقط void/inactive می‌شود.
 - `Verified` — import snapshot پس از اعتبارسنجی schema/store/checksum کل داده را جایگزین می‌کند.
 - `Unknown` — retention، legal hold، quota attachment و حذف امن داده شخصی تصویب نشده‌اند.
 

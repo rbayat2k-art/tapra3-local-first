@@ -5,6 +5,7 @@ import {
   FOUNDATION_SEED_VERSION,
   FOUNDATION_STORES,
   type FoundationStoreName,
+  type FoundationSession,
   type LocalUser,
   type MetaRecord,
   type OperationalRecord,
@@ -16,8 +17,11 @@ import {
 import {createSeedData} from './seed';
 import {ERP_MODULES} from './erpCatalog';
 import {LocalFoundationService} from './service';
-import {IndexedDBAdapter} from './storage';
+import {IndexedDBAdapter,validateSnapshotShape} from './storage';
 import {validateWorkflowPolicy} from './workflowPolicy';
+import {LEGAL_INSPECTION_STORES} from './legal-inspection/model';
+import type {BankInstitution,CompanyBankAccountDetail,LegalCase,LegalEntity} from './legal-inspection/model';
+import {TREASURY_MASTER_PERMISSIONS} from './treasury-master/policy';
 
 const PREVIOUS_SCHEMA_VERSION = 9;
 const LEGACY_DOCUMENT_DATA_URL = 'data:image/png;base64,iVBORw0KGgo=';
@@ -91,6 +95,17 @@ function createVersionElevenDatabase(databaseName:string):Promise<void>{
   return new Promise((resolve,reject)=>{const request=indexedDB.open(databaseName,11);request.onupgradeneeded=()=>{const database=request.result;for(const storeName of previousStores){const store=database.createObjectStore(storeName,{keyPath:'id'});for(const value of seed[storeName])store.put(structuredClone(value));}};request.onsuccess=()=>{request.result.close();resolve();};request.onerror=()=>reject(request.error);});
 }
 
+function createFrozenVersionFourteenDatabase(databaseName:string):Promise<void>{
+  const previousStores=FOUNDATION_STORES.filter((store)=>!LEGAL_INSPECTION_STORES.includes(store as (typeof LEGAL_INSPECTION_STORES)[number]));
+  const rows:Partial<Record<FoundationStoreName,unknown[]>>={
+    meta:[{id:'schemaVersion',value:14},{id:'seedVersion',value:'frozen-schema-14-before-legal'},{id:'frozen-v14-marker',value:'preserve-exactly'} satisfies MetaRecord],
+    sessions:[{id:'active-session',activeUserId:'frozen-v14-user',switchedAt:'2026-04-01T00:00:00.000Z',version:1} satisfies FoundationSession],
+    users:[{id:'frozen-v14-user',actorId:'actor-frozen-v14',name:'کاربر مستقل نسخه چهارده',roleTitle:'نقش مستقل نسخه چهارده',roles:['نقش مستقل نسخه چهارده'],roleId:'frozen-v14-role',roleIds:['frozen-v14-role'],status:'active',username:'frozen.v14',passwordHash:'fixture-only',passwordUpdatedAt:'2026-04-01T00:00:00.000Z',isAdmin:false,description:'fixture واقعی و مستقل از seed جاری',companyId:'company-shavaz',unitId:'unit-management',scope:'SELF',permissions:[],permissionEntitlements:[],permissionGrants:[],permissionDenials:[],accent:'#345678',initials:'ف.چ'} satisfies LocalUser],
+    security_roles:[{id:'frozen-v14-role',name:'نقش مستقل نسخه چهارده',description:'fixture ثابت schema14',status:'active',protected:false,scope:'SELF',permissions:[],createdAt:'2026-04-01T00:00:00.000Z',updatedAt:'2026-04-01T00:00:00.000Z',version:1} satisfies SecurityRole],
+  };
+  return new Promise((resolve,reject)=>{const request=indexedDB.open(databaseName,14);request.onupgradeneeded=()=>{const database=request.result;for(const storeName of previousStores){const store=database.createObjectStore(storeName,{keyPath:'id'});for(const value of rows[storeName]??[])store.put(structuredClone(value));}};request.onsuccess=()=>{request.result.close();resolve();};request.onerror=()=>reject(request.error);});
+}
+
 function createFrozenVersionElevenDatabase(databaseName:string):Promise<void>{
   const stores=Object.fromEntries(FOUNDATION_STORES.map((store)=>[store,[]])) as Record<FoundationStoreName,unknown[]>;
   const previousStores=FOUNDATION_STORES.filter((store)=>!['projects','chat_preferences','recruitment_candidate_files'].includes(store));
@@ -124,7 +139,7 @@ describe('IndexedDB schema 9 to current schema migration', () => {
     const service = new LocalFoundationService(storage);
     const state = await service.initialize();
 
-    expect(FOUNDATION_SCHEMA_VERSION).toBe(14);
+    expect(FOUNDATION_SCHEMA_VERSION).toBe(17);
     expect(state.users.find((user) => user.id === 'persona-product-owner')?.name).toBe('نام ویرایش‌شده و حفظ‌شده کاربر');
     expect(await storage.get<MetaRecord>('meta', 'custom-user-preference')).toEqual({id: 'custom-user-preference', value: 'keep-me'});
 
@@ -147,7 +162,7 @@ describe('IndexedDB schema 9 to current schema migration', () => {
       versionRequest.onsuccess = () => { const version = versionRequest.result.version; versionRequest.result.close(); resolve(version); };
       versionRequest.onerror = () => reject(versionRequest.error);
     });
-    expect(actualVersion).toBe(14);
+    expect(actualVersion).toBe(17);
   });
 });
 
@@ -170,6 +185,77 @@ describe('tenant ownership migration for legacy organization units',()=>{
     const afterFirst=await storage.getAll('organizational_units');
     await service.initialize();
     expect(await storage.getAll('organizational_units')).toEqual(afterFirst);
+  });
+});
+
+describe('schema 15 snapshot compatibility for legal operations',()=>{
+  it('allows only the four schema 16 operation stores to be absent',()=>{
+    const seed=createSeedData() as Record<FoundationStoreName,unknown[]>;
+    const phaseTwo=new Set<FoundationStoreName>(['legal_proceedings','legal_notices','legal_deadlines','legal_document_metadata']);
+    const stores=Object.fromEntries(FOUNDATION_STORES.filter((store)=>!phaseTwo.has(store)).map((store)=>[store,seed[store]]));
+    const snapshot={format:'tapra2-local-snapshot',schemaVersion:15,exportedAt:'2026-08-28T00:00:00.000Z',stores,checksum:'fixture-checksum'};
+    expect(()=>validateSnapshotShape(snapshot)).not.toThrow();
+    const withoutPhaseOne={...snapshot,stores:{...stores}};
+    delete (withoutPhaseOne.stores as Record<string,unknown>).legal_cases;
+    expect(()=>validateSnapshotShape(withoutPhaseOne)).toThrow('legal_cases');
+  });
+  it('allows only the two schema 17 company-profile stores to be absent from schema 16 snapshots',()=>{
+    const seed=createSeedData() as Record<FoundationStoreName,unknown[]>;const profileStores=new Set<FoundationStoreName>(['organization_legal_entity_officers','organization_legal_entity_history']);const stores=Object.fromEntries(FOUNDATION_STORES.filter((store)=>!profileStores.has(store)).map((store)=>[store,seed[store]]));const snapshot={format:'tapra2-local-snapshot',schemaVersion:16,exportedAt:'2026-08-29T00:00:00.000Z',stores,checksum:'fixture-checksum'};expect(()=>validateSnapshotShape(snapshot)).not.toThrow();const missingRequired={...snapshot,stores:{...stores}};delete (missingRequired.stores as Record<string,unknown>).organization_legal_entities;expect(()=>validateSnapshotShape(missingRequired)).toThrow('organization_legal_entities');
+  });
+});
+
+describe('schema 15 to legal operations schema 16 migration',()=>{
+  it('adds only the operational child stores and preserves the phase-one case byte for byte',async()=>{
+    const databaseName=`tapra2-schema15-legal-operations-${crypto.randomUUID()}`;const seed=createSeedData() as Record<FoundationStoreName,unknown[]>;const owner=(seed.users as LocalUser[]).find((user)=>user.id==='persona-product-owner')!;const now='2026-08-28T00:00:00.000Z';const entity:LegalEntity={id:'frozen-v15-entity',tenantId:owner.companyId,companyId:owner.companyId,displayName:'شخصیت ثابت نسخه پانزده',status:'active',version:2,createdAt:now,updatedAt:now};const record:LegalCase={id:'frozen-v15-case',tenantId:owner.companyId,companyId:owner.companyId,owningLegalEntityId:entity.id,trackingCode:'LEGAL-1405-00999',title:'پرونده ثابت نسخه پانزده',caseType:'آزمایشی ثابت',status:'open',primaryOwnerUserId:owner.id,qaGenerated:true,realDataProhibited:true,version:4,createdByActorId:owner.actorId,createdByUserId:owner.id,createdAt:now,updatedAt:now};seed.organization_legal_entities=[entity];seed.legal_cases=[record];(seed.meta as MetaRecord[]).find((item)=>item.id==='schemaVersion')!.value=15;(seed.meta as MetaRecord[]).find((item)=>item.id==='seedVersion')!.value='complete-local-erp-v1.44-tenant-treasury-master';const phase2Stores=new Set(['legal_proceedings','legal_notices','legal_deadlines','legal_document_metadata','organization_legal_entity_officers','organization_legal_entity_history']);const oldStores=FOUNDATION_STORES.filter((store)=>!phase2Stores.has(store));
+    await new Promise<void>((resolve,reject)=>{const request=indexedDB.open(databaseName,15);request.onupgradeneeded=()=>{for(const storeName of oldStores){const store=request.result.createObjectStore(storeName,{keyPath:'id'});for(const value of seed[storeName])store.put(structuredClone(value));}};request.onsuccess=()=>{request.result.close();resolve();};request.onerror=()=>reject(request.error);});
+    const storage=new IndexedDBAdapter(databaseName);const service=new LocalFoundationService(storage);await service.initialize();expect(await storage.get<LegalCase>('legal_cases',record.id)).toEqual(record);expect(await storage.getAll('legal_proceedings')).toEqual([]);expect(await storage.getAll('legal_notices')).toEqual([]);expect(await storage.getAll('legal_deadlines')).toEqual([]);expect(await storage.getAll('legal_document_metadata')).toEqual([]);expect(await storage.getAll('organization_legal_entity_officers')).toEqual([]);expect(await storage.getAll('organization_legal_entity_history')).toEqual([]);const definitionsAfter=await storage.getAll('legal_cases');await service.initialize();expect(await storage.getAll('legal_cases')).toEqual(definitionsAfter);expect((await storage.get<MetaRecord>('meta','schemaVersion'))?.value).toBe(17);
+  });
+});
+
+describe('shared Treasury master seed upgrade',()=>{
+  it('preserves existing legal master rows and grants the approved shared role without duplicating data',async()=>{
+    const databaseName=`tapra2-shared-treasury-${crypto.randomUUID()}`;
+    const seed=createSeedData() as Record<FoundationStoreName,unknown[]>;
+    (seed.meta as MetaRecord[]).find((item)=>item.id==='seedVersion')!.value='complete-local-erp-v1.42-legal-inspection-foundation';
+    seed.security_roles=(seed.security_roles as SecurityRole[]).filter((role)=>role.id!=='role-financial-reference-steward');
+    seed.users=(seed.users as LocalUser[]).map((user)=>user.id==='persona-product-owner'?{
+      ...user,
+      roleIds:user.roleIds.filter((roleId)=>roleId!=='role-financial-reference-steward'),
+      permissions:user.permissions.filter((permission)=>!permission.startsWith('treasury.reference.')&&!permission.startsWith('treasury.bank.')),
+      permissionEntitlements:user.permissionEntitlements.filter((item)=>!item.permission.startsWith('treasury.reference.')&&!item.permission.startsWith('treasury.bank.')),
+    }:user);
+    const now='2026-08-28T00:00:00.000Z';
+    const entity:LegalEntity={id:'preserved-entity',tenantId:'company-legal-demo',companyId:'company-legal-demo',displayName:'شخصیت حفظ‌شده',status:'active',version:1,createdAt:now,updatedAt:now};
+    const bank={id:'preserved-bank',code:'PRESERVED',displayName:'بانک حفظ‌شده',status:'active',version:1,createdAt:now,updatedAt:now} as unknown as BankInstitution;
+    const account:CompanyBankAccountDetail={id:'preserved-account',tenantId:entity.tenantId,companyId:entity.companyId,legalEntityId:entity.id,bankInstitutionId:bank.id,maskedCardNumber:'****-****-****-4242',last4:'4242',status:'active',version:1,createdAt:now,updatedAt:now};
+    seed.organization_legal_entities=[entity];seed.bank_institutions=[bank];seed.company_bank_account_details=[account];
+    const productOwner=(seed.users as LocalUser[]).find((user)=>user.id==='persona-product-owner')!;
+    entity.tenantId=productOwner.companyId;entity.companyId=productOwner.companyId;account.tenantId=productOwner.companyId;account.companyId=productOwner.companyId;
+    const storage=new IndexedDBAdapter(databaseName);await storage.replaceAll(seed);const service=new LocalFoundationService(storage);
+    let state=await service.initialize();
+    expect(state.activeUser.roleIds).toContain('role-financial-reference-steward');
+    expect(state.roles.find((role)=>role.id==='role-financial-reference-steward')?.permissions).toContain(TREASURY_MASTER_PERMISSIONS.view);
+    expect(state.treasuryMaster?.legalEntities.map((item)=>item.id)).toEqual(['preserved-entity']);
+    expect(state.treasuryMaster?.bankAccounts[0]).toMatchObject({id:'preserved-account',last4:'4242'});
+    expect(state.treasuryMaster?.bankInstitutions).toEqual([expect.objectContaining({id:bank.id,tenantId:productOwner.companyId,companyId:productOwner.companyId})]);
+    expect(await storage.get<LegalEntity>('organization_legal_entities',entity.id)).toEqual(entity);
+    state=await service.initialize();
+    expect(state.roles.filter((role)=>role.id==='role-financial-reference-steward')).toHaveLength(1);
+    expect((await storage.getAll<LegalEntity>('organization_legal_entities')).filter((item)=>item.id===entity.id)).toHaveLength(1);
+  });
+
+  it('preserves ambiguous legacy ids but fails closed until the bank owner is resolved',async()=>{
+    const storage=new IndexedDBAdapter(`tapra2-ambiguous-bank-${crypto.randomUUID()}`);const seed=createSeedData() as Record<FoundationStoreName,unknown[]>;const now='2026-08-28T00:00:00.000Z';
+    (seed.meta as MetaRecord[]).find((item)=>item.id==='seedVersion')!.value='complete-local-erp-v1.43-shared-treasury-master';
+    const owner=(seed.users as LocalUser[]).find((user)=>user.id==='persona-product-owner')!;const entity:LegalEntity={id:'ambiguous-owner',tenantId:owner.companyId,companyId:owner.companyId,displayName:'شخصیت مصنوعی مالک حساب مبهم',status:'active',version:1,createdAt:now,updatedAt:now};
+    const legacyBank={id:'ambiguous-bank',code:'AMBIGUOUS',displayName:'بانک مصنوعی با مالکیت مبهم',status:'active',version:1,createdAt:now,updatedAt:now} as unknown as BankInstitution;
+    const localAccount:CompanyBankAccountDetail={id:'ambiguous-account-local',tenantId:owner.companyId,companyId:owner.companyId,legalEntityId:entity.id,bankInstitutionId:legacyBank.id,maskedCardNumber:'************1111',last4:'1111',status:'active',version:1,createdAt:now,updatedAt:now};
+    const foreignAccount:CompanyBankAccountDetail={...localAccount,id:'ambiguous-account-foreign',tenantId:'company-other',companyId:'company-other',legalEntityId:'foreign-entity',maskedCardNumber:'************2222',last4:'2222'};
+    seed.organization_legal_entities=[entity];seed.bank_institutions=[legacyBank];seed.company_bank_account_details=[localAccount,foreignAccount];await storage.replaceAll(seed);const service=new LocalFoundationService(storage);
+    let state=await service.initialize();const unresolved=`unresolved-company:${legacyBank.id}`;expect(await storage.get<BankInstitution>('bank_institutions',legacyBank.id)).toMatchObject({id:legacyBank.id,tenantId:unresolved,companyId:unresolved});expect((await storage.getAll<CompanyBankAccountDetail>('company_bank_account_details')).map((item)=>item.id).sort()).toEqual([foreignAccount.id,localAccount.id].sort());expect(state.treasuryMaster?.bankAccounts).toEqual([]);expect(state.legalInspection?.bankAccounts).toEqual([]);
+    await expect(service.createLegalCase({title:'پرونده مصنوعی با بانک مبهم',caseType:'آزمایشی',owningLegalEntityId:entity.id,bankAccountId:localAccount.id,parties:[{kind:'person',displayName:'شاکی مصنوعی مالکیت مبهم',role:'complainant'},{kind:'person',displayName:'پرداخت‌کننده مصنوعی مالکیت مبهم',role:'payer'}]},'ambiguous-bank-case')).rejects.toThrow('بانک مرجع');
+    await service.initialize();expect(await storage.get<BankInstitution>('bank_institutions',legacyBank.id)).toMatchObject({tenantId:unresolved,companyId:unresolved});
+    await storage.put('bank_institutions',{...(await storage.get<BankInstitution>('bank_institutions',legacyBank.id))!,tenantId:owner.companyId,companyId:owner.companyId});state=await service.loadState();expect(state.treasuryMaster?.bankAccounts.map((item)=>item.id)).toEqual([localAccount.id]);expect(state.legalInspection?.bankAccounts.map((item)=>item.id)).toEqual([localAccount.id]);
   });
 });
 
@@ -277,7 +363,30 @@ describe('v1.40 generated letter workflow repair',()=>{
   });
 });
 
-describe('schema 11 backup compatibility',()=>{
+describe('legacy backup compatibility',()=>{
+  it('upgrades a frozen real IndexedDB schema 14 database and preserves its independent rows idempotently',async()=>{
+    const databaseName=`tapra2-frozen-schema-14-db-${crypto.randomUUID()}`;await createFrozenVersionFourteenDatabase(databaseName);
+    const storage=new IndexedDBAdapter(databaseName);const service=new LocalFoundationService(storage);let state=await service.initialize();
+    expect(state.users.some((user)=>user.id==='frozen-v14-user')).toBe(true);expect(await storage.get<MetaRecord>('meta','frozen-v14-marker')).toEqual({id:'frozen-v14-marker',value:'preserve-exactly'});
+    for(const store of LEGAL_INSPECTION_STORES)expect(await storage.getAll(store)).toEqual([]);
+    state=await service.initialize();expect(state.users.filter((user)=>user.id==='frozen-v14-user')).toHaveLength(1);expect((await storage.get<MetaRecord>('meta','schemaVersion'))?.value).toBe(17);
+  });
+  it('restores a schema 14 backup with empty legal stores and preserves every prior row',async()=>{
+    const databaseName=`tapra2-schema-14-backup-${crypto.randomUUID()}`;
+    const storage=new IndexedDBAdapter(databaseName);await storage.replaceAll(createSeedData());
+    const current=await storage.exportSnapshot();
+    const legacyStores=Object.fromEntries(Object.entries(current.stores).filter(([store])=>!LEGAL_INSPECTION_STORES.includes(store as (typeof LEGAL_INSPECTION_STORES)[number])));
+    const payload={format:current.format,schemaVersion:14,seedVersion:'complete-local-erp-v1.41-letter-policy-repair',exportedAt:current.exportedAt,stores:legacyStores};
+    const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(payload)));let binary='';for(const byte of new Uint8Array(digest))binary+=String.fromCharCode(byte);
+    const preservedUsers=structuredClone(legacyStores.users);
+    const preservedLetters=structuredClone(legacyStores.letters);
+    await storage.importSnapshot({...payload,checksum:btoa(binary)} as unknown as import('./model').SnapshotManifest);
+    for(const store of LEGAL_INSPECTION_STORES) expect(await storage.getAll(store)).toEqual([]);
+    expect(await storage.getAll('users')).toEqual(preservedUsers);
+    expect(await storage.getAll('letters')).toEqual(preservedLetters);
+    expect((await storage.get<MetaRecord>('meta','schemaVersion'))?.value).toBe(17);
+  });
+
   it('restores a schema 13 backup and adds an empty approval-round store without rewriting prior data',async()=>{
     const databaseName=`tapra2-schema-13-backup-${crypto.randomUUID()}`;
     const storage=new IndexedDBAdapter(databaseName);await storage.replaceAll(createSeedData());
@@ -289,7 +398,7 @@ describe('schema 11 backup compatibility',()=>{
     await storage.importSnapshot({...payload,checksum:btoa(binary)} as unknown as import('./model').SnapshotManifest);
     expect(await storage.getAll('workflow_approval_rounds')).toEqual([]);
     expect(await storage.getAll('users')).toEqual(preservedUsers);
-    expect((await storage.get<MetaRecord>('meta','schemaVersion'))?.value).toBe(14);
+    expect((await storage.get<MetaRecord>('meta','schemaVersion'))?.value).toBe(17);
   });
 
   it('restores a schema 12 backup and adds the candidate file store without changing prior records',async()=>{
@@ -303,7 +412,7 @@ describe('schema 11 backup compatibility',()=>{
     await storage.importSnapshot({...payload,checksum:btoa(binary)} as unknown as import('./model').SnapshotManifest);
     expect(await storage.getAll('recruitment_candidate_files')).toEqual([]);
     expect((await storage.getAll('users')).length).toBe(userCount);
-    expect((await storage.get<MetaRecord>('meta','schemaVersion'))?.value).toBe(14);
+    expect((await storage.get<MetaRecord>('meta','schemaVersion'))?.value).toBe(17);
   });
 
   it('verifies the old checksum before adding the schema 12 stores',async()=>{
@@ -318,7 +427,7 @@ describe('schema 11 backup compatibility',()=>{
     await storage.importSnapshot(legacy);
     expect(await storage.getAll('projects')).toEqual([]);
     expect(await storage.getAll('chat_preferences')).toEqual([]);
-    expect((await storage.getAll<MetaRecord>('meta')).find((item)=>item.id==='schemaVersion')?.value).toBe(14);
+    expect((await storage.getAll<MetaRecord>('meta')).find((item)=>item.id==='schemaVersion')?.value).toBe(17);
     expect(await storage.getAll('recruitment_candidate_files')).toEqual([]);
     expect((await storage.getAll<LocalUser>('users')).length).toBeGreaterThan(0);
   });
@@ -334,7 +443,7 @@ describe('schema 11 backup compatibility',()=>{
     expect(state.workflows.some((workflow)=>workflow.moduleId==='project')).toBe(true);
     expect(await storage.get<MetaRecord>('meta','frozen-snapshot-marker')).toEqual({id:'frozen-snapshot-marker',value:'preserve'});
     expect((await storage.get<OperationalRecord>('tasks','legacy-snapshot-task'))?.payload.legacyMarker).toBe('snapshot-v11');
-    expect((await storage.get<MetaRecord>('meta','schemaVersion'))?.value).toBe(14);
+    expect((await storage.get<MetaRecord>('meta','schemaVersion'))?.value).toBe(17);
     expect(await storage.getAll('chat_preferences')).toEqual([]);
   });
 });

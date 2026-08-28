@@ -9,6 +9,8 @@ import {COMPANY_ID, SEED_TIME} from './seedConstants';
 import {ORGANIZATION_ROLE_GRANTS} from './organizationAccess';
 import {defaultApprovalStages} from './workflowPolicy';
 import {createDefaultSalesCompensationRecord} from './salesCompensation';
+import {LEGAL_PERMISSIONS} from './legal-inspection/policy';
+import {TREASURY_MASTER_PERMISSIONS} from './treasury-master/policy';
 
 export {COMPANY_ID, SEED_TIME} from './seedConstants';
 
@@ -49,6 +51,9 @@ export const ADMIN_OPERATIONAL_PERMISSIONS: PermissionCode[] = [
 ];
 
 export const ROLE_TEMPLATES: RoleTemplate[] = [
+  {id: 'role-financial-reference-steward', title: 'مدیر اطلاعات پایه مالی', description: 'مدیریت مرجع مشترک شخصیت‌های حقوقی، بانک‌ها و حساب‌های ماسک‌شده', scope: 'COMPANY', permissions: [...shellBase, TREASURY_MASTER_PERMISSIONS.view, TREASURY_MASTER_PERMISSIONS.manage, TREASURY_MASTER_PERMISSIONS.officerView, TREASURY_MASTER_PERMISSIONS.officerManage, TREASURY_MASTER_PERMISSIONS.bankMaskedView, TREASURY_MASTER_PERMISSIONS.bankAccountManage]},
+  {id: 'role-legal-manager', title: 'مدیر حقوقی', description: 'مدیریت پرونده‌های حقوقی و مصرف مرجع مشترک خزانه با دسترسی صریح', scope: 'COMPANY', permissions: [...shellBase, ...Object.values(LEGAL_PERMISSIONS), TREASURY_MASTER_PERMISSIONS.view, TREASURY_MASTER_PERMISSIONS.officerView, TREASURY_MASTER_PERMISSIONS.bankMaskedView]},
+  {id: 'role-legal-intake', title: 'پذیرش حقوقی', description: 'ثبت و مشاهده اطلاعات پایه پرونده و ابلاغ متادیتایی با حساب بانکی ماسک‌شده', scope: 'COMPANY', permissions: [...shellBase, LEGAL_PERMISSIONS.caseView, LEGAL_PERMISSIONS.caseCreate, LEGAL_PERMISSIONS.partyManage, LEGAL_PERMISSIONS.bankMaskedView, LEGAL_PERMISSIONS.masterDataView, LEGAL_PERMISSIONS.invoiceSummaryView, LEGAL_PERMISSIONS.proceedingView, LEGAL_PERMISSIONS.noticeView, LEGAL_PERMISSIONS.noticeManage, LEGAL_PERMISSIONS.deadlineView, LEGAL_PERMISSIONS.documentMetadataView, TREASURY_MASTER_PERMISSIONS.view, TREASURY_MASTER_PERMISSIONS.officerView, TREASURY_MASTER_PERMISSIONS.bankMaskedView]},
   {id: 'role-admin', title: 'ادمین', description: 'مدیریت کامل محصول محلی، سازمان و دسترسی‌ها', scope: 'COMPANY', permissions: ADMIN_OPERATIONAL_PERMISSIONS},
   {id: 'role-system-admin', title: 'مدیر سامانه', description: 'مدیریت کاربران، ساختار سازمان، نقش‌ها و دادهٔ محلی؛ بدون اختیار تجاری ضمنی', scope: 'COMPANY', permissions: [...shellBase, 'foundation.users.view', 'foundation.users.edit', 'foundation.users.status.manage', 'foundation.users.qa_login', 'foundation.qa.view', 'foundation.qa.manage', 'foundation.policy.inspect', 'foundation.audit.view', 'foundation.data.export', 'foundation.data.manage', 'foundation.workflow.manage', 'foundation.reports.view', 'organization.units.view', 'organization.units.manage', 'organization.positions.view', 'organization.positions.manage', 'organization.users.create', 'organization.users.password.manage', 'organization.roles.view', 'organization.roles.manage', 'organization.roles.assign', 'organization.personnel.view', 'organization.personnel.manage', 'organization.personnel.changes.review', 'organization.personnel.banking.view', 'organization.personnel.banking.manage', 'organization.personnel.account.manage', 'organization.registrations.view', 'organization.registrations.activate']},
   {id: 'role-finance-requester', title: 'درخواست‌کننده مالی', description: 'ثبت درخواست در محدودهٔ کاری خود', scope: 'SELF', permissions: [...employeeSelfService, 'business.request.create']},
@@ -65,6 +70,7 @@ export const ROLE_TEMPLATES: RoleTemplate[] = [
       ...role.permissions,
       ...communicationsSelfService,
       ...(ORGANIZATION_ROLE_GRANTS[role.id] ?? []),
+      ...(role.id==='role-treasury-manager-v1'?[TREASURY_MASTER_PERMISSIONS.view,TREASURY_MASTER_PERMISSIONS.manage,TREASURY_MASTER_PERMISSIONS.officerView,TREASURY_MASTER_PERMISSIONS.officerManage,TREASURY_MASTER_PERMISSIONS.bankMaskedView,TREASURY_MASTER_PERMISSIONS.bankAccountManage]:[]),
       ...(['role-sales-vice', 'role-sales-manager', 'role-senior-sales-supervisor', 'role-sales-supervisor', 'role-sales-seller', 'role-purchase-requester', 'role-purchase-approver', 'role-treasury-executor-v1'].includes(role.id) ? employeeSelfService : []),
     ])],
   })),
@@ -160,6 +166,7 @@ export const SEED_USER_ROLE_ADDITIONS: Record<string, string[]> = Object.fromEnt
   ADMINISTRATIVE_ADVANCE_REQUESTER_USER_IDS.map((id) => [id, ['role-employee-advance-requester']]),
 );
 Object.assign(SEED_USER_ROLE_ADDITIONS, {
+  'persona-product-owner': ['role-legal-manager','role-financial-reference-steward'],
   'persona-finance-requester': ['role-employee-advance-requester','role-finance-requester-v1'],
   'persona-branch-approver': ['role-employee-advance-requester','role-treasury-manager-v1'],
   'persona-sales-senior-poonak': ['role-employee-advance-requester','role-advance-branch-manager'],
@@ -179,7 +186,7 @@ function user(input: SeedUserInput): LocalUser {
 }
 
 export const LOCAL_USERS: LocalUser[] = [
-  user({id: 'persona-product-owner', actorId: 'actor-product-owner', name: 'ایلیا بیات', username: 'admin', roleId: 'role-admin', roleIds: ['role-admin'], status: 'active', companyId: COMPANY_ID, unitId: 'unit-management', positionId: 'position-ceo', personnelId: 'personnel-admin', accent: '#6957d9', initials: 'ا.ب', isAdmin: true}),
+  user({id: 'persona-product-owner', actorId: 'actor-product-owner', name: 'ایلیا بیات', username: 'admin', roleId: 'role-admin', roleIds: ['role-admin','role-legal-manager','role-financial-reference-steward'], status: 'active', companyId: COMPANY_ID, unitId: 'unit-management', positionId: 'position-ceo', personnelId: 'personnel-admin', accent: '#6957d9', initials: 'ا.ب', isAdmin: true}),
   user({id: 'persona-system-admin', actorId: 'actor-system-admin', name: 'سارا احمدی', username: 's.ahmadi', roleId: 'role-system-admin', roleIds: ['role-system-admin'], status: 'active', companyId: COMPANY_ID, unitId: 'unit-management', positionId: 'position-manager', managerUserId: 'persona-product-owner', personnelId: 'personnel-sara', accent: '#0d9488', initials: 'س.ا', isAdmin: false}),
   user({id: 'persona-finance-requester', actorId: 'actor-finance-requester', name: 'مهدی رضایی', username: 'm.rezaei', roleId: 'role-finance-requester', roleIds: ['role-finance-requester'], status: 'active', companyId: COMPANY_ID, unitId: 'unit-finance', positionId: 'position-specialist', managerUserId: 'persona-branch-approver', personnelId: 'personnel-mehdi', accent: '#0284c7', initials: 'م.ر', isAdmin: false}),
   user({id: 'persona-branch-approver', actorId: 'actor-branch-approver', name: 'نیلوفر کریمی', username: 'n.karimi', roleId: 'role-branch-approver', roleIds: ['role-branch-approver'], status: 'active', companyId: COMPANY_ID, unitId: 'unit-finance', positionId: 'position-manager', managerUserId: 'persona-product-owner', personnelId: 'personnel-niloofar', accent: '#7c3aed', initials: 'ن.ک', isAdmin: false}),
@@ -298,6 +305,32 @@ export function applyRole(userRecord: LocalUser, roleId: string): LocalUser {
 }
 
 export const PERMISSION_CATALOG: PermissionCatalogItem[] = [
+  {code: LEGAL_PERMISSIONS.caseView, label: 'مشاهده پایه پرونده حقوقی', description: 'مشاهده اطلاعات پایه پرونده در محدوده مجاز', domain: 'legal', available: true},
+  {code: LEGAL_PERMISSIONS.caseCreate, label: 'ثبت پرونده حقوقی', description: 'ایجاد پرونده آزمایشی حقوقی با ثبت اتمیک', domain: 'legal', available: true},
+  {code: LEGAL_PERMISSIONS.caseEdit, label: 'ویرایش پرونده حقوقی', description: 'ویرایش کنترل‌شده اطلاعات پایه پرونده', domain: 'legal', available: true},
+  {code: LEGAL_PERMISSIONS.partyIdentityView, label: 'مشاهده هویت طرف پرونده', description: 'مشاهده فیلدهای هویتی محافظت‌شده در پرونده مجاز', domain: 'legal', available: true},
+  {code: LEGAL_PERMISSIONS.partyManage, label: 'مدیریت طرف پرونده', description: 'ثبت و اصلاح اشخاص مرتبط پرونده', domain: 'legal', available: true},
+  {code: LEGAL_PERMISSIONS.bankMaskedView, label: 'مشاهده حساب ماسک‌شده', description: 'مشاهده فقط چهار رقم پایانی و نمایش ماسک‌شده', domain: 'legal', available: true},
+  {code: LEGAL_PERMISSIONS.bankFullView, label: 'مشاهده کامل حساب حقوقی', description: 'دسترسی حساس و مستقل به شماره کامل حساب', domain: 'legal', available: true},
+  {code: LEGAL_PERMISSIONS.bankAccountManage, label: 'مدیریت حساب شخصیت حقوقی', description: 'ثبت حساب آزمایشی برای شخصیت حقوقی', domain: 'legal', available: true},
+  {code: LEGAL_PERMISSIONS.masterDataView, label: 'مشاهده داده پایه حقوقی', description: 'مشاهده شخصیت حقوقی و بانک‌های مجاز', domain: 'legal', available: true},
+  {code: LEGAL_PERMISSIONS.masterDataManage, label: 'مدیریت داده پایه حقوقی', description: 'ثبت شخصیت حقوقی و بانک آزمایشی', domain: 'legal', available: true},
+  {code: LEGAL_PERMISSIONS.invoiceSummaryView, label: 'مشاهده خلاصه فاکتور مرتبط', description: 'مشاهده فقط کد، وضعیت و مبلغ فاکتورهای پیوندشده به پرونده', domain: 'legal', available: true},
+  {code: LEGAL_PERMISSIONS.proceedingView, label: 'مشاهده روند دادرسی', description: 'مشاهده خلاصه روند قضایی پرونده مجاز', domain: 'legal', available: true},
+  {code: LEGAL_PERMISSIONS.proceedingManage, label: 'مدیریت روند دادرسی', description: 'ثبت و تغییر کنترل‌شده روند قضایی مصنوعی', domain: 'legal', available: true},
+  {code: LEGAL_PERMISSIONS.noticeView, label: 'مشاهده فراداده ابلاغ', description: 'مشاهده اطلاعات غیرمحتوایی ابلاغیه پرونده مجاز', domain: 'legal', available: true},
+  {code: LEGAL_PERMISSIONS.noticeManage, label: 'مدیریت ابلاغ', description: 'ثبت و تأیید دریافت ابلاغیه مصنوعی', domain: 'legal', available: true},
+  {code: LEGAL_PERMISSIONS.deadlineView, label: 'مشاهده مهلت حقوقی', description: 'مشاهده مهلت‌های اقدام پرونده مجاز', domain: 'legal', available: true},
+  {code: LEGAL_PERMISSIONS.deadlineManage, label: 'مدیریت مهلت حقوقی', description: 'ثبت و تکمیل مهلت با کنترل نسخه', domain: 'legal', available: true},
+  {code: LEGAL_PERMISSIONS.documentMetadataView, label: 'مشاهده مشخصات سند', description: 'مشاهده فقط فراداده سند، بدون فایل یا محتوا', domain: 'legal', available: true},
+  {code: LEGAL_PERMISSIONS.documentMetadataManage, label: 'مدیریت مشخصات سند', description: 'ثبت نسخه متادیتایی سند بدون بارگذاری فایل', domain: 'legal', available: true},
+  {code: TREASURY_MASTER_PERMISSIONS.view, label: 'مشاهده اطلاعات پایه بانکی', description: 'مشاهده شخصیت حقوقی و کاتالوگ بانک مشترک', domain: 'treasury', available: true},
+  {code: TREASURY_MASTER_PERMISSIONS.manage, label: 'مدیریت اطلاعات پایه بانکی', description: 'ثبت و تغییر وضعیت شخصیت حقوقی و بانک', domain: 'treasury', available: true},
+  {code: TREASURY_MASTER_PERMISSIONS.officerView, label: 'مشاهده مدیران و اعضای شخصیت حقوقی', description: 'مشاهده ترکیب جاری و سابقه نسخه‌دار مدیران، اعضا و شرکا', domain: 'treasury', available: true},
+  {code: TREASURY_MASTER_PERMISSIONS.officerManage, label: 'مدیریت مدیران و اعضای شخصیت حقوقی', description: 'ثبت و ویرایش نسخه‌دار مدیران، اعضای هیئت‌مدیره و شرکا', domain: 'treasury', available: true},
+  {code: TREASURY_MASTER_PERMISSIONS.bankMaskedView, label: 'مشاهده حساب بانکی ماسک‌شده', description: 'مشاهده و انتخاب حساب بدون مقدار کامل', domain: 'treasury', available: true},
+  {code: TREASURY_MASTER_PERMISSIONS.bankFullView, label: 'مشاهده کامل حساب بانکی', description: 'مجوز حساس مستقل؛ در prototype UI فعال نیست', domain: 'treasury', available: true},
+  {code: TREASURY_MASTER_PERMISSIONS.bankAccountManage, label: 'مدیریت حساب بانکی شرکت', description: 'ثبت و تغییر وضعیت حساب مرجع مشترک', domain: 'treasury', available: true},
   {code: 'foundation.dashboard.view', label: 'مشاهده نمای امروز', description: 'ورود به داشبورد و میان‌برهای مجاز', domain: 'management', available: true},
   {code: 'foundation.preferences.manage', label: 'تنظیمات ظاهری شخصی', description: 'تنظیم پوسته، رنگ و خوانایی رابط کاربری', domain: 'management', available: true},
   {code: 'foundation.policy.inspect', label: 'مشاهده خط‌مشی دسترسی', description: 'مشاهده قواعد محدوده و کنترل‌های دسترسی بدون امکان تغییر', domain: 'management', available: true},
